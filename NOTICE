@@ -1,0 +1,7 @@
+Copyright (C) 2026 Conrad Rockenhaus / Skyphusion Labs
+
+Prism Control Plane is licensed under AGPL-3.0-only. See LICENSE for the full text.
+
+This repository is the multi-tenant / commercial control plane for Prism
+(skyphusion-labs/prism): plan entitlements, provisioning, and host-billed
+inference gates. The framework stays AGPL so the commons stays open.
