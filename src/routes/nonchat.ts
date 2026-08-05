@@ -408,12 +408,23 @@ async function runUpstream(
   }
   if (result.outcome === "upstream_error") {
     await recordUnmetered(ctx, gate, "upstream_error", result.status);
+    let detail = result.detail.slice(0, 300);
+    // Grok video consistently returns bare CF 7003 on this plane (t2v and i2v); Veo/Seedance work.
+    if (
+      gate.model.id.startsWith("xai/grok-imagine-video") &&
+      /7003|User Input Error/i.test(detail)
+    ) {
+      detail =
+        `Grok video is rejected by Cloudflare on this plane (7003 User Input Error). ` +
+        `Grok image still works. Prefer google/veo-3.1-fast or bytedance/seedance-2.0-fast for video. ` +
+        `(upstream: ${result.detail.slice(0, 120)})`;
+    }
     return {
       ok: false,
       response: errorResponse(
         ctx.requestId,
         "upstream_error",
-        result.detail.slice(0, 300),
+        detail.slice(0, 400),
         { upstream_status: result.status },
       ),
     };

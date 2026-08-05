@@ -325,13 +325,11 @@ export function buildVideoParams(modelId: string, prompt: string, imageUrl?: str
       if (prompt) params.prompt = prompt;
       return params;
     }
-    // xAI Grok video i2v: image as { url } object (CF docs); duration integer.
+    // xAI Grok video i2v: CF 1.5 docs use image: { url }. Duration integer.
     if (modelId.startsWith("xai/grok-imagine-video")) {
       return {
         prompt,
         duration: 5,
-        aspect_ratio: "16:9",
-        resolution: "720p",
         image: { url: image },
       };
     }
@@ -354,14 +352,12 @@ export function buildVideoParams(modelId: string, prompt: string, imageUrl?: str
     };
   }
   if (modelId.startsWith("xai/grok-imagine-video")) {
-    // CF docs env.AI.run example (no generate_audio). Avoid _operation — some gateway
-    // paths reject it with 7003. Integer duration 1-15.
-    return {
-      prompt,
-      duration: 5,
-      aspect_ratio: "16:9",
-      resolution: "720p",
-    };
+    // CF 7003 with full field sets observed on this plane (2026-08-05). Use the
+    // minimal documented shape: integer duration only. aspect_ratio/resolution
+    // optional in schema; omitting them avoids combo validation failures.
+    // Image (i2v) uses { url } object per CF docs for 1.5-preview.
+    const body: Record<string, unknown> = { prompt, duration: 5 };
+    return body;
   }
   if (modelId.startsWith("bytedance/seedance")) {
     // CF seedance-2.0-mini schema: duration/resolution/aspect_ratio/fps/camera_fixed/watermark required

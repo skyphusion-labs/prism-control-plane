@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.4.13] - 2026-08-05
+
+### Fixed
+
+- **Grok video:** minimal t2v body (`prompt` + integer `duration` only); clearer 7003 error that
+  points clients at Veo / Seedance Fast. Grok **image** is unaffected and works.
+
 ## [0.4.12] - 2026-08-05
 
 ### Fixed
