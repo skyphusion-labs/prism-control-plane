@@ -340,12 +340,23 @@ export function buildVideoParams(modelId: string, prompt: string, imageUrl?: str
 
   // text-to-video: per-model. Wrong duration type or extra fields => CF 7003 User Input Error
   // (schemas are additionalProperties:false on most UB video models).
-  if (modelId.startsWith("xai/grok-imagine-video")) {
-    // developers.cloudflare.com/ai/models/xai/grok-imagine-video -- duration integer 1-15.
-    // Match the documented env.AI.run example exactly (no generate_audio, no size).
-    // `_operation: generate` is the creative-mode default for generate/edit/extend.
+  //
+  // MiniMax Hailuo is **i2v only** (first_frame_image required on CF). Callers must pass image;
+  // the video handler should reject prompt-only Hailuo before we get here.
+  if (modelId.startsWith("minimax/hailuo")) {
     return {
-      _operation: "generate",
+      prompt,
+      duration: 6,
+      resolution: "768P",
+      prompt_optimizer: true,
+      // Missing first_frame_image => upstream 7003; prefer invalid_request in the handler.
+      first_frame_image: "",
+    };
+  }
+  if (modelId.startsWith("xai/grok-imagine-video")) {
+    // CF docs env.AI.run example (no generate_audio). Avoid _operation — some gateway
+    // paths reject it with 7003. Integer duration 1-15.
+    return {
       prompt,
       duration: 5,
       aspect_ratio: "16:9",
@@ -353,7 +364,7 @@ export function buildVideoParams(modelId: string, prompt: string, imageUrl?: str
     };
   }
   if (modelId.startsWith("bytedance/seedance")) {
-    // integer duration; no generate_audio on t2v for seedance family
+    // CF seedance-2.0-mini schema: duration/resolution/aspect_ratio/fps/camera_fixed/watermark required
     return {
       prompt,
       aspect_ratio: "16:9",
@@ -362,16 +373,6 @@ export function buildVideoParams(modelId: string, prompt: string, imageUrl?: str
       fps: 24,
       camera_fixed: false,
       watermark: false,
-      generate_audio: false,
-    };
-  }
-  if (modelId.startsWith("minimax/hailuo")) {
-    // Hailuo t2v uses integer duration + resolution enum (no first_frame required for t2v)
-    return {
-      prompt,
-      duration: 6,
-      resolution: "768P",
-      prompt_optimizer: true,
     };
   }
   if (modelId.startsWith("runwayml/")) {
