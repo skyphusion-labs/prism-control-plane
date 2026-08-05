@@ -213,8 +213,12 @@ is what makes the difference between them visible instead of permanent. `/health
 chat models still have no rate; an unpriced model is refused individually (`model_unpriced`) rather than
 failing readiness, because unpriced is the expected state for much of the catalog.
 
-Refreshing `src/catalog.ts` from `compat/models` is deliberately **not** part of #12. It attacks the same
-staleness from the other end and deserves its own decision about runtime reads versus a committed table.
+Refreshing rates from `compat/models` is deliberately **not** part of #12 and does **not** rewrite
+`src/catalog.ts`. The committed catalog stays the allowlist + disclosure baseline. Runtime rates land
+in `model_prices` via **`POST /admin/catalog/refresh`** (operator, dry-run default), which GETs
+`gateway…/compat/models` (`cost_in` / `cost_out` USD per token → micro-USD per MTok) and joins to
+catalog chat ids (including `@cf` ↔ `workers-ai/@cf`, `xai` ↔ `grok`, `google` ↔ `google-ai-studio`).
+`resolvePrice` already prefers those overrides. Manual operator notes are preserved unless `force: true`.
 
 ## Reconciliation: truing the ledger up against the biller
 

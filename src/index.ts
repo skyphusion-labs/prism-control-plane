@@ -28,6 +28,7 @@ import {
 } from "./routes/admin";
 import { handleMe, handleModels, handleUsage } from "./routes/account";
 import { handleReconcile } from "./routes/reconcile";
+import { handleCatalogRefresh } from "./routes/catalog-refresh";
 import { handleChatCompletions } from "./routes/chat";
 import {
   handleAudioSpeech,
@@ -150,6 +151,9 @@ export async function handleRequest(ctx: Ctx, request: Request): Promise<Respons
     return await handleSetModelPrice(ctx, request);
   }
   if (method === "POST" && path === "/admin/reconcile") return await handleReconcile(ctx, request);
+  if (method === "POST" && path === "/admin/catalog/refresh") {
+    return await handleCatalogRefresh(ctx, request);
+  }
   const revokeClient = method === "POST" ? REVOKE_CLIENT_PATH.exec(path) : null;
   if (revokeClient) return await handleRevokeClient(ctx, request, revokeClient[1]);
   const credit = method === "POST" ? CREDIT_PATH.exec(path) : null;

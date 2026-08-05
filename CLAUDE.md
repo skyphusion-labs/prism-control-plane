@@ -22,8 +22,10 @@ Non-chat doors: `/v1/images/generations`, `/v1/audio/speech`, `/v1/audio/transcr
 short-lived `stt_` ticket) + `GET/WS /v1/stt/stream` (Deepgram Flux via AI binding + `STT_SESSION`
 DO; meters audio minutes, no transcript stored). Browser WS uses the ticket in
 `Sec-WebSocket-Protocol`, never the long-lived `pcp_` key. UB non-@cf non-chat uses the same AI
-binding through the gateway. **Not built:** auto catalog refresh, receipt enrollment,
-reconcile cron, commercial plan numbers. Aviation-grade `main`.
+binding through the gateway. **Catalog rate refresh:** `POST /admin/catalog/refresh` pulls chat
+token rates from AI Gateway `compat/models` into `model_prices` (dry-run default; does not rewrite
+`catalog.ts`). **Not built:** receipt enrollment, reconcile cron, commercial plan numbers.
+Aviation-grade `main`.
 
 **The spend path addresses the AI Gateway host**
 ([#15](https://github.com/skyphusion-labs/prism-control-plane/issues/15)). `src/upstream.ts` POSTs to
