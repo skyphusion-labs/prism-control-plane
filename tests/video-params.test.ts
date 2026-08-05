@@ -11,14 +11,22 @@ describe("buildVideoParams t2v", () => {
       resolution: "720p",
     });
     expect(p).not.toHaveProperty("generate_audio");
+    expect(p).not.toHaveProperty("_operation");
     expect(typeof p.duration).toBe("number");
   });
 
-  it("uses integer duration for seedance t2v", () => {
+  it("uses CF-required seedance t2v fields", () => {
     const p = buildVideoParams("bytedance/seedance-2.0-mini", "waves");
-    expect(p.duration).toBe(5);
-    expect(typeof p.duration).toBe("number");
-    expect(p.generate_audio).toBe(false);
+    expect(p).toMatchObject({
+      prompt: "waves",
+      duration: 5,
+      resolution: "720p",
+      aspect_ratio: "16:9",
+      fps: 24,
+      camera_fixed: false,
+      watermark: false,
+    });
+    expect(p).not.toHaveProperty("generate_audio");
   });
 
   it("uses Veo-style string duration for google/veo", () => {

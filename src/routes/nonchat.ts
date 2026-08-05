@@ -579,6 +579,14 @@ export async function handleVideoGenerations(ctx: Ctx, request: Request): Promis
       '"prompt" or "image" is required for video generation.',
     );
   }
+  // MiniMax Hailuo is image-to-video only on CF (first_frame_image required).
+  if (gate.model.id.startsWith("minimax/hailuo") && !imageUrl) {
+    return errorResponse(
+      ctx.requestId,
+      "invalid_request",
+      `Model "${gate.model.id}" requires an image (i2v). Pass "image" as an https URL or data: URI, or pick a text-to-video model (e.g. bytedance/seedance-2.0-mini, xai/grok-imagine-video, google/veo-3.1-fast).`,
+    );
+  }
   const params = buildVideoParams(gate.model.id, prompt, imageUrl);
   const up = await runUpstream(ctx, gate, params);
   if (!up.ok) return up.response;
