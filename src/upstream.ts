@@ -303,6 +303,48 @@ export function upstreamBody(request: InferenceRequest): Record<string, unknown>
   };
 }
 
+/**
+ * OpenAI Responses API body for models that reject chat/completions (gpt-5.5-pro).
+ * Gateway path: `/openai/v1/responses`. Model id is the unprefixed OpenAI name.
+ */
+export function responsesBody(request: InferenceRequest): Record<string, unknown> {
+  let instructions: string | undefined;
+  const input: Array<{ role: string; content: string }> = [];
+  for (const m of request.messages) {
+    if (m.role === "system") {
+      if (m.content.trim()) {
+        instructions = instructions ? `${instructions}\n\n${m.content}` : m.content;
+      }
+      continue;
+    }
+    if (m.role !== "user" && m.role !== "assistant") continue;
+    input.push({ role: m.role, content: m.content });
+  }
+  // Gateway expects unprefixed model (measured: "gpt-5.5-pro" not "openai/gpt-5.5-pro").
+  const model = request.upstreamModel.replace(/^openai\//, "");
+  const body: Record<string, unknown> = {
+    model,
+    input,
+    max_output_tokens: request.maxTokens,
+  };
+  if (instructions) body.instructions = instructions;
+  if (request.stream) body.stream = true;
+  return body;
+}
+
+/** Provider-native OpenAI Responses URL on the AI Gateway host. */
+export function responsesUrl(deps: GatewayRunnerDeps): string {
+  return `${GATEWAY_HOST}/v1/${deps.accountId}/${encodeURIComponent(deps.gatewayId)}/openai/v1/responses`;
+}
+
+const VISION_AGREE_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct";
+
+function isModelAgreementError(status: number, detail: string): boolean {
+  if (status !== 403) return false;
+  const d = detail.toLowerCase();
+  return d.includes("model agreement") || d.includes("submit the prompt 'agree'") || d.includes('submit the prompt "agree"');
+}
+
 /** The headers for one call. Split out so a test can assert the privacy posture without a network. */
 export function upstreamHeaders(
   request: InferenceRequest,
@@ -387,9 +429,86 @@ export function llavaHeaders(request: InferenceRequest, deps: GatewayRunnerDeps)
 export function runnerFor(deps: GatewayRunnerDeps): InferenceRunner {
   const doFetch = deps.fetchImpl ?? fetch;
 
+  async function fetchOnce(
+    request: InferenceRequest,
+    url: string,
+    headers: Record<string, string>,
+    body: Record<string, unknown>,
+  ): Promise<InferenceResult> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), deps.timeoutMs);
+    let res: Response;
+    try {
+      res = await doFetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+    } catch (err) {
+      clearTimeout(timer);
+      const aborted = err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError");
+      if (aborted) return { outcome: "timeout", waitedMs: deps.timeoutMs };
+      return {
+        outcome: "upstream_error",
+        status: null,
+        detail: String(err instanceof Error ? err.message : err).slice(0, 400),
+      };
+    }
+
+    const gatewayLogId = res.headers.get("cf-aig-log-id");
+    if (!res.ok) {
+      clearTimeout(timer);
+      let detail = "";
+      try {
+        detail = (await res.text()).slice(0, 400);
+      } catch {
+        detail = "(upstream error body unreadable)";
+      }
+      return { outcome: "upstream_error", status: res.status, detail };
+    }
+
+    if (deps.collectLog && !gatewayLogId && request.upstreamModel !== LLAVA_MODEL_ID) {
+      console.error("ai gateway served a request with no cf-aig-log-id", {
+        gatewayId: deps.gatewayId,
+        url,
+        model: request.upstreamModel,
+        requestId: request.metadata.request_id ?? null,
+        status: res.status,
+      });
+    }
+
+    if (request.stream) {
+      if (!res.body) {
+        clearTimeout(timer);
+        return { outcome: "upstream_error", status: res.status, detail: "streamed response had no body" };
+      }
+      clearTimeout(timer);
+      return { outcome: "stream", stream: res.body, gatewayLogId };
+    }
+
+    try {
+      const parsed = await res.json();
+      const isLlava = request.upstreamModel === LLAVA_MODEL_ID;
+      const unwrapped =
+        isLlava && parsed && typeof parsed === "object" && "result" in (parsed as object)
+          ? (parsed as { result: unknown }).result
+          : parsed;
+      return { outcome: "ok", body: unwrapped, gatewayLogId };
+    } catch (err) {
+      return {
+        outcome: "upstream_error",
+        status: res.status,
+        detail: `unparseable upstream body: ${String(err instanceof Error ? err.message : err).slice(0, 200)}`,
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   return {
     async run(request: InferenceRequest): Promise<InferenceResult> {
-      // Binding-first for catalog models that cannot use keyless /compat (Fable, Grok 4.5).
+      // Binding-first for catalog models that cannot use keyless /compat (Fable, Grok 4.5, Gemini).
       if (request.bindingModel) {
         return runViaBinding(deps, request);
       }
@@ -410,98 +529,48 @@ export function runnerFor(deps: GatewayRunnerDeps): InferenceRunner {
         };
       }
 
-      const url = isLlava ? llavaUrl(deps) : upstreamUrl(deps, request.billing);
+      const useResponses = request.api === "responses";
+      const url = isLlava
+        ? llavaUrl(deps)
+        : useResponses
+          ? responsesUrl(deps)
+          : upstreamUrl(deps, request.billing);
       const headers = isLlava ? llavaHeaders(request, deps) : upstreamHeaders(request, deps);
-      const body = isLlava ? llavaBody(request) : upstreamBody(request);
+      const body = isLlava
+        ? llavaBody(request)
+        : useResponses
+          ? responsesBody(request)
+          : upstreamBody(request);
 
-      // A REAL ABORT, unlike the AI binding's un-cancellable promise: fetch takes a signal, so a
-      // timed-out request is actually torn down. It is still possible for the upstream to have generated
-      // tokens before the abort landed and to bill us for them, which is why a timeout is recorded as an
-      // UNMETERED ledger row rather than as nothing.
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), deps.timeoutMs);
-      let res: Response;
-      try {
-        res = await doFetch(url, {
-          method: "POST",
-          headers,
-          body: JSON.stringify(body),
-          signal: controller.signal,
-        });
-      } catch (err) {
-        clearTimeout(timer);
-        const aborted = err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError");
-        if (aborted) return { outcome: "timeout", waitedMs: deps.timeoutMs };
-        return {
-          outcome: "upstream_error",
-          status: null,
-          detail: String(err instanceof Error ? err.message : err).slice(0, 400),
-        };
-      }
+      let result = await fetchOnce(request, url, headers, body);
 
-      const gatewayLogId = res.headers.get("cf-aig-log-id");
-
-      if (!res.ok) {
-        clearTimeout(timer);
-        // The upstream's own body is the only diagnosable thing here, so it is preserved and truncated
-        // rather than replaced with a generic string. It is logged operator-side; the client gets a code.
-        let detail = "";
+      // Workers AI Meta vision: one-time Community License accept on the CF account.
+      // Docs require REST ai/run with body `{ "prompt": "agree" }` (not chat messages).
+      // Measured: messages-shaped "agree" still 403; prompt-shaped accept then retries work.
+      if (
+        result.outcome === "upstream_error" &&
+        result.status !== null &&
+        isModelAgreementError(result.status, result.detail) &&
+        (request.upstreamModel === VISION_AGREE_MODEL ||
+          request.upstreamModel.includes("llama-3.2-11b-vision"))
+      ) {
+        const agreeUrl = `${CF_API_HOST}/client/v4/accounts/${deps.accountId}/ai/run/${VISION_AGREE_MODEL}`;
         try {
-          detail = (await res.text()).slice(0, 400);
+          await doFetch(agreeUrl, {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${request.auth.value}`,
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({ prompt: "agree" }),
+          });
         } catch {
-          detail = "(upstream error body unreadable)";
+          // Fall through to retry anyway; accept may have partially applied.
         }
-        return { outcome: "upstream_error", status: res.status, detail };
+        result = await fetchOnce(request, url, headers, body);
       }
 
-      // THE TRANSIT RECEIPT, CHECKED RATHER THAN ASSUMED. A 200 from this host with logging on and no
-      // `cf-aig-log-id` means the gateway served the request without recording it, which is how the
-      // reconciliation feed silently empties out. The request is NOT failed over it -- the completion is
-      // already generated and already billed to us, so refusing it would throw away money and deny the
-      // caller a response we paid for -- but it is stated at error level so a monitor can see the gap
-      // instead of the plane discovering it a month later in a reconciliation report that found nothing.
-      // LLaVA's REST path often omits the header even when a log row is written; do not error-spam it.
-      if (deps.collectLog && !gatewayLogId && !isLlava) {
-        console.error("ai gateway served a request with no cf-aig-log-id", {
-          gatewayId: deps.gatewayId,
-          url,
-          model: request.upstreamModel,
-          requestId: request.metadata.request_id ?? null,
-          status: res.status,
-        });
-      }
-
-      if (request.stream) {
-        if (!res.body) {
-          clearTimeout(timer);
-          return { outcome: "upstream_error", status: res.status, detail: "streamed response had no body" };
-        }
-        // THE TIMER IS CLEARED HERE, at first byte, not at last. A stream that has started is a stream the
-        // client is being served; aborting it mid-answer because the total exceeded a request budget would
-        // destroy a completion we have already paid for. The read side has its own idle protection in the
-        // platform's stream handling.
-        clearTimeout(timer);
-        return { outcome: "stream", stream: res.body, gatewayLogId };
-      }
-
-      try {
-        const body = await res.json();
-        // REST ai/run wraps the model output in { success, result }. Unwrap so extractText sees
-        // `{ description }` the same way a bare workers-ai body would.
-        const unwrapped =
-          isLlava && body && typeof body === "object" && "result" in (body as object)
-            ? (body as { result: unknown }).result
-            : body;
-        return { outcome: "ok", body: unwrapped, gatewayLogId };
-      } catch (err) {
-        return {
-          outcome: "upstream_error",
-          status: res.status,
-          detail: `unparseable upstream body: ${String(err instanceof Error ? err.message : err).slice(0, 200)}`,
-        };
-      } finally {
-        clearTimeout(timer);
-      }
+      return result;
     },
   };
 }

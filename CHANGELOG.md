@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **Hard-fail chat models (smoke 2026-08-05):**
+  - **Gemini 3.x:** `binding: true` (compat `google/*` = Invalid provider; several `google-ai-studio/*` fail keyless Authorization).
+  - **gpt-5.5-pro:** `api: "responses"` → gateway `/openai/v1/responses` (chat completions 404 "not a chat model").
+  - **Grok multi-agent:** `binding: true` (chat completions: "Multi Agent requests are not allowed").
+  - **extractText:** reasoning_content / reasoning fallback, Responses `output_text`, Gemini candidates (fixes "unreadable" 502 for gpt-oss / qwen3 / glm reasoning bodies).
+  - **llama-3.2-11b-vision:** on 403 model-agreement, REST `ai/run` with `{"prompt":"agree"}` then retry.
+
+### Fixed (prior, shipped)
+
 - **Grok + Fable chat on play-proxy.** Root causes measured against AI Gateway:
   - Public catalog ids `xai/grok-*` hit `/compat` as provider `xai` → **400 Invalid provider**. Compat expects **`grok/grok-*`**. Catalog `upstream` for Grok chat remapped; public `id` stays `xai/*` for clients.
   - **Grok 4.5** and **Claude Fable 5** still fail keyless `/compat` (no credentials / Invalid Anthropic API Key). Same as prism: dispatch via **`env.AI.run` binding** with `gateway: { id }` (catalog `binding: true`).

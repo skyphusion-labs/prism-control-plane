@@ -115,6 +115,12 @@ export interface CatalogEntry {
    * is what the binding catalog expects.
    */
   binding?: boolean;
+  /**
+   * OpenAI wire surface for unified-billing HTTP dispatch.
+   * - `chat` (default): `/compat/chat/completions` with messages
+   * - `responses`: provider-native `/openai/v1/responses` (gpt-5.5-pro; chat completions returns 404)
+   */
+  api?: "chat" | "responses";
   displayName: string;
   modality: Modality;
   billing: Billing;
@@ -335,8 +341,11 @@ export const CATALOG: readonly CatalogEntry[] = [
     publishedRates: [],
   },
   {
+    // Multi-agent is refused on chat/completions ("Multi Agent requests are not allowed").
+    // Binding path still uses the public xai/* id.
     id: "xai/grok-4.20-multi-agent-0309",
     upstream: "grok/grok-4.20-multi-agent-0309",
+    binding: true,
     displayName: "Grok 4.20 Multi-Agent (xAI)",
     modality: "chat",
     billing: "unified-billing",
@@ -515,8 +524,10 @@ export const CATALOG: readonly CatalogEntry[] = [
     publishedRates: [],
   },
   {
+    // Chat Completions rejects this id ("not a chat model"); OpenAI Responses via gateway works.
     id: "openai/gpt-5.5-pro",
     upstream: "openai/gpt-5.5-pro",
+    api: "responses",
     displayName: "GPT-5.5 Pro (OpenAI, Responses)",
     modality: "chat",
     billing: "unified-billing",
@@ -857,8 +868,11 @@ export const CATALOG: readonly CatalogEntry[] = [
     publishedRates: [],
   },
   {
+    // Compat provider is google-ai-studio not google (Invalid provider). Several Gemini 3.x
+    // ids also fail keyless UB on /compat (Missing Authorization); env.AI.run injects credentials.
     id: "google/gemini-3.1-pro",
-    upstream: "google/gemini-3.1-pro",
+    upstream: "google-ai-studio/gemini-3.1-pro-preview",
+    binding: true,
     displayName: "Gemini 3.1 Pro (Google)",
     modality: "chat",
     billing: "unified-billing",
@@ -876,7 +890,8 @@ export const CATALOG: readonly CatalogEntry[] = [
   },
   {
     id: "google/gemini-3.5-flash",
-    upstream: "google/gemini-3.5-flash",
+    upstream: "google-ai-studio/gemini-3.5-flash",
+    binding: true,
     displayName: "Gemini 3.5 Flash (Google)",
     modality: "chat",
     billing: "unified-billing",
@@ -894,7 +909,8 @@ export const CATALOG: readonly CatalogEntry[] = [
   },
   {
     id: "google/gemini-3.6-flash",
-    upstream: "google/gemini-3.6-flash",
+    upstream: "google-ai-studio/gemini-3.6-flash",
+    binding: true,
     displayName: "Gemini 3.6 Flash (Google)",
     modality: "chat",
     billing: "unified-billing",
