@@ -58,8 +58,18 @@ export function rateLimitDecision(
 export const RATE_WINDOW_SECONDS = 60;
 
 export interface RateLimiterStore {
-  readRateBucket(key: string): Promise<{ count: number; window_start: number } | null>;
-  writeRateBucket(key: string, count: number, windowStart: number): Promise<void>;
+  /**
+   * Atomically record one attempt against a bucket and return the post-claim state.
+   *
+   * A separate read-then-write races under concurrent requests: every request reads the same count
+   * and every one passes. The D1 implementation is a single UPSERT; the in-memory fake is single-
+   * threaded. Callers must not re-implement the increment outside this method.
+   */
+  claimRateBucket(
+    key: string,
+    nowSec: number,
+    windowSeconds: number,
+  ): Promise<{ count: number; window_start: number }>;
   nowEpochSeconds(): Promise<number>;
 }
 
@@ -70,16 +80,15 @@ export async function checkRateLimit(
   limit: number,
   windowSeconds: number = RATE_WINDOW_SECONDS,
 ): Promise<RateLimitDecision> {
-  const [row, now] = await Promise.all([store.readRateBucket(bucketKey), store.nowEpochSeconds()]);
-  const decision = rateLimitDecision(
-    now,
-    row?.window_start ?? null,
-    row?.count ?? 0,
-    limit,
-    windowSeconds,
-  );
-  await store.writeRateBucket(bucketKey, decision.nextCount, decision.nextWindowStart);
-  return decision;
+  const now = await store.nowEpochSeconds();
+  const row = await store.claimRateBucket(bucketKey, now, windowSeconds);
+  const elapsed = now - row.window_start;
+  return {
+    allowed: row.count <= limit,
+    nextCount: row.count,
+    nextWindowStart: row.window_start,
+    retryAfterSeconds: Math.max(1, windowSeconds - elapsed),
+  };
 }
 
 /**

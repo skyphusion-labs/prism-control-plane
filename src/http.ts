@@ -139,9 +139,8 @@ export function errorResponse(
 /**
  * Request body cap, in bytes. 256 KiB.
  *
- * Enforced BEFORE the body is read into memory where content-length allows it, because the point of a
- * cap on an unauthenticated-reachable door is to avoid doing the work, not to measure it afterwards.
- * A chunked request with no content-length is still bounded by the byte length check after read.
+ * Enforced BEFORE the body is fully buffered: Content-Length refuses early when present, and a
+ * chunked body is streamed with a running total so the cap bounds memory, not a post-hoc measurement.
  */
 export const MAX_BODY_BYTES = 256 * 1024;
 
@@ -149,8 +148,17 @@ export type ReadBodyResult =
   | { ok: true; value: unknown }
   | { ok: false; code: "invalid_request" | "payload_too_large"; message: string };
 
-/** Read and parse a JSON body under the size cap. Never throws. */
-export async function readJsonBody(request: Request): Promise<ReadBodyResult> {
+/**
+ * Read request body bytes under the size cap WITHOUT buffering past it.
+ *
+ * Content-Length is checked first when present. For chunked or missing length, the stream is
+ * consumed with a running total and cancelled as soon as the cap is crossed -- so the cap bounds
+ * memory, not just a post-hoc measurement of a fully buffered body.
+ */
+async function readBodyBytesCapped(request: Request): Promise<
+  | { ok: true; bytes: Uint8Array }
+  | { ok: false; code: "invalid_request" | "payload_too_large"; message: string }
+> {
   const declared = request.headers.get("content-length");
   if (declared) {
     const n = Number(declared);
@@ -162,21 +170,49 @@ export async function readJsonBody(request: Request): Promise<ReadBodyResult> {
       };
     }
   }
-  let text: string;
+
+  if (!request.body) {
+    return { ok: true, bytes: new Uint8Array(0) };
+  }
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
   try {
-    text = await request.text();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || value.byteLength === 0) continue;
+      total += value.byteLength;
+      if (total > MAX_BODY_BYTES) {
+        await reader.cancel();
+        return {
+          ok: false,
+          code: "payload_too_large",
+          message: `Request body exceeds the cap of ${MAX_BODY_BYTES} bytes.`,
+        };
+      }
+      chunks.push(value);
+    }
   } catch {
     return { ok: false, code: "invalid_request", message: "Request body could not be read." };
   }
-  // Byte length, not string length: a body of multi-byte characters is bigger than it looks.
-  const bytes = new TextEncoder().encode(text).byteLength;
-  if (bytes > MAX_BODY_BYTES) {
-    return {
-      ok: false,
-      code: "payload_too_large",
-      message: `Request body is ${bytes} bytes; the cap is ${MAX_BODY_BYTES}.`,
-    };
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
   }
+  return { ok: true, bytes };
+}
+
+/** Read and parse a JSON body under the size cap. Never throws. */
+export async function readJsonBody(request: Request): Promise<ReadBodyResult> {
+  const raw = await readBodyBytesCapped(request);
+  if (!raw.ok) return raw;
+
+  const text = new TextDecoder().decode(raw.bytes);
   if (!text.trim()) {
     return { ok: false, code: "invalid_request", message: "Request body is required." };
   }

@@ -438,11 +438,12 @@ does not get to invent:
    (RevenueCat), or first-party accounts shared with prism `AUTH_MODE=public`. The enrollment table
    is the seam; whichever lands mints tokens into it.
 2. **Plan pricing and credit prices.** The seeded `dev` plan (USD 1.00 signup credit, 20 rpm, 1024
-   output tokens) is a PROVISIONAL placeholder for local work, not a product tier. What a user pays
-   for credit, and any margin over Cloudflare's rates, is unset.
-3. **Rates for the third-party models.** Cloudflare publishes no per-token rate for the Unified
-   Billing models, so they are listed as `spendable: false` and refused until an operator sets a price.
-   Each one needs a number before it can be sold.
+   output tokens, **standard+premium** tiers) is a PROVISIONAL placeholder for local work, not a
+   product tier. Operators can upsert plans via `POST /admin/plans`. What a user pays for credit, and
+   any margin over Cloudflare's rates, is unset.
+3. **Rates for the third-party models.** Settled for **chat**: all 45 catalog chat models have a
+   rate (CF table or operator measured $0 for LLaVA). Unpriced remains the refusal for any future
+   model that lands without a number. Non-token rates for other modalities are separate (item 4).
 4. **Non-chat modalities.** Image, video, speech and music models are listed and refused. Metering them
    needs a per-unit meter (per tile, per step, per audio minute) that does not exist yet.
 5. **Upstream credential.** Settled: one shared account-scoped Cloudflare token (`CF_AIG_TOKEN`) for

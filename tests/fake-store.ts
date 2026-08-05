@@ -368,12 +368,20 @@ export class FakeStore implements ControlPlaneStore {
     this.modelPrices.set(row.model_id, { ...row });
   }
 
-  async readRateBucket(key: string) {
-    return this.buckets.get(key) ?? null;
+  async claimRateBucket(key: string, nowSec: number, windowSeconds: number) {
+    const row = this.buckets.get(key);
+    if (!row || nowSec - row.window_start >= windowSeconds) {
+      const next = { count: 1, window_start: nowSec };
+      this.buckets.set(key, next);
+      return next;
+    }
+    const next = { count: row.count + 1, window_start: row.window_start };
+    this.buckets.set(key, next);
+    return next;
   }
 
-  async writeRateBucket(key: string, count: number, windowStart: number) {
-    this.buckets.set(key, { count, window_start: windowStart });
+  async putPlan(row: PlanRow) {
+    this.plans.set(row.id, { ...row });
   }
 
   async nowEpochSeconds() {

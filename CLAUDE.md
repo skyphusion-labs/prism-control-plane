@@ -15,11 +15,13 @@ multimodal surface stay in **[prism](https://github.com/skyphusion-labs/prism)**
 **Status: deployed and live at `play-proxy.skyphusion.org`.** Built: the client contract, the Worker
 and its route table, the D1 schema, client-key auth with one-time enrollment, entitlement and rate
 gates, dual-pool spend (monthly allowance then prepaid credit, issue #11), the priced usage ledger
-(44 of 45 chat models priced from CF table / issue #10; reconcile trues up drift), SSE streaming with
-trailing-usage capture, shared `CF_AIG_TOKEN` only (metadata + D1 for attribution), and
-`POST /admin/reconcile` (issue #12, operator-triggered, dry run by default). **Not built:** automatic
-catalog refresh from `compat/models`, receipt-validated enrollment, reconcile cron. No paid traffic
-yet. Aviation-grade `main` (PR + `ci` + `coverage` + CodeQL).
+(**45/45 chat models priced**, LLaVA at measured $0; issue #10), SSE streaming with trailing-usage
+capture, shared `CF_AIG_TOKEN` only (metadata + D1 for attribution), `POST /admin/reconcile` (issue
+#12, operator-triggered, dry run by default), adversarial audit CI, and `POST /admin/plans` for
+operator plan upsert. Provisional `dev` plan entitles **standard+premium** so all priced chat is
+callable. **Not built:** automatic catalog refresh from `compat/models`, receipt-validated
+enrollment, reconcile cron, non-chat modality meters, commercial product plan numbers. No paid
+traffic yet. Aviation-grade `main` (PR + `ci` + `coverage` + CodeQL + adversarial audit).
 
 **The spend path addresses the AI Gateway host**
 ([#15](https://github.com/skyphusion-labs/prism-control-plane/issues/15)). `src/upstream.ts` POSTs to

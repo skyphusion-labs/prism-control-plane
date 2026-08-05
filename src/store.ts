@@ -323,10 +323,23 @@ export interface ControlPlaneStore {
   /** Set or replace one override. */
   putModelPrice(row: ModelPriceRow): Promise<void>;
 
-  readRateBucket(key: string): Promise<RateBucket | null>;
-  writeRateBucket(key: string, count: number, windowStart: number): Promise<void>;
+  /**
+   * Atomically claim one rate-limit attempt. See rate-limit.ts -- a non-atomic read/write pair
+   * multiplies the plan's rpm under parallel load.
+   */
+  claimRateBucket(
+    key: string,
+    nowSec: number,
+    windowSeconds: number,
+  ): Promise<RateBucket>;
   /** Epoch seconds from the STORE's clock, so the limiter and the stored windows agree. */
   nowEpochSeconds(): Promise<number>;
+
+  /**
+   * Create or replace a plan row. Operator surface only; product numbers are not invented here.
+   * Existing accounts keep their plan_id -- changing numbers on a live plan affects them immediately.
+   */
+  putPlan(row: PlanRow): Promise<void>;
 
   /** Cheap probe for GET /health/deep. Resolves when the schema this code expects is present. */
   probeSchema(): Promise<void>;
