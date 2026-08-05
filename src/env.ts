@@ -164,10 +164,17 @@ export function userTokenBudget(env: Env, accountQuota: number): number | null {
  * (`gateway.ai.cloudflare.com/v1/{account}/{gateway}/...`), so a missing one is not a degraded mode, it is
  * no upstream at all.
  */
+/** Cloudflare account ids are 32 hex chars. Reject anything else before it enters a URL path. */
+const CF_ACCOUNT_ID_RE = /^[a-f0-9]{32}$/i;
+
 export function gatewayConfig(env: Env): GatewayConfig | null {
   const accountId = (env.CF_ACCOUNT_ID ?? "").trim();
   const id = (env.AI_GATEWAY_ID ?? "").trim();
   if (!accountId || !id) return null;
+  // Fail closed on a non-hex account id so it cannot rewrite the REST/gateway URL path.
+  if (!CF_ACCOUNT_ID_RE.test(accountId)) return null;
+  // Gateway slug: letters, digits, hyphen, underscore only.
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) return null;
   return {
     accountId,
     id,

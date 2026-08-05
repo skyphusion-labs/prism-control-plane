@@ -14,7 +14,7 @@ import { periodBounds } from "../period";
 import { entitlesTier, planFromRow } from "../plans";
 import { checkRateLimit, inferenceBucket } from "../rate-limit";
 import { FLUX_STT_MODEL, STT_WS_PROTOCOL } from "../flux-stt";
-import { signSttHandoff, STT_HANDOFF_TTL_SEC } from "../stt-handoff";
+import { requireHandoffSecret, signSttHandoff, STT_HANDOFF_TTL_SEC } from "../stt-handoff";
 import type { Ctx } from "./shared";
 
 export { STT_WS_PROTOCOL };
@@ -199,7 +199,8 @@ export async function handleSttStreamUpgrade(ctx: Ctx, request: Request): Promis
   }
 
   const requestId = ctx.requestId || newId("req");
-  const handoffSecret = (ctx.env.CF_AIG_TOKEN ?? "").trim();
+  // Fail-closed: never sign with an empty string (that would make the HMAC forgeable).
+  const handoffSecret = requireHandoffSecret(ctx.env.CF_AIG_TOKEN);
   if (!handoffSecret) {
     return errorResponse(
       ctx.requestId,

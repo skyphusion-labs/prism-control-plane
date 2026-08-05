@@ -75,3 +75,15 @@ export async function verifySttHandoff(
 
 /** Handoff lifetime: long enough for upgrade + DO accept, short enough to limit replay. */
 export const STT_HANDOFF_TTL_SEC = 60;
+
+/**
+ * Fail-closed read of the handoff secret. Never returns empty string (that would make HMAC
+ * forgeable). Callers must refuse when this returns null -- do not sign or verify with "".
+ */
+export function requireHandoffSecret(token: string | undefined | null): string | null {
+  if (typeof token !== "string") return null;
+  const s = token.trim();
+  // Empty or trivially short values are not secrets; refuse rather than HMAC with "".
+  if (s.length < 16) return null;
+  return s;
+}

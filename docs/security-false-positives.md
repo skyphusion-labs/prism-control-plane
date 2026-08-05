@@ -33,3 +33,27 @@ Each entry names the finding, why it is not a defect, and when to reopen it.
 - **Residual:** Client can hold the socket idle until the cap; that is charged as wall-clock audio
   minutes (same as many live-STT meters). Cap bounds the loss.
 - **Reopen when:** Deepgram/CF expose verified session duration we can read without storing audio.
+
+## Audit redaction misread as "secret leak / invalid TypeScript" (critical FP)
+
+- **Audit title:** "Pseudocode/hidden secret expression leaked into source" citing
+  `[REDACTED]` placeholders in the model payload.
+- **Why FP:** The security-audit harness redacts secret access patterns before the model sees them.
+  Real source is `env.CF_AIG_TOKEN` and typechecks. Related empty-secret concern is fail-closed via
+  `requireHandoffSecret` (never HMAC with `""`).
+- **Reopen when:** Redaction leaves a valid AST, or a real empty-string sign path reappears.
+
+## Empty-string HMAC (high FP after requireHandoffSecret)
+
+- Worker and DO both call `requireHandoffSecret()` and **503 before** any `sign`/`verify` if missing
+  or shorter than 16 chars. The audit's "sign with empty" path does not exist in source.
+
+## Global ADMIN_TOKEN for model prices (high FP)
+
+- Single operator bearer for all `/admin/*` is product design (admin.ts). Non-chat unit pricing
+  expands blast radius of a leaked token but does not change the trust model. Rotate on suspicion.
+
+## User prompt as provider payload (high FP)
+
+- This plane is a **user AI proxy**; the user's prompt is the product input. We forward only
+  **whitelisted primitives** from `build*Params` with length caps, not raw client JSON spreads.

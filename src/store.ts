@@ -219,6 +219,8 @@ export interface ControlPlaneStore {
 
   /** Look up by the non-secret half of the bearer. The caller compares the secret hash itself. */
   getClientByKeyId(keyId: string): Promise<ClientRow | null>;
+  /** Look up by primary id (e.g. STT finalize after a signed handoff). */
+  getClient(clientId: string): Promise<ClientRow | null>;
   /** Best-effort last-seen stamp. A failure here must never fail the request it belongs to. */
   touchClient(clientId: string): Promise<void>;
   createClient(client: NewClient): Promise<ClientRow>;

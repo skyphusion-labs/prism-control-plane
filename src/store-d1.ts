@@ -117,6 +117,17 @@ export function d1Store(db: D1Database): ControlPlaneStore {
         .first<ClientRow>();
     },
 
+    async getClient(clientId) {
+      return await db
+        .prepare(
+          `SELECT id, account_id, key_id, secret_hash, label, platform, created_at, last_seen_at,
+                  revoked_at
+             FROM clients WHERE id = ?`,
+        )
+        .bind(clientId)
+        .first<ClientRow>();
+    },
+
     async touchClient(clientId) {
       await db
         .prepare(`UPDATE clients SET last_seen_at = datetime('now') WHERE id = ?`)

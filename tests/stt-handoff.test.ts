@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { parseClientKey } from "../src/auth";
-import { handoffPayload, signSttHandoff, verifySttHandoff, STT_HANDOFF_TTL_SEC } from "../src/stt-handoff";
+import {
+  handoffPayload,
+  requireHandoffSecret,
+  signSttHandoff,
+  verifySttHandoff,
+  STT_HANDOFF_TTL_SEC,
+} from "../src/stt-handoff";
 import { assertCatalogUpstream, safeCfRunPath } from "../src/nonchat-upstream";
 import { bearerFromSttUpgrade, STT_WS_PROTOCOL } from "../src/routes/stt-stream";
 
@@ -49,6 +55,16 @@ describe("assertCatalogUpstream", () => {
 
   it("safeCfRunPath still rejects traversal even for @cf-looking ids", () => {
     expect(safeCfRunPath("@cf/../admin")).toBeNull();
+  });
+});
+
+describe("requireHandoffSecret", () => {
+  it("refuses empty, short, and non-string", () => {
+    expect(requireHandoffSecret(undefined)).toBeNull();
+    expect(requireHandoffSecret("")).toBeNull();
+    expect(requireHandoffSecret("   ")).toBeNull();
+    expect(requireHandoffSecret("short")).toBeNull();
+    expect(requireHandoffSecret("a".repeat(16))).toBe("a".repeat(16));
   });
 });
 

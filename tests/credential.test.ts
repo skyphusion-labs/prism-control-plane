@@ -28,7 +28,10 @@ import { FakeStore } from "./fake-store";
 /** A 32-byte AES key, base64. Test-only, and it never leaves this file. */
 const KEK = Buffer.alloc(32, 7).toString("base64");
 
-const WIRED: Partial<Env> = { CF_ACCOUNT_ID: "acct-cf", AI_GATEWAY_ID: "prism-proxy" };
+const WIRED: Partial<Env> = {
+  CF_ACCOUNT_ID: "fabcb25d9c7eb087110ec474a03e50d2",
+  AI_GATEWAY_ID: "prism-proxy",
+};
 
 describe("credentialMode", () => {
   it("is always shared, including when config still says per-user", () => {

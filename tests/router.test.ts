@@ -151,7 +151,8 @@ async function harness(
   const deferred: Promise<unknown>[] = [];
   const ctx: Ctx = {
     env: {
-      CF_ACCOUNT_ID: "acct-cf",
+      // 32 hex -- matches CF account id format enforced in gatewayConfig.
+      CF_ACCOUNT_ID: "fabcb25d9c7eb087110ec474a03e50d2",
       AI_GATEWAY_ID: "prism-proxy",
       ...options.env,
     } as Env,

@@ -224,8 +224,17 @@ async function runViaBinding(
   }
 }
 
-/** Build default image-gen params (Workers AI + proxied providers). */
+/** Cap user text fields before they hit a provider body. */
+const MAX_PROMPT_CHARS = 8_000;
+const MAX_AUDIO_B64_CHARS = 4 * 1024 * 1024; // ~3 MiB binary after decode, under body cap
+
+function clipPrompt(prompt: string): string {
+  return prompt.length <= MAX_PROMPT_CHARS ? prompt : prompt.slice(0, MAX_PROMPT_CHARS);
+}
+
+/** Build default image-gen params (Workers AI + proxied providers). Primitives only. */
 export function buildImageParams(modelId: string, prompt: string): Record<string, unknown> {
+  prompt = clipPrompt(prompt);
   if (modelId.startsWith("@cf/black-forest-labs/flux-1-schnell")) {
     return { prompt, width: 512, height: 512, steps: 4 };
   }
@@ -249,28 +258,42 @@ export function buildImageParams(modelId: string, prompt: string): Record<string
 }
 
 export function buildTtsParams(modelId: string, text: string): Record<string, unknown> {
+  text = clipPrompt(text);
   if (modelId.includes("melotts")) return { prompt: text, lang: "en" };
   // Deepgram aura
   return { text };
 }
 
 export function buildSttParams(audioBase64: string): Record<string, unknown> {
-  return { audio: audioBase64 };
+  // Only a base64 string; never forward nested objects from the client body.
+  const audio =
+    audioBase64.length <= MAX_AUDIO_B64_CHARS
+      ? audioBase64
+      : audioBase64.slice(0, MAX_AUDIO_B64_CHARS);
+  return { audio };
 }
 
 export function buildVideoParams(modelId: string, prompt: string, imageUrl?: string): Record<string, unknown> {
-  if (imageUrl) {
+  prompt = clipPrompt(prompt);
+  // imageUrl: only accept data: or https: strings of bounded length (no nested objects).
+  let image: string | undefined;
+  if (typeof imageUrl === "string" && imageUrl.length > 0 && imageUrl.length <= MAX_AUDIO_B64_CHARS) {
+    if (imageUrl.startsWith("data:") || imageUrl.startsWith("https://")) {
+      image = imageUrl;
+    }
+  }
+  if (image) {
     // Minimal i2v shapes; full matrix lives in prism longrun-params.
     if (modelId.startsWith("bytedance/seedance")) {
-      return { image: imageUrl, prompt, aspect_ratio: "16:9", duration: 5, resolution: "720p" };
+      return { image, prompt, aspect_ratio: "16:9", duration: 5, resolution: "720p" };
     }
     if (modelId.startsWith("minimax/hailuo")) {
-      return { first_frame_image: imageUrl, prompt, duration: 6, resolution: "768P" };
+      return { first_frame_image: image, prompt, duration: 6, resolution: "768P" };
     }
     if (modelId.startsWith("runwayml/")) {
-      return { image_input: imageUrl, prompt, duration: 5 };
+      return { image_input: image, prompt, duration: 5 };
     }
-    return { image: imageUrl, prompt };
+    return { image, prompt };
   }
   return {
     prompt,
@@ -281,8 +304,10 @@ export function buildVideoParams(modelId: string, prompt: string, imageUrl?: str
 }
 
 export function buildMusicParams(prompt: string, lyrics?: string): Record<string, unknown> {
-  const body: Record<string, unknown> = { prompt };
-  if (lyrics) body.lyrics = lyrics;
+  const body: Record<string, unknown> = { prompt: clipPrompt(prompt) };
+  if (typeof lyrics === "string" && lyrics.trim()) {
+    body.lyrics = clipPrompt(lyrics);
+  }
   return body;
 }
 

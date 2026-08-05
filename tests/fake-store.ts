@@ -137,6 +137,10 @@ export class FakeStore implements ControlPlaneStore {
     return null;
   }
 
+  async getClient(clientId: string) {
+    return this.clients.get(clientId) ?? null;
+  }
+
   async touchClient(clientId: string) {
     const client = this.clients.get(clientId);
     if (client) client.last_seen_at = this.iso();

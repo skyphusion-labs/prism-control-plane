@@ -14,11 +14,11 @@ import { d1Store } from "./store-d1";
 import { newId } from "./crypto";
 import { periodKey } from "./period";
 import { allocateCharge } from "./balance";
-import { planFromRow } from "./plans";
+import { entitlesTier, planFromRow } from "./plans";
 import { findModel } from "./catalog";
 import { resolveUnitPrice } from "./meter";
 import { FLUX_DEFAULT_UNIT_MICRO, FLUX_STT_MODEL, STT_WS_PROTOCOL } from "./flux-stt";
-import { verifySttHandoff } from "./stt-handoff";
+import { requireHandoffSecret, verifySttHandoff } from "./stt-handoff";
 
 export { FLUX_DEFAULT_UNIT_MICRO, FLUX_STT_MODEL, STT_WS_PROTOCOL } from "./flux-stt";
 
@@ -77,7 +77,8 @@ export class SttSession extends DurableObject<Env> {
       );
     }
 
-    const handoffSecret = (this.env.CF_AIG_TOKEN ?? "").trim();
+    // Fail-closed: never verify against an empty key (that would accept attacker-forged sigs).
+    const handoffSecret = requireHandoffSecret(this.env.CF_AIG_TOKEN);
     if (!handoffSecret) {
       return Response.json(
         { error: { code: "unavailable", message: "CF_AIG_TOKEN missing; cannot verify STT handoff." } },
@@ -85,6 +86,12 @@ export class SttSession extends DurableObject<Env> {
       );
     }
     const exp = Number(expRaw);
+    if (!Number.isInteger(exp) || exp <= 0) {
+      return Response.json(
+        { error: { code: "forbidden", message: "STT session handoff expired or malformed." } },
+        { status: 403 },
+      );
+    }
     const ok = await verifySttHandoff(handoffSecret, {
       accountId,
       clientId,
@@ -314,15 +321,35 @@ export class SttSession extends DurableObject<Env> {
 
     try {
       const store = d1Store(this.env.DB);
+      // Re-validate ownership at finalize (not only at handoff): client must still exist,
+      // belong to the account, not be revoked; account not suspended; plan still entitles the model.
+      const client = await store.getClient(meta.client_id);
       const account = await store.getAccount(meta.account_id);
       const planRow = await store.getPlan(meta.plan_id);
-      if (!account || !planRow) {
-        console.error("stt finalize missing account/plan", meta.account_id, meta.plan_id);
+      if (!client || !account || !planRow) {
+        console.error("stt finalize missing client/account/plan", meta);
+        return;
+      }
+      if (client.account_id !== account.id || client.account_id !== meta.account_id) {
+        console.error("stt finalize client/account mismatch", meta.client_id, meta.account_id);
+        return;
+      }
+      if (client.revoked_at) {
+        console.error("stt finalize client revoked", meta.client_id);
+        return;
+      }
+      if (account.suspended_at) {
+        console.error("stt finalize account suspended", meta.account_id);
         return;
       }
       const plan = planFromRow(planRow);
       if (!plan.ok) {
         console.error("stt finalize plan unusable", plan.reason);
+        return;
+      }
+      const modelEntry = findModel(meta.model_id);
+      if (!modelEntry || !entitlesTier(plan.plan, modelEntry.tier)) {
+        console.error("stt finalize model not entitled", meta.model_id, plan.plan.id);
         return;
       }
 
@@ -340,8 +367,8 @@ export class SttSession extends DurableObject<Env> {
       await store.recordUsage({
         id: newId("use"),
         request_id: meta.request_id,
-        account_id: meta.account_id,
-        client_id: meta.client_id,
+        account_id: account.id,
+        client_id: client.id,
         model_id: meta.model_id,
         period_key: pkey,
         input_tokens: null,
