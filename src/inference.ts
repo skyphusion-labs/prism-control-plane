@@ -31,6 +31,11 @@ export interface InferenceRequest {
    */
   bindingModel?: string;
   /**
+   * OpenAI wire surface for HTTP dispatch. `responses` uses `/openai/v1/responses` instead of
+   * `/compat/chat/completions` (gpt-5.5-pro).
+   */
+  api?: "chat" | "responses";
+  /**
    * Which billing surface this model sits on, carried FROM THE CATALOG rather than re-derived.
    *
    * It selects the gateway endpoint in upstream.ts. Sniffing an `@cf/` prefix at the call site would
@@ -94,10 +99,32 @@ export function extractText(body: unknown): string | null {
 
   const choices = asRecord.choices;
   if (Array.isArray(choices) && choices.length > 0) {
-    const first = choices[0] as { message?: { content?: unknown }; text?: unknown } | null;
+    const first = choices[0] as {
+      message?: {
+        content?: unknown;
+        reasoning_content?: unknown;
+        reasoning?: unknown;
+      };
+      text?: unknown;
+    } | null;
     const content = first?.message?.content;
-    if (typeof content === "string") return content;
-    if (typeof first?.text === "string") return first.text;
+    if (typeof content === "string" && content.length > 0) return content;
+    // Content array parts (some Workers AI / OpenAI-compatible variants).
+    if (Array.isArray(content)) {
+      const joined = content
+        .filter((b): b is { type?: string; text?: string } => !!b && typeof b === "object")
+        .map((b) => (typeof b.text === "string" ? b.text : ""))
+        .join("");
+      if (joined) return joined;
+    }
+    if (typeof first?.text === "string" && first.text.length > 0) return first.text;
+    // Reasoning-only bodies (gpt-oss / qwen3 / glm with content:null and finish length).
+    // Prefer real content; fall back so the plane does not 502 "unreadable" on a 200.
+    const reasoning =
+      first?.message?.reasoning_content ?? first?.message?.reasoning;
+    if (typeof reasoning === "string" && reasoning.length > 0) return reasoning;
+    // Explicit empty string content is a real empty completion, not unreadable.
+    if (content === "") return "";
   }
 
   // Anthropic Messages API (env.AI.run binding for Fable etc.): only type:"text" blocks.
@@ -110,6 +137,34 @@ export function extractText(body: unknown): string | null {
       .map((b) => b.text as string)
       .join("");
     if (text) return text;
+  }
+
+  // OpenAI Responses API: output[] with type message / output_text blocks.
+  const output = asRecord.output;
+  if (Array.isArray(output)) {
+    const text = output
+      .flatMap((block) => {
+        const b = block as { type?: string; content?: Array<{ type?: string; text?: string }> };
+        if (b?.type === "message" || Array.isArray(b?.content)) {
+          return (b.content ?? [])
+            .filter((c) => c?.type === "output_text" || c?.type === "text")
+            .map((c) => c.text ?? "");
+        }
+        return [];
+      })
+      .join("");
+    if (text) return text;
+  }
+
+  // Gemini-native: candidates[0].content.parts[].text
+  const candidates = asRecord.candidates;
+  if (Array.isArray(candidates) && candidates[0] && typeof candidates[0] === "object") {
+    const parts = (candidates[0] as { content?: { parts?: Array<{ text?: string }> } }).content
+      ?.parts;
+    if (Array.isArray(parts)) {
+      const text = parts.map((p) => p.text ?? "").join("");
+      if (text) return text;
+    }
   }
 
   // Some model families come back wrapped in `{ result: ... }`. One level of unwrapping, not a recursive

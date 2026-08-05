@@ -15,6 +15,8 @@ import {
   bindingChatBody,
   endpointFor,
   isAllowedBindingChatModel,
+  responsesBody,
+  responsesUrl,
   runnerFor,
   upstreamBody,
   upstreamHeaders,
@@ -278,9 +280,64 @@ describe("runnerFor binding path", () => {
   it("allowlists only catalog binding:true chat ids", () => {
     expect(isAllowedBindingChatModel("anthropic/claude-fable-5")).toBe(true);
     expect(isAllowedBindingChatModel("xai/grok-4.5")).toBe(true);
+    expect(isAllowedBindingChatModel("google/gemini-3.1-pro")).toBe(true);
+    expect(isAllowedBindingChatModel("xai/grok-4.20-multi-agent-0309")).toBe(true);
     expect(isAllowedBindingChatModel("anthropic/claude-sonnet-5")).toBe(false);
     expect(isAllowedBindingChatModel("xai/grok-4.3")).toBe(false);
     expect(isAllowedBindingChatModel("evil/model")).toBe(false);
+  });
+});
+
+describe("responsesBody / responsesUrl", () => {
+  it("targets the OpenAI Responses path on the gateway host", () => {
+    expect(responsesUrl(DEPS)).toBe(
+      `${GATEWAY_HOST}/v1/acct_1/prism-proxy/openai/v1/responses`,
+    );
+  });
+
+  it("strips openai/ prefix and maps system to instructions", () => {
+    const body = responsesBody(
+      request({
+        upstreamModel: "openai/gpt-5.5-pro",
+        api: "responses",
+        billing: "unified-billing",
+        messages: [
+          { role: "system", content: "be brief" },
+          { role: "user", content: "hi" },
+        ],
+        maxTokens: 64,
+      }),
+    );
+    expect(body).toMatchObject({
+      model: "gpt-5.5-pro",
+      instructions: "be brief",
+      max_output_tokens: 64,
+      input: [{ role: "user", content: "hi" }],
+    });
+  });
+
+  it("POSTs to responses URL when api is responses", async () => {
+    const { impl, calls } = fakeFetch(
+      new Response(
+        JSON.stringify({
+          output: [{ type: "message", content: [{ type: "output_text", text: "ok" }] }],
+        }),
+        { status: 200, headers: { "content-type": "application/json", "cf-aig-log-id": "01R" } },
+      ),
+    );
+    const result = await runnerFor({ ...DEPS, fetchImpl: impl }).run(
+      request({
+        upstreamModel: "openai/gpt-5.5-pro",
+        api: "responses",
+        billing: "unified-billing",
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    );
+    expect(result.outcome).toBe("ok");
+    expect(calls[0]?.url).toBe(`${GATEWAY_HOST}/v1/acct_1/prism-proxy/openai/v1/responses`);
+    const sent = JSON.parse(String(calls[0]?.init.body));
+    expect(sent.model).toBe("gpt-5.5-pro");
+    expect(sent.max_output_tokens).toBe(16);
   });
 });
 
