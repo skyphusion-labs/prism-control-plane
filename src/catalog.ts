@@ -15,10 +15,10 @@
 // PRICE IS NULLABLE. A model with `price: null` is catalogued but not spendable (`model_unpriced`).
 //
 // Workers AI (`@cf/`) rates come from Cloudflare's models API (2026-08-04). Unified Billing rates were
-// filled from CF `compat/models` + live billing verification (issue #10, 2026-08-05). Those rates move
-// intraday; operator overrides (`model_prices`) and POST /admin/reconcile true them up. One chat model
-// LLaVA is image-to-text (native wire, not chat/completions). Measured 2026-08-05: gateway cost
-// and neurons are $0 / 0 on successful runs; catalog rate is therefore zero (still spendable).
+// filled from CF `compat/models` + live billing verification (issue #10, 2026-08-05). Rates move
+// intraday; operator overrides + POST /admin/reconcile true them up. All 45 chat models are priced.
+// LLaVA is image-to-text (native wire, not chat/completions); measured 2026-08-05 gateway cost and
+// neurons are $0 / 0 on successful runs, so its catalog rate is zero (still spendable).
 //
 // `publishedRates` carries the non-token rates CF does publish (per tile, per step, per audio minute).
 // They are DISCLOSURE, not money math: the unit meters for tiles, steps and audio minutes do not exist
