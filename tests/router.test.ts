@@ -254,7 +254,7 @@ describe("health", () => {
 
   it("reports catalog pricing without failing readiness", async () => {
     // Non-chat modalities remain unpriced by design; chat is fully priced.
-    // Readiness stays green either way — per-model gates own spendability.
+    // Readiness stays green either way -- per-model gates own spendability.
     const h = await harness();
     const response = await handleRequest(h.ctx, get("/health/deep"));
     expect(response.status).toBe(200);

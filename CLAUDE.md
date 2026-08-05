@@ -13,7 +13,7 @@ This plane owns **who may call what and how much**. Inference routing, catalog b
 multimodal surface stay in **[prism](https://github.com/skyphusion-labs/prism)**.
 
 **Status: live at `play-proxy.skyphusion.org` (tag train; see CHANGELOG).** Built: client contract,
-Worker + route table, D1, client-key auth + enrollment, dual-pool spend, priced catalog (45/45 chat;
+Worker + route table, D1, client-key auth + enrollment, dual-pool spend, priced catalog (44 chat;
 non-chat unit doors), Flux STT + session tickets, catalog rate refresh, reconcile (admin + hourly
 cron dry-run), adversarial audit CI, plans upsert. **Deferred (2026-08-05):** receipt enrollment,
 commercial plan numbers, bulk UB non-chat unit pricing. **Settled host:** `play-proxy.skyphusion.org`.
@@ -115,8 +115,8 @@ behaviour needs a binding, put it behind an interface rather than reaching for t
 | Repo | Role |
 | --- | --- |
 | [prism](https://github.com/skyphusion-labs/prism) | Playground + inference Worker (`play.skyphusion.org`) |
-| [prism-ios](https://github.com/skyphusion-labs/prism-ios) | iOS client (not started; will implement `docs/CONTRACT.md`) |
-| [prism-android](https://github.com/skyphusion-labs/prism-android) | Android client (not started; will implement `docs/CONTRACT.md`) |
+| [prism-ios](https://github.com/skyphusion-labs/prism-ios) | iOS client (skeleton kits exist; will implement `docs/CONTRACT.md`) |
+| [prism-android](https://github.com/skyphusion-labs/prism-android) | Android client (skeleton kits exist; will implement `docs/CONTRACT.md`) |
 | [vivijure-control-plane](https://github.com/skyphusion-labs/vivijure-control-plane) | Pattern peer; the `unbillable` / third-outcome doctrine comes from its settlement path |
 
 ## Commands
@@ -149,7 +149,7 @@ Only the final inference call spends anything.
 
 Live: Worker **`prism-control-plane`** at **`play-proxy.skyphusion.org`** (custom domain, wrangler-owned
 DNS), AI Gateway **`prism-proxy`**, D1 **`prism-control-plane`**, prod account
-`fabcb25d9c7eb087110ec474a03e50d2`. No `workers.dev`. Only binding is `DB`; no KV, R2, or Queues.
+`fabcb25d9c7eb087110ec474a03e50d2`. No `workers.dev`. Primary store is `DB` (D1); also `AI` and `STT_SESSION` DO. No KV/R2/Queues..
 
 **Credential posture: one shared `CF_AIG_TOKEN` only.** AI Gateway Run + Workers AI Read + AI Gateway
 Read (read is for reconciliation). Every Prism account rides that same token; per-account attribution is

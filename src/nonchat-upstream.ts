@@ -53,7 +53,7 @@ function isCfModel(id: string): boolean {
  */
 export function safeCfRunPath(modelId: string): string | null {
   if (!isCfModel(modelId)) return null;
-  // @cf/vendor/name or @cf/vendor/name/variant — no ".." , no empty segments, no query/fragment.
+  // @cf/vendor/name or @cf/vendor/name/variant -- no ".." , no empty segments, no query/fragment.
   if (
     modelId.includes("..") ||
     modelId.includes("//") ||
@@ -66,7 +66,7 @@ export function safeCfRunPath(modelId: string): string | null {
     return null;
   }
   // Encode each path segment; keep '/' separators. '@' stays unencoded in the first segment
-  // only via encodeURIComponent which encodes @ as %40 — CF accepts %40cf/ form.
+  // only via encodeURIComponent which encodes @ as %40 -- CF accepts %40cf/ form.
   return modelId
     .split("/")
     .map((seg) => encodeURIComponent(seg))

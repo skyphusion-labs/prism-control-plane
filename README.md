@@ -46,6 +46,10 @@ only copy of what they sent.
 
 ## Endpoints
 
+Full non-chat surface (images, speech, transcriptions, videos, music, STT sessions) is in `docs/CONTRACT.md` / OpenAPI. README table may list only the core paths.
+
+## Endpoints
+
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/health` | Liveness. Touches no binding. |
@@ -128,7 +132,7 @@ store and a fake runner.
 
 **Deployed and live** at `play-proxy.skyphusion.org`. Built: the client contract, dual-pool metering
 (monthly allowance then prepaid credit), shared-token AI Gateway proxy with `cf-aig-metadata`
-attribution, priced catalog (**45/45 chat**), SSE metering, operator reconciliation
+attribution, priced catalog (**45/44 chat**), SSE metering, operator reconciliation
 (`POST /admin/reconcile`), and operator plan upsert (`POST /admin/plans`). Provisional `dev` plan
 covers standard+premium chat. Non-chat unit-metered doors and Flux live STT are built. **Catalog rate
 refresh:** `POST /admin/catalog/refresh` (operator; dry-run default) pulls chat rates from AI Gateway
