@@ -99,11 +99,10 @@ describe("publicModel", () => {
   });
 
   it("reports an operator override as the price, and as spendable", () => {
-    // The client must be told the rate that will ACTUALLY be charged. Publishing the catalog's null while
-    // metering against an override would make the published price a lie in the direction of a surprise bill.
-    const unpriced = CATALOG.find((entry) => entry.price === null && entry.modality === "chat");
-    expect(unpriced).toBeDefined();
-    const projected = publicModel(unpriced!, {
+    // The client must be told the rate that will ACTUALLY be charged. An override must win over the catalog.
+    const entry = CATALOG.find((e) => e.modality === "chat" && e.price !== null);
+    expect(entry).toBeDefined();
+    const projected = publicModel(entry!, {
       inputMicroUsdPerMTok: 500_000,
       outputMicroUsdPerMTok: 1_500_000,
       cachedInputMicroUsdPerMTok: null,

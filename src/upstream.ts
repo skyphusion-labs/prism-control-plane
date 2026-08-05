@@ -79,11 +79,14 @@
 // https://developers.cloudflare.com/ai-gateway/observability/logging/
 
 import type { Billing } from "./catalog";
+import { LLAVA_MODEL_ID } from "./chat-request";
 import { gatewayConfig, upstreamTimeoutMs, type Env } from "./env";
 import type { InferenceRequest, InferenceResult, InferenceRunner } from "./inference";
 
 /** The AI Gateway host. A constant so the anti-bypass test has one literal to pin. */
 export const GATEWAY_HOST = "https://gateway.ai.cloudflare.com";
+/** Cloudflare REST AI host. LLaVA's native image-to-text path is only authenticated here (measured). */
+export const CF_API_HOST = "https://api.cloudflare.com";
 
 export interface GatewayRunnerDeps {
   accountId: string;
@@ -192,13 +195,75 @@ export function gatewayRunner(env: Env): InferenceRunner | null {
   });
 }
 
+/**
+ * LLaVA native image-to-text body.
+ *
+ * Measured 2026-08-05: chat/completions rejects this model (requires `image`); the native Workers AI
+ * shape is `{ image: number[] (raw bytes), prompt, max_tokens }` and returns `{ description }`.
+ */
+export function llavaBody(request: InferenceRequest): Record<string, unknown> {
+  if (!request.imageBytes || request.imageBytes.byteLength === 0) {
+    throw new Error("LLaVA requires imageBytes");
+  }
+  const prompt =
+    [...request.messages].reverse().find((m) => m.role === "user")?.content?.trim() ||
+    "Describe this image.";
+  return {
+    image: Array.from(request.imageBytes),
+    prompt,
+    max_tokens: request.maxTokens,
+  };
+}
+
+/**
+ * URL for the LLaVA native path.
+ *
+ * REST `ai/run` with `cf-aig-gateway-id` (not the gateway host). Measured 2026-08-05: the gateway host
+ * `workers-ai/@cf/llava...` answers 401 with our token; REST with Authorization + gateway id answers 200
+ * and still writes a row on `prism-proxy` (cost/tokens/neurons all 0 for this beta model).
+ */
+export function llavaUrl(deps: GatewayRunnerDeps): string {
+  return `${CF_API_HOST}/client/v4/accounts/${deps.accountId}/ai/run/${LLAVA_MODEL_ID}`;
+}
+
+export function llavaHeaders(request: InferenceRequest, deps: GatewayRunnerDeps): Record<string, string> {
+  return {
+    authorization: `Bearer ${request.auth.value}`,
+    "cf-aig-gateway-id": deps.gatewayId,
+    "cf-aig-collect-log-payload": "false",
+    "cf-aig-collect-log": deps.collectLog ? "true" : "false",
+    "cf-aig-metadata": JSON.stringify(request.metadata),
+    "content-type": "application/json",
+    accept: "application/json",
+  };
+}
+
 /** The runner over explicit deps, so tests can drive it with a fake fetch. */
 export function runnerFor(deps: GatewayRunnerDeps): InferenceRunner {
   const doFetch = deps.fetchImpl ?? fetch;
 
   return {
     async run(request: InferenceRequest): Promise<InferenceResult> {
-      const url = upstreamUrl(deps, request.billing);
+      const isLlava = request.upstreamModel === LLAVA_MODEL_ID;
+      if (isLlava && !request.imageBytes?.byteLength) {
+        return {
+          outcome: "upstream_error",
+          status: null,
+          detail: "LLaVA requires an image; the request reached the runner without imageBytes",
+        };
+      }
+      if (isLlava && request.stream) {
+        return {
+          outcome: "upstream_error",
+          status: null,
+          detail: "LLaVA does not stream",
+        };
+      }
+
+      const url = isLlava ? llavaUrl(deps) : upstreamUrl(deps, request.billing);
+      const headers = isLlava ? llavaHeaders(request, deps) : upstreamHeaders(request, deps);
+      const body = isLlava ? llavaBody(request) : upstreamBody(request);
+
       // A REAL ABORT, unlike the AI binding's un-cancellable promise: fetch takes a signal, so a
       // timed-out request is actually torn down. It is still possible for the upstream to have generated
       // tokens before the abort landed and to bill us for them, which is why a timeout is recorded as an
@@ -209,8 +274,8 @@ export function runnerFor(deps: GatewayRunnerDeps): InferenceRunner {
       try {
         res = await doFetch(url, {
           method: "POST",
-          headers: upstreamHeaders(request, deps),
-          body: JSON.stringify(upstreamBody(request)),
+          headers,
+          body: JSON.stringify(body),
           signal: controller.signal,
         });
       } catch (err) {
@@ -245,7 +310,8 @@ export function runnerFor(deps: GatewayRunnerDeps): InferenceRunner {
       // already generated and already billed to us, so refusing it would throw away money and deny the
       // caller a response we paid for -- but it is stated at error level so a monitor can see the gap
       // instead of the plane discovering it a month later in a reconciliation report that found nothing.
-      if (deps.collectLog && !gatewayLogId) {
+      // LLaVA's REST path often omits the header even when a log row is written; do not error-spam it.
+      if (deps.collectLog && !gatewayLogId && !isLlava) {
         console.error("ai gateway served a request with no cf-aig-log-id", {
           gatewayId: deps.gatewayId,
           url,
@@ -270,7 +336,13 @@ export function runnerFor(deps: GatewayRunnerDeps): InferenceRunner {
 
       try {
         const body = await res.json();
-        return { outcome: "ok", body, gatewayLogId };
+        // REST ai/run wraps the model output in { success, result }. Unwrap so extractText sees
+        // `{ description }` the same way a bare workers-ai body would.
+        const unwrapped =
+          isLlava && body && typeof body === "object" && "result" in (body as object)
+            ? (body as { result: unknown }).result
+            : body;
+        return { outcome: "ok", body: unwrapped, gatewayLogId };
       } catch (err) {
         return {
           outcome: "upstream_error",

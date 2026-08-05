@@ -7,7 +7,7 @@
 
 import type { Billing } from "./catalog";
 
-/** One turn. Content is a plain string: this plane does not carry multimodal parts. */
+/** One turn. Content is a plain string; image bytes for vision models ride on InferenceRequest.image. */
 export interface ChatTurn {
   role: "system" | "user" | "assistant";
   content: string;
@@ -40,6 +40,11 @@ export interface InferenceRequest {
   auth: UpstreamAuth;
   /** Attached to the gateway log entry, when logging is on. Opaque ids only, never content. */
   metadata: Record<string, string>;
+  /**
+   * Raw image bytes for single-shot vision models (LLaVA). Not logged. When set, the runner uses the
+   * native Workers AI image-to-text body rather than chat/completions.
+   */
+  imageBytes?: Uint8Array;
 }
 
 export type InferenceResult =
@@ -78,6 +83,8 @@ export function extractText(body: unknown): string | null {
   const asRecord = body as Record<string, unknown>;
 
   if (typeof asRecord.response === "string") return asRecord.response;
+  // LLaVA / image-to-text: `{ description }` or `{ result: { description } }`.
+  if (typeof asRecord.description === "string") return asRecord.description;
 
   const choices = asRecord.choices;
   if (Array.isArray(choices) && choices.length > 0) {
