@@ -1,0 +1,75 @@
+# prism-control-plane -- wrangler config TEMPLATE.
+#
+# THE TEMPLATE, not the config. `npm run bootstrap` copies this to wrangler.toml, which is
+# gitignored because it carries the D1 database id and (for a real deploy) the account's routing
+# facts. Edit THIS file; every binding change must also be mirrored in the hand-authored Env
+# interface (src/env.ts), which is what tsc checks against. Do NOT commit a generated
+# worker-configuration.d.ts.
+#
+# Estate convention, same as prism: no build step, no framework, TypeScript straight to workerd.
+
+name = "prism-control-plane"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+
+# No workers.dev hostname and no preview URLs. Enrollment and the metered inference door are the
+# whole attack surface of this Worker, and a *.workers.dev host would be a second, unrouted way in
+# that no route rule or WAF policy covers.
+workers_dev = false
+preview_urls = false
+
+# Workers Logs. This is a LOW-volume Worker whose interesting events (an enrollment, a refused
+# quota, an unmetered request) are individually important, so full-rate capture is explicit rather
+# than left to a default that might sample away the one line that mattered.
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+# The unified AI binding: Workers AI models directly, and third-party models through AI Gateway with
+# Unified Billing. This plane only ever calls models from src/catalog.ts, which is Workers-AI-only
+# today (see docs/CONTRACT.md open decision 5).
+[ai]
+binding = "AI"
+
+# Control-plane D1: accounts, plans, client keys, enrollments, the usage ledger, rate buckets.
+#
+# NO PROMPT OR COMPLETION TEXT EVER LANDS HERE. That is the privacy invariant in
+# docs/CONTRACT.md and tests/schema-privacy.test.ts enforces it against migrations/.
+#
+# Create it, then paste the id below:
+#   npx wrangler d1 create prism-control-plane
+#   npx wrangler d1 migrations apply prism-control-plane --local
+[[d1_databases]]
+binding = "DB"
+database_name = "prism-control-plane"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+[vars]
+# The AI Gateway slug every inference call is routed through. Empty is MEANINGFUL and is the
+# fail-closed default: with no gateway named, POST /v1/chat/completions answers
+# 503 unavailable rather than calling the model off-gateway. A metering plane whose calls bypass the
+# gateway has lost the attribution it exists to provide, so it refuses instead.
+AI_GATEWAY_ID = ""
+
+# Whether AI Gateway stores a log row for each request. DEFAULT IS OFF, and that is a privacy
+# decision, not an oversight: the binding's gateway option is all-or-nothing (collectLog), so a
+# logged request stores the PAYLOAD, meaning prompts. Our own ledger prices the request from token
+# counts and never sees the text, so nothing is lost that this plane needs.
+#
+# Set to "true" only with a deliberate decision recorded. The middle option (log metadata, drop
+# payloads, via the REST path plus cf-aig-collect-log-payload:false) is not wired; see
+# docs/CONTRACT.md open decision 6.
+AI_GATEWAY_COLLECT_LOG = "false"
+
+# Upper bound on how long the plane waits for a model, in milliseconds. A request that outlives it
+# answers 504 upstream_timeout rather than holding a mobile client open. Empty means the documented
+# default in src/env.ts applies.
+UPSTREAM_TIMEOUT_MS = "60000"
+
+# SECRETS (npx wrangler secret put <NAME>; for local dev put them in .dev.vars, which is gitignored):
+#
+#   ADMIN_TOKEN  -- bearer for the operator surface (minting enrollment tokens, provisioning
+#                   accounts). UNSET MEANS THERE IS NO OPERATOR SURFACE: every /admin/* route
+#                   answers 503 unavailable. Fails closed by construction, so a deploy that forgot
+#                   the secret cannot be driven by anyone.

@@ -1,0 +1,541 @@
+# Prism Control Plane -- client contract v1, machine-readable.
+#
+# Hand-authored and kept in step with docs/CONTRACT.md. The prose file is the normative
+# explanation (why a code exists, what a client must do); this file is the shape. A route present in
+# one and absent from the other is a defect, and tests/contract.test.ts asserts that every route the
+# router serves appears here.
+#
+# NOT generated from code, deliberately. This contract is written BEFORE the clients exist, so the
+# implementation follows it rather than the reverse.
+
+openapi: 3.1.0
+
+info:
+  title: Prism Control Plane
+  version: "1.0.0"
+  description: >-
+    Metering and policy layer in front of Cloudflare AI Gateway / Workers AI. Owns who may call what
+    and how much. Does not store prompt or completion text; see docs/CONTRACT.md for the binding
+    privacy invariant.
+  license:
+    name: AGPL-3.0-only
+    identifier: AGPL-3.0-only
+
+servers:
+  - url: http://127.0.0.1:8787
+    description: Local wrangler dev
+
+tags:
+  - name: health
+  - name: enrollment
+  - name: account
+  - name: inference
+
+security:
+  - clientKey: []
+
+paths:
+  /health:
+    get:
+      tags: [health]
+      summary: Liveness
+      description: Always 200 when the Worker is running. Touches no binding.
+      security: []
+      responses:
+        "200":
+          description: Alive
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, service]
+                properties:
+                  ok: { const: true }
+                  service: { type: string }
+
+  /health/deep:
+    get:
+      tags: [health]
+      summary: Readiness
+      description: >-
+        Checks D1 reachability, presence of the expected schema, and that every catalog entry is
+        priced. Returns 503 when any check fails; a green result here is what makes a deploy
+        trustworthy.
+      security: []
+      responses:
+        "200":
+          description: Ready
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeepHealth" }
+        "503":
+          description: Not ready
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeepHealth" }
+
+  /v1/clients:
+    post:
+      tags: [enrollment]
+      summary: Enroll a device and receive a client key
+      description: >-
+        Fail-closed. Requires a single-use, unexpired, account-scoped enrollment token minted out of
+        band. The returned secret exists exactly once and cannot be recovered.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enrollment_token]
+              additionalProperties: false
+              properties:
+                enrollment_token:
+                  type: string
+                  minLength: 8
+                  maxLength: 200
+                label:
+                  type: string
+                  maxLength: 64
+                  description: Human label for the device, shown on the operator surface.
+                platform:
+                  type: string
+                  enum: [ios, android, other]
+      responses:
+        "201":
+          description: Enrolled
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [client_id, key, account]
+                properties:
+                  client_id: { type: string, examples: ["cli_9f2c1a4b7e0d"] }
+                  key:
+                    type: string
+                    description: The bearer key. Shown once. Store in the platform keystore.
+                    examples: ["pcp_9f2c1a4b7e0d3c58_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"]
+                  account: { $ref: "#/components/schemas/AccountSummary" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "403":
+          description: >-
+            No valid enrollment token, or the target account is suspended. Code `forbidden`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/me:
+    get:
+      tags: [account]
+      summary: Account, plan, entitlements, current usage
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [client, account, plan, usage]
+                properties:
+                  client:
+                    type: object
+                    required: [id]
+                    properties:
+                      id: { type: string }
+                      label: { type: [string, "null"] }
+                      platform: { type: [string, "null"] }
+                      created_at: { type: string, format: date-time }
+                  account: { $ref: "#/components/schemas/AccountSummary" }
+                  plan: { $ref: "#/components/schemas/Plan" }
+                  usage: { $ref: "#/components/schemas/Usage" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/models:
+    get:
+      tags: [account]
+      summary: Models this caller may call
+      description: >-
+        Entitlement-filtered. A model the plan does not allow is ABSENT rather than listed and
+        forbidden, so a client picker never offers an unusable option.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [object, data]
+                properties:
+                  object: { const: list }
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Model" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/usage:
+    get:
+      tags: [account]
+      summary: Current-period usage
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Usage" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/chat/completions:
+    post:
+      tags: [inference]
+      summary: Metered inference, OpenAI-compatible
+      description: >-
+        Gated on entitlement, rate limit, and remaining allowance, then forwarded to AI Gateway /
+        Workers AI and metered. Metering facts ride in prism-* response headers so the body stays
+        consumable by an OpenAI SDK unchanged.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ChatRequest" }
+      responses:
+        "200":
+          description: Completion
+          headers:
+            prism-request-id: { $ref: "#/components/headers/RequestId" }
+            prism-api-version: { $ref: "#/components/headers/ApiVersion" }
+            prism-model:
+              description: Model actually called.
+              schema: { type: string }
+            prism-max-tokens-applied:
+              description: Output cap actually used after clamping to the plan ceiling.
+              schema: { type: integer }
+            prism-usage-micro-usd:
+              description: Integer micro-USD consumed by this request. 0 when prism-metered is false.
+              schema: { type: integer }
+            prism-metered:
+              description: Whether this request could be priced.
+              schema: { type: string, enum: ["true", "false"] }
+            prism-usage-recorded:
+              description: >-
+                Whether the ledger write landed. "false" means this completion was served and not
+                charged; it is published rather than swallowed so the gap is visible.
+              schema: { type: string, enum: ["true", "false"] }
+            prism-quota-remaining-micro-usd:
+              description: Period allowance left, clamped at 0.
+              schema: { type: integer }
+            prism-quota-period:
+              description: Billing period key, YYYY-MM in UTC.
+              schema: { type: string }
+            prism-quota-used-micro-usd:
+              description: Period usage including this request.
+              schema: { type: integer }
+            prism-quota-included-micro-usd:
+              description: Period allowance.
+              schema: { type: integer }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ChatCompletion" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "402":
+          description: >-
+            The account's included allowance for the period is spent. Code `quota_exhausted`.
+            Budgetary, not temporal: retrying will not help until the period rolls.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ErrorEnvelope"
+                  - type: object
+                    properties:
+                      error:
+                        type: object
+                        properties:
+                          period: { type: string }
+                          resets_at: { type: string, format: date-time }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: The model is not in the catalog at all. Code `model_not_found`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "413":
+          description: Request body over the 256 KiB cap. Code `payload_too_large`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "501":
+          description: >-
+            Declared in v1 but not shipped. Today this is the only response to `stream: true`.
+            Code `not_implemented`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "502":
+          description: The model or gateway failed. Code `upstream_error`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+        "504":
+          description: The model did not answer in time. Code `upstream_timeout`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+components:
+  securitySchemes:
+    clientKey:
+      type: http
+      scheme: bearer
+      description: >-
+        `Authorization: Bearer pcp_<key_id>_<secret>`. Issued once by POST /v1/clients. `key_id` is
+        16 lowercase hex characters and is not secret; the 43-character base64url secret is stored
+        only as its SHA-256.
+
+  headers:
+    RequestId:
+      description: Correlation id. Quote it in a support report.
+      schema: { type: string }
+    ApiVersion:
+      description: Always "1" for this contract.
+      schema: { const: "1" }
+
+  responses:
+    InvalidRequest:
+      description: Malformed or out-of-range request. Code `invalid_request`. Never retry.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    Unauthenticated:
+      description: >-
+        Missing or malformed bearer (`unauthenticated`), or the key has been revoked
+        (`client_revoked`). On `client_revoked` a client MUST delete the stored key and re-enroll.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    Forbidden:
+      description: >-
+        Account suspended, enrollment refused (`forbidden`), or the plan does not entitle the
+        requested model (`model_not_entitled`).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    RateLimited:
+      description: Too many requests. Code `rate_limited`. Honour `retry-after`.
+      headers:
+        retry-after:
+          description: Seconds to wait.
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    Internal:
+      description: Unhandled failure. Code `internal`.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    Unavailable:
+      description: >-
+        The plane is misconfigured or a dependency is down. Code `unavailable`. This is the
+        fail-closed state: an unconfigured gate refuses rather than passing traffic through
+        unmetered.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  schemas:
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, request_id]
+          properties:
+            code:
+              type: string
+              description: >-
+                Stable machine code. New codes are additive; treat an unrecognized code as a
+                non-retryable failure of its HTTP status class.
+              enum:
+                - invalid_request
+                - unauthenticated
+                - client_revoked
+                - forbidden
+                - model_not_entitled
+                - model_not_found
+                - not_found
+                - payload_too_large
+                - rate_limited
+                - quota_exhausted
+                - not_implemented
+                - upstream_error
+                - upstream_timeout
+                - unavailable
+                - internal
+            message: { type: string }
+            request_id: { type: string }
+            upstream_status:
+              type: integer
+              description: Present on upstream_error when the upstream status is known.
+
+    AccountSummary:
+      type: object
+      required: [id, plan_id, status]
+      properties:
+        id: { type: string, examples: ["acct_3f8a1c0d9b21"] }
+        plan_id: { type: string, examples: ["dev"] }
+        status: { type: string, enum: [active, suspended] }
+
+    Plan:
+      type: object
+      required:
+        [id, name, included_micro_usd, requests_per_minute, max_output_tokens, allowed_tiers]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        included_micro_usd:
+          type: integer
+          description: Period allowance in integer micro-USD. 1 USD = 1,000,000 micro-USD.
+        requests_per_minute: { type: integer }
+        max_output_tokens: { type: integer }
+        allowed_tiers:
+          type: array
+          items: { type: string, enum: [standard, premium] }
+
+    ModelPrice:
+      type: object
+      required: [input_micro_usd_per_mtok, output_micro_usd_per_mtok, priced_at]
+      properties:
+        input_micro_usd_per_mtok: { type: integer }
+        output_micro_usd_per_mtok: { type: integer }
+        priced_at:
+          type: string
+          format: date
+          description: Date the rate was read off published Cloudflare pricing.
+
+    Model:
+      type: object
+      required: [id, display_name, tier, context_window, max_output_tokens, streaming, price]
+      properties:
+        id: { type: string }
+        display_name: { type: string }
+        tier: { type: string, enum: [standard, premium] }
+        context_window: { type: integer }
+        max_output_tokens: { type: integer }
+        streaming: { type: boolean }
+        price: { $ref: "#/components/schemas/ModelPrice" }
+
+    Usage:
+      type: object
+      required:
+        - period
+        - period_start
+        - period_end
+        - included_micro_usd
+        - used_micro_usd
+        - remaining_micro_usd
+        - requests
+        - unmetered_requests
+      properties:
+        period: { type: string, examples: ["2026-08"] }
+        period_start: { type: string, format: date-time }
+        period_end: { type: string, format: date-time }
+        included_micro_usd: { type: integer }
+        used_micro_usd: { type: integer }
+        remaining_micro_usd: { type: integer, description: Clamped at 0; never negative. }
+        requests: { type: integer }
+        unmetered_requests:
+          type: integer
+          description: >-
+            Calls this plane could not price. Should be 0. Exposed rather than hidden so a gap in the
+            meter is observable from both ends.
+
+    ChatMessage:
+      type: object
+      required: [role, content]
+      additionalProperties: false
+      properties:
+        role: { type: string, enum: [system, user, assistant] }
+        content: { type: string, maxLength: 200000 }
+
+    ChatRequest:
+      type: object
+      required: [model, messages]
+      additionalProperties: false
+      description: >-
+        Unknown fields are REJECTED rather than ignored, so a client can never believe it sent a
+        parameter that was silently dropped.
+      properties:
+        model: { type: string }
+        messages:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items: { $ref: "#/components/schemas/ChatMessage" }
+        max_tokens:
+          type: integer
+          minimum: 1
+          description: Clamped down to the plan ceiling without error.
+        temperature: { type: number, minimum: 0, maximum: 2 }
+        top_p: { type: number, exclusiveMinimum: 0, maximum: 1 }
+        stream:
+          type: boolean
+          default: false
+          description: Declared in v1; `true` currently returns 501 not_implemented.
+
+    ChatCompletion:
+      type: object
+      required: [id, object, created, model, choices]
+      properties:
+        id: { type: string }
+        object: { const: chat.completion }
+        created: { type: integer, description: Unix seconds. }
+        model: { type: string }
+        choices:
+          type: array
+          items:
+            type: object
+            required: [index, message, finish_reason]
+            properties:
+              index: { type: integer }
+              message:
+                type: object
+                required: [role, content]
+                properties:
+                  role: { const: assistant }
+                  content: { type: string }
+              finish_reason: { type: [string, "null"], enum: [stop, length, null] }
+        usage:
+          type: object
+          description: Absent when the upstream reported no usable token counts (an unmetered request).
+          required: [prompt_tokens, completion_tokens, total_tokens]
+          properties:
+            prompt_tokens: { type: integer }
+            completion_tokens: { type: integer }
+            total_tokens: { type: integer }
+
+    DeepHealth:
+      type: object
+      required: [ok, checks]
+      properties:
+        ok: { type: boolean }
+        service: { type: string }
+        checks:
+          type: array
+          items:
+            type: object
+            required: [name, ok]
+            properties:
+              name: { type: string }
+              ok: { type: boolean }
+              detail: { type: string }

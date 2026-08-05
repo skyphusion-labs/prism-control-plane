@@ -1,19 +1,32 @@
 {
   "name": "prism-control-plane",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "private": true,
-  "description": "Multi-tenant control plane for commercial Prism (AGPL-3.0).",
+  "description": "Metering and policy plane for commercial Prism: client keys, entitlements, usage ledger, and a metered proxy to Cloudflare AI Gateway / Workers AI (AGPL-3.0).",
   "license": "AGPL-3.0-only",
+  "author": "Conrad Rockenhaus",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/skyphusion-labs/prism-control-plane.git"
+  },
   "type": "module",
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "bootstrap": "node -e \"const fs=require('fs');if(fs.existsSync('wrangler.toml')){console.error('wrangler.toml already exists; not overwriting.');process.exit(1)}fs.copyFileSync('wrangler.example.toml','wrangler.toml');console.log('Created wrangler.toml from wrangler.example.toml. Fill in database_id and AI_GATEWAY_ID before deploying.')\"",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.tests.json --noEmit",
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage"
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "db:migrate:local": "wrangler d1 migrations apply prism-control-plane --local",
+    "db:migrate:remote": "wrangler d1 migrations apply prism-control-plane --remote"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260804.1",
     "@types/node": "^26.1.2",
     "@vitest/coverage-v8": "^4.1.10",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.10",
+    "wrangler": "^4.118.0"
   }
 }
