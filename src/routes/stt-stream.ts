@@ -4,7 +4,7 @@
 // Clients may send the client key as Authorization: Bearer, or as ?access_token= for stacks that
 // cannot set upgrade headers (some browsers). Prefer Authorization on native clients.
 
-import { bearerFromRequest, resolveClient } from "../auth";
+import { bearerFromRequest, parseClientKey, resolveClient } from "../auth";
 import { decideBalance, remainingAllowanceMicroUsd, remainingMicroUsd } from "../balance";
 import { findModel } from "../catalog";
 import { newId } from "../crypto";
@@ -14,6 +14,7 @@ import { periodBounds } from "../period";
 import { entitlesTier, planFromRow } from "../plans";
 import { checkRateLimit, inferenceBucket } from "../rate-limit";
 import { FLUX_STT_MODEL, STT_WS_PROTOCOL } from "../flux-stt";
+import { signSttHandoff, STT_HANDOFF_TTL_SEC } from "../stt-handoff";
 import type { Ctx } from "./shared";
 
 export { STT_WS_PROTOCOL };
@@ -34,6 +35,8 @@ export function isSttStreamUpgrade(request: Request, path: string): boolean {
  *
  * Query-string tokens are deliberately NOT accepted: access_token in the URL is
  * logged by proxies, CDNs, and browser history (adversarial-audit high on PR #22).
+ *
+ * Any candidate is run through parseClientKey so junk `pcp_…` strings never reach D1.
  */
 export function bearerFromSttUpgrade(request: Request): {
   bearer: string | null;
@@ -41,13 +44,18 @@ export function bearerFromSttUpgrade(request: Request): {
   acceptProtocol: string | null;
 } {
   const headerBearer = bearerFromRequest(request);
-  if (headerBearer) return { bearer: headerBearer, acceptProtocol: null };
+  if (headerBearer) {
+    return {
+      bearer: parseClientKey(headerBearer) ? headerBearer : null,
+      acceptProtocol: null,
+    };
+  }
 
   const proto = request.headers.get("sec-websocket-protocol");
   if (!proto) return { bearer: null, acceptProtocol: null };
   const parts = proto.split(",").map((p) => p.trim()).filter(Boolean);
   // new WebSocket(url, ["prism.v1", clientKey])
-  if (parts[0] === STT_WS_PROTOCOL && parts[1] && parts[1].startsWith("pcp_")) {
+  if (parts[0] === STT_WS_PROTOCOL && parts[1] && parseClientKey(parts[1])) {
     return { bearer: parts[1], acceptProtocol: STT_WS_PROTOCOL };
   }
   return { bearer: null, acceptProtocol: null };
@@ -191,15 +199,36 @@ export async function handleSttStreamUpgrade(ctx: Ctx, request: Request): Promis
   }
 
   const requestId = ctx.requestId || newId("req");
-  // Pass opaque attribution only. The DO resolves the unit rate from the catalog
-  // by model id (not a price header an intermediate could tamper with).
+  const handoffSecret = (ctx.env.CF_AIG_TOKEN ?? "").trim();
+  if (!handoffSecret) {
+    return errorResponse(
+      ctx.requestId,
+      "unavailable",
+      "CF_AIG_TOKEN is required to sign the STT session handoff.",
+    );
+  }
+
+  const exp = Math.floor(ctx.now.getTime() / 1000) + STT_HANDOFF_TTL_SEC;
+  const handoff = {
+    accountId: account.id,
+    clientId: client.id,
+    planId: account.plan_id,
+    requestId,
+    modelId: FLUX_STT_MODEL,
+    exp,
+  };
+  const sig = await signSttHandoff(handoffSecret, handoff);
+
+  // Attribution + HMAC. Unit rate is resolved inside the DO from the catalog, not from headers.
   const headers = new Headers();
   headers.set("upgrade", "websocket");
-  headers.set("x-prism-account-id", account.id);
-  headers.set("x-prism-client-id", client.id);
-  headers.set("x-prism-plan-id", account.plan_id);
-  headers.set("x-prism-request-id", requestId);
-  headers.set("x-prism-model-id", FLUX_STT_MODEL);
+  headers.set("x-prism-account-id", handoff.accountId);
+  headers.set("x-prism-client-id", handoff.clientId);
+  headers.set("x-prism-plan-id", handoff.planId);
+  headers.set("x-prism-request-id", handoff.requestId);
+  headers.set("x-prism-model-id", handoff.modelId);
+  headers.set("x-prism-exp", String(handoff.exp));
+  headers.set("x-prism-sig", sig);
   if (acceptProtocol) {
     headers.set("x-prism-ws-protocol", acceptProtocol);
   }

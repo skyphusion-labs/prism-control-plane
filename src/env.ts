@@ -71,7 +71,8 @@ export interface Env {
    * The ONE account-scoped credential that reaches models for every account.
    *
    * AI Gateway Run + Workers AI Read + AI Gateway Read (read is for reconciliation). Required; without
-   * it the inference route answers 503. Never sent to a client. Never used to mint other tokens.
+   * it the inference route answers 503. Also used to HMAC-sign the STT DO handoff (stt-handoff.ts).
+   * Never sent to a client. Never used to mint other tokens.
    */
   CF_AIG_TOKEN?: string;
 

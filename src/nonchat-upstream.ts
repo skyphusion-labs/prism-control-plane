@@ -8,7 +8,7 @@
 //
 // No prompt/completion bodies are logged (cf-aig-collect-log-payload: false).
 
-import type { Billing, Modality } from "./catalog";
+import { findModel, type Billing, type Modality } from "./catalog";
 import { CF_API_HOST, GATEWAY_HOST } from "./upstream";
 import type { UpstreamAuth } from "./inference";
 
@@ -73,13 +73,39 @@ export function safeCfRunPath(modelId: string): string | null {
     .join("/");
 }
 
+/**
+ * Only catalog-known ids may leave this plane. `upstreamModel` must equal some entry's
+ * `upstream` (and normally its `id`). Regex path safety is not a substitute for the allowlist.
+ */
+export function assertCatalogUpstream(upstreamModel: string): boolean {
+  const entry = findModel(upstreamModel);
+  if (!entry) return false;
+  return entry.upstream === upstreamModel || entry.id === upstreamModel;
+}
+
 export function nonChatRunnerFor(deps: NonChatRunnerDeps): NonChatRunner {
   const doFetch = deps.fetchImpl ?? fetch;
 
   return {
     async run(request: NonChatRunRequest): Promise<NonChatRunResult> {
-      if (isCfModel(request.upstreamModel)) {
-        return runViaRest(doFetch, deps, request);
+      if (!assertCatalogUpstream(request.upstreamModel)) {
+        return {
+          outcome: "upstream_error",
+          status: null,
+          detail: `Model id is not in the catalog allowlist: ${request.upstreamModel.slice(0, 80)}`,
+        };
+      }
+      // Prefer catalog upstream field if id was used.
+      const entry = findModel(request.upstreamModel)!;
+      const normalized: NonChatRunRequest = {
+        ...request,
+        upstreamModel: entry.upstream,
+        billing: entry.billing,
+        modality: entry.modality,
+      };
+
+      if (isCfModel(normalized.upstreamModel)) {
+        return runViaRest(doFetch, deps, normalized);
       }
       if (!deps.ai) {
         return {
@@ -89,7 +115,7 @@ export function nonChatRunnerFor(deps: NonChatRunnerDeps): NonChatRunner {
             "Add [ai] binding = \"AI\" to wrangler config, or use a Workers AI (@cf/) model.",
         };
       }
-      return runViaBinding(deps, request);
+      return runViaBinding(deps, normalized);
     },
   };
 }

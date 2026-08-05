@@ -18,6 +18,7 @@ import { planFromRow } from "./plans";
 import { findModel } from "./catalog";
 import { resolveUnitPrice } from "./meter";
 import { FLUX_DEFAULT_UNIT_MICRO, FLUX_STT_MODEL, STT_WS_PROTOCOL } from "./flux-stt";
+import { verifySttHandoff } from "./stt-handoff";
 
 export { FLUX_DEFAULT_UNIT_MICRO, FLUX_STT_MODEL, STT_WS_PROTOCOL } from "./flux-stt";
 
@@ -59,11 +60,13 @@ export class SttSession extends DurableObject<Env> {
     const planId = request.headers.get("x-prism-plan-id") ?? "";
     const requestId = request.headers.get("x-prism-request-id") ?? newId("req");
     const modelId = request.headers.get("x-prism-model-id") ?? FLUX_STT_MODEL;
+    const expRaw = request.headers.get("x-prism-exp") ?? "";
+    const sig = request.headers.get("x-prism-sig") ?? "";
     const acceptProtocol = request.headers.get("x-prism-ws-protocol");
 
-    if (!accountId || !clientId || !planId) {
+    if (!accountId || !clientId || !planId || !sig || !expRaw) {
       return Response.json(
-        { error: { code: "internal", message: "STT session missing attribution headers." } },
+        { error: { code: "internal", message: "STT session missing signed handoff headers." } },
         { status: 500 },
       );
     }
@@ -71,6 +74,29 @@ export class SttSession extends DurableObject<Env> {
       return Response.json(
         { error: { code: "invalid_request", message: "Only Deepgram Flux is supported on this door." } },
         { status: 400 },
+      );
+    }
+
+    const handoffSecret = (this.env.CF_AIG_TOKEN ?? "").trim();
+    if (!handoffSecret) {
+      return Response.json(
+        { error: { code: "unavailable", message: "CF_AIG_TOKEN missing; cannot verify STT handoff." } },
+        { status: 503 },
+      );
+    }
+    const exp = Number(expRaw);
+    const ok = await verifySttHandoff(handoffSecret, {
+      accountId,
+      clientId,
+      planId,
+      requestId,
+      modelId,
+      exp,
+    }, sig);
+    if (!ok) {
+      return Response.json(
+        { error: { code: "forbidden", message: "STT session handoff signature invalid or expired." } },
+        { status: 403 },
       );
     }
 

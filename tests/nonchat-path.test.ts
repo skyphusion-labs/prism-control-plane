@@ -20,34 +20,36 @@ describe("safeCfRunPath", () => {
 });
 
 describe("bearerFromSttUpgrade", () => {
-  it("reads Authorization Bearer", () => {
+  // Grammar: pcp_ + 16 hex key_id + _ + 43 base64url secret
+  const validKey = `pcp_${"a".repeat(16)}_${"A".repeat(43)}`;
+
+  it("reads Authorization Bearer when well-formed", () => {
     const req = new Request("https://example.invalid/v1/stt/stream", {
       headers: {
         upgrade: "websocket",
-        authorization: "Bearer pcp_aabbccdd00112233_secretpart",
+        authorization: `Bearer ${validKey}`,
       },
     });
     const r = bearerFromSttUpgrade(req);
-    expect(r.bearer).toBe("pcp_aabbccdd00112233_secretpart");
+    expect(r.bearer).toBe(validKey);
     expect(r.acceptProtocol).toBeNull();
   });
 
   it("reads Sec-WebSocket-Protocol prism.v1 + key", () => {
-    const key = "pcp_aabbccdd00112233_secretpart";
     const req = new Request("https://example.invalid/v1/stt/stream", {
       headers: {
         upgrade: "websocket",
-        "sec-websocket-protocol": `${STT_WS_PROTOCOL}, ${key}`,
+        "sec-websocket-protocol": `${STT_WS_PROTOCOL}, ${validKey}`,
       },
     });
     const r = bearerFromSttUpgrade(req);
-    expect(r.bearer).toBe(key);
+    expect(r.bearer).toBe(validKey);
     expect(r.acceptProtocol).toBe(STT_WS_PROTOCOL);
   });
 
   it("does not accept query tokens", () => {
     const req = new Request(
-      "https://example.invalid/v1/stt/stream?access_token=pcp_aabbccdd00112233_secret",
+      `https://example.invalid/v1/stt/stream?access_token=${validKey}`,
       { headers: { upgrade: "websocket" } },
     );
     expect(bearerFromSttUpgrade(req).bearer).toBeNull();
