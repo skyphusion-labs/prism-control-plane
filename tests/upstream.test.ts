@@ -281,8 +281,8 @@ describe("runnerFor binding path", () => {
     expect(isAllowedBindingChatModel("anthropic/claude-fable-5")).toBe(true);
     expect(isAllowedBindingChatModel("xai/grok-4.5")).toBe(true);
     expect(isAllowedBindingChatModel("google/gemini-3.1-pro")).toBe(true);
-    // multi-agent uses Responses API, not binding
-    expect(isAllowedBindingChatModel("xai/grok-4.20-multi-agent-0309")).toBe(false);
+    // multi-agent: Responses body via env.AI.run (HTTP responses is 401 keyless)
+    expect(isAllowedBindingChatModel("xai/grok-4.20-multi-agent-0309")).toBe(true);
     expect(isAllowedBindingChatModel("anthropic/claude-sonnet-5")).toBe(false);
     expect(isAllowedBindingChatModel("xai/grok-4.3")).toBe(false);
     expect(isAllowedBindingChatModel("evil/model")).toBe(false);

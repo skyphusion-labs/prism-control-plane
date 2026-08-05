@@ -341,12 +341,13 @@ export const CATALOG: readonly CatalogEntry[] = [
     publishedRates: [],
   },
   {
-    // Multi-agent refuses chat/completions. xAI docs: use Responses API
-    // (https://docs.x.ai/developers/model-capabilities/text/multi-agent). Gateway path is
-    // /grok/v1/responses with unprefixed model id.
+    // Multi-agent refuses chat/completions. xAI docs: Responses API only.
+    // Gateway /grok/v1/responses keyless returns 401 (no UB inject for this id).
+    // env.AI.run with Responses-shaped body + gateway id injects credentials.
     id: "xai/grok-4.20-multi-agent-0309",
     upstream: "grok/grok-4.20-multi-agent-0309",
     api: "responses",
+    binding: true,
     displayName: "Grok 4.20 Multi-Agent (xAI)",
     modality: "chat",
     billing: "unified-billing",

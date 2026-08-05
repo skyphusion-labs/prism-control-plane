@@ -159,6 +159,13 @@ export function outputTokenField(upstreamModel: string): "max_tokens" | "max_com
  */
 export function bindingChatBody(request: InferenceRequest): Record<string, unknown> {
   const modelId = request.bindingModel ?? request.upstreamModel;
+  // Multi-agent (and any binding model with api:responses) needs Responses shape, not messages.
+  if (request.api === "responses" || isMultiAgentModel(modelId)) {
+    return responsesBody({
+      ...request,
+      upstreamModel: modelId.replace(/^xai\//, "grok/"),
+    });
+  }
   if (modelId.startsWith("anthropic/")) {
     const systemParts: string[] = [];
     const messages: Array<{ role: "user" | "assistant"; content: Array<{ type: "text"; text: string }> }> =
