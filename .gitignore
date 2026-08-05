@@ -4,5 +4,6 @@ coverage/
 .env
 .dev.vars
 wrangler.toml
+wrangler.ci.toml
 *.log
 .DS_Store
