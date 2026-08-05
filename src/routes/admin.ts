@@ -194,30 +194,64 @@ export async function handleSetModelPrice(ctx: Ctx, request: Request): Promise<R
       '"model_id" must name a model in this deployment\'s catalog.',
     );
   }
-  for (const field of ["input_micro_usd_per_mtok", "output_micro_usd_per_mtok"] as const) {
-    if (!Number.isInteger(raw[field]) || (raw[field] as number) < 0) {
+  const hasToken =
+    raw.input_micro_usd_per_mtok !== undefined || raw.output_micro_usd_per_mtok !== undefined;
+  const hasUnit = raw.unit_micro_usd !== undefined;
+
+  if (!hasToken && !hasUnit) {
+    return errorResponse(
+      ctx.requestId,
+      "invalid_request",
+      "Provide token rates (input_micro_usd_per_mtok + output_micro_usd_per_mtok) and/or unit_micro_usd.",
+    );
+  }
+
+  let input = 0;
+  let output = 0;
+  if (hasToken) {
+    for (const field of ["input_micro_usd_per_mtok", "output_micro_usd_per_mtok"] as const) {
+      if (!Number.isInteger(raw[field]) || (raw[field] as number) < 0) {
+        return errorResponse(
+          ctx.requestId,
+          "invalid_request",
+          `"${field}" must be a non-negative integer number of micro-USD per million tokens.`,
+        );
+      }
+    }
+    input = raw.input_micro_usd_per_mtok as number;
+    output = raw.output_micro_usd_per_mtok as number;
+  }
+
+  let unitMicro: number | null = null;
+  if (hasUnit) {
+    if (!Number.isInteger(raw.unit_micro_usd) || (raw.unit_micro_usd as number) < 0) {
       return errorResponse(
         ctx.requestId,
         "invalid_request",
-        `"${field}" must be a non-negative integer number of micro-USD per million tokens.`,
+        '"unit_micro_usd" must be a non-negative integer micro-USD per unit.',
       );
     }
+    unitMicro = raw.unit_micro_usd as number;
   }
 
   await ctx.store.putModelPrice({
     model_id: raw.model_id,
-    input_micro_usd_per_mtok: raw.input_micro_usd_per_mtok as number,
-    output_micro_usd_per_mtok: raw.output_micro_usd_per_mtok as number,
+    input_micro_usd_per_mtok: input,
+    output_micro_usd_per_mtok: output,
+    unit_micro_usd: unitMicro,
     // Stamped from the request clock, not supplied by the caller: `priced_at` answers "when was this rate
     // decided", and a caller-chosen date could backdate a rate change.
     priced_at: ctx.now.toISOString().slice(0, 10),
     note: typeof raw.note === "string" ? raw.note : null,
   });
 
+  const entry = findModel(raw.model_id)!;
   return jsonResponse(ctx.requestId, {
     model_id: raw.model_id,
-    input_micro_usd_per_mtok: raw.input_micro_usd_per_mtok,
-    output_micro_usd_per_mtok: raw.output_micro_usd_per_mtok,
+    input_micro_usd_per_mtok: input,
+    output_micro_usd_per_mtok: output,
+    unit_micro_usd: unitMicro,
+    modality: entry.modality,
     spendable: true,
   });
 }

@@ -155,18 +155,21 @@ export type ReadBodyResult =
  * consumed with a running total and cancelled as soon as the cap is crossed -- so the cap bounds
  * memory, not just a post-hoc measurement of a fully buffered body.
  */
-async function readBodyBytesCapped(request: Request): Promise<
+async function readBodyBytesCapped(
+  request: Request,
+  maxBytes: number,
+): Promise<
   | { ok: true; bytes: Uint8Array }
   | { ok: false; code: "invalid_request" | "payload_too_large"; message: string }
 > {
   const declared = request.headers.get("content-length");
   if (declared) {
     const n = Number(declared);
-    if (Number.isFinite(n) && n > MAX_BODY_BYTES) {
+    if (Number.isFinite(n) && n > maxBytes) {
       return {
         ok: false,
         code: "payload_too_large",
-        message: `Request body is ${n} bytes; the cap is ${MAX_BODY_BYTES}.`,
+        message: `Request body is ${n} bytes; the cap is ${maxBytes}.`,
       };
     }
   }
@@ -184,12 +187,12 @@ async function readBodyBytesCapped(request: Request): Promise<
       if (done) break;
       if (!value || value.byteLength === 0) continue;
       total += value.byteLength;
-      if (total > MAX_BODY_BYTES) {
+      if (total > maxBytes) {
         await reader.cancel();
         return {
           ok: false,
           code: "payload_too_large",
-          message: `Request body exceeds the cap of ${MAX_BODY_BYTES} bytes.`,
+          message: `Request body exceeds the cap of ${maxBytes} bytes.`,
         };
       }
       chunks.push(value);
@@ -208,8 +211,11 @@ async function readBodyBytesCapped(request: Request): Promise<
 }
 
 /** Read and parse a JSON body under the size cap. Never throws. */
-export async function readJsonBody(request: Request): Promise<ReadBodyResult> {
-  const raw = await readBodyBytesCapped(request);
+export async function readJsonBody(
+  request: Request,
+  maxBytes: number = MAX_BODY_BYTES,
+): Promise<ReadBodyResult> {
+  const raw = await readBodyBytesCapped(request, maxBytes);
   if (!raw.ok) return raw;
 
   const text = new TextDecoder().decode(raw.bytes);

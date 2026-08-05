@@ -157,6 +157,7 @@ async function harness(
     } as Env,
     store,
     runner,
+    nonChatRunner: null,
     credentials,
     logs: options.logs === undefined ? new FakeLogSource() : options.logs,
     requestId: "req_test0000000000000000",
@@ -695,6 +696,7 @@ describe("POST /v1/chat/completions", () => {
       model_id: MODEL,
       input_micro_usd_per_mtok: 3_000_000,
       output_micro_usd_per_mtok: 15_000_000,
+      unit_micro_usd: null,
       priced_at: "2026-08-04",
       note: null,
     });
@@ -705,29 +707,32 @@ describe("POST /v1/chat/completions", () => {
     expect(h.store.events[0]).toMatchObject({ metered: true, micro_usd: 18_000_000 });
   });
 
-  it("501s a non-chat modality rather than pretending to meter it", async () => {
-    // Image, video and audio models are in the catalog because prism offers them, but their published rates
-    // are per tile, per step and per audio minute, and no meter for those units exists here. Listing them and
-    // refusing with a named reason beats hiding them or charging a guess.
+  it("501s a non-chat model on the chat door and points at the correct door", async () => {
     const h = await harness({ plan: testPlan({ allowed_tiers: "standard,premium" }) });
     const response = await handleRequest(h.ctx, chat(h.key, { ...ASK, model: IMAGE_MODEL }));
     expect(response.status).toBe(501);
-    expect(await response.json()).toMatchObject({ error: { code: "model_unsupported" } });
+    const body = (await response.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("model_unsupported");
+    expect(body.error.message).toContain("/v1/images/generations");
     expect(h.runner?.calls).toHaveLength(0);
   });
 });
 
 describe("GET /v1/models", () => {
-  it("publishes spendable=false for non-chat and spendable=true for LLaVA", async () => {
-    // Chat is fully priced (LLaVA included at measured $0). Non-chat stays unspendable until a unit meter.
+  it("publishes spendable for priced chat and unit-priced image; unpriced UB image stays false", async () => {
     const h = await harness({ plan: testPlan({ allowed_tiers: "standard,premium" }) });
     const response = await handleRequest(h.ctx, get("/v1/models", h.key));
     const body = (await response.json()) as {
-      data: { id: string; spendable: boolean; price: unknown }[];
+      data: { id: string; spendable: boolean; price: unknown; unit_price: unknown }[];
     };
     expect(body.data.find((model) => model.id === VISION_MODEL)).toMatchObject({ spendable: true });
-    const image = body.data.find((model) => model.id === IMAGE_MODEL);
-    expect(image?.spendable).toBe(false);
+    // FLUX-1 schnell has a derived unit price from published rates.
+    const flux = body.data.find((model) => model.id === IMAGE_MODEL);
+    expect(flux?.spendable).toBe(true);
+    expect(flux?.unit_price).toMatchObject({ unit: "request" });
+    // Unified Billing image with no unit rate stays unspendable.
+    const ubImage = body.data.find((model) => model.id === "google/nano-banana-2");
+    expect(ubImage?.spendable).toBe(false);
     expect(body.data.find((model) => model.id === MODEL)?.spendable).toBe(true);
   });
 
@@ -737,6 +742,7 @@ describe("GET /v1/models", () => {
       model_id: MODEL,
       input_micro_usd_per_mtok: 3_000_000,
       output_micro_usd_per_mtok: 15_000_000,
+      unit_micro_usd: null,
       priced_at: "2026-08-04",
       note: null,
     });

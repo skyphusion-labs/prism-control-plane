@@ -13,14 +13,13 @@ export interface Env {
   DB: D1Database;
 
   /**
-   * THERE IS NO `AI` BINDING, and its absence is deliberate even though the default credential mode is now
-   * a shared one.
+   * Optional Workers AI binding. Used ONLY for Unified Billing non-@cf non-chat models
+   * (image/video/music providers that have no REST `/ai/run/{id}` route). Chat and @cf models
+   * still go through HTTP with CF_AIG_TOKEN so the credential stays an argument.
    *
-   * The binding hard-codes ONE identity: the Worker's. Calling the AI Gateway over HTTP instead
-   * (src/upstream.ts) means the credential is an argument, which is what lets UPSTREAM_CREDENTIAL_MODE be
-   * a config switch rather than a rewrite. Adding the binding back would make the shared path the only
-   * possible path and quietly delete the choice.
+   * ABSENT: @cf non-chat still works (REST); unified-billing non-chat answers 503 unavailable.
    */
+  AI?: Ai;
 
   /** The Cloudflare account inference runs on. A plain var: an account id is not a secret. */
   CF_ACCOUNT_ID?: string;

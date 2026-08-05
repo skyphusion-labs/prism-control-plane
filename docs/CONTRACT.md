@@ -110,7 +110,12 @@ All paths are relative to the deployment origin. All request and response bodies
 | GET | `/v1/me` | client key | Account, plan, entitlements, current-period usage. |
 | GET | `/v1/models` | client key | The models this caller may actually call, with prices. |
 | GET | `/v1/usage` | client key | Current-period usage detail. |
-| POST | `/v1/chat/completions` | client key | Metered inference. OpenAI-compatible. |
+| POST | `/v1/chat/completions` | client key | Metered chat inference. OpenAI-compatible. |
+| POST | `/v1/images/generations` | client key | Metered image generation (unit-priced). |
+| POST | `/v1/audio/speech` | client key | Metered text-to-speech (unit-priced). |
+| POST | `/v1/audio/transcriptions` | client key | Metered speech-to-text (unit-priced). |
+| POST | `/v1/videos/generations` | client key | Metered video generation (unit-priced). |
+| POST | `/v1/music/generations` | client key | Metered music generation (unit-priced). |
 
 ### `GET /v1/models`
 
@@ -144,15 +149,17 @@ not listed-and-forbidden: the picker in the app should never show an option that
 
 **`spendable` is the field a client branches on.** The catalog lists every model prism offers,
 including ones this plane will currently refuse, and `spendable: false` is how it says so up front. A
-picker should grey those out rather than discover the refusal at the error. Two things make an entry
+picker should grey those out rather than discover the refusal at the error. Things that make an entry
 unspendable:
 
-- `modality` is not `chat`. Image, video, speech and music models are listed because prism offers
-  them, but their published rates are per tile, per step and per audio minute, and no meter for those
-  units exists here yet. Calling one returns `501 model_unsupported`.
-- `price` is `null`. Cloudflare publishes no per-token rate for the third-party Unified Billing
-  models, so this plane has no number to charge and refuses with `409 model_unpriced` until an
-  operator sets one.
+- **No door:** `voice` is WebSocket-only and has no HTTP door (`501 model_unsupported`).
+- **No rate:** chat needs `price` (token micro-USD per MTok); non-chat needs `unit_price` (micro-USD
+  per request / audio minute / k-characters). Missing either is `409 model_unpriced` until an
+  operator sets one via `POST /admin/model-prices`.
+- Calling a non-chat model on `/v1/chat/completions` returns `501 model_unsupported` and names the
+  correct modality door.
+
+`unit_price` is the non-chat meter. `published_rates` remains disclosure of CF's native units.
 
 `max_output_tokens` may be `null`, which means **no vendor ceiling this plane can cite**, not
 unlimited: the effective cap is then the plan's alone. Only entries whose ceiling was read off a model
@@ -444,8 +451,10 @@ does not get to invent:
 3. **Rates for the third-party models.** Settled for **chat**: all 45 catalog chat models have a
    rate (CF table or operator measured $0 for LLaVA). Unpriced remains the refusal for any future
    model that lands without a number. Non-token rates for other modalities are separate (item 4).
-4. **Non-chat modalities.** Image, video, speech and music models are listed and refused. Metering them
-   needs a per-unit meter (per tile, per step, per audio minute) that does not exist yet.
+4. **Non-chat unit rates for Unified Billing.** Workers AI non-chat models with published rates are
+   unit-priced in the catalog. Unified Billing image/video/music often have no published unit rate
+   yet -- they need operator `unit_micro_usd` (and the Worker AI binding) before `spendable: true`.
+   Voice remains WebSocket-only.
 5. **Upstream credential.** Settled: one shared account-scoped Cloudflare token (`CF_AIG_TOKEN`) for
    every Prism account. Per-account attribution is gateway metadata plus this plane's ledger. One
    Cloudflare API token per user is **not product** (account ceiling is

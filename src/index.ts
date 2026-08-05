@@ -11,11 +11,12 @@
 // Splitting them is what keeps "does the gate refuse" a unit test rather than an integration exercise.
 
 import { gatewayRunner } from "./upstream";
+import { nonChatRunnerFor } from "./nonchat-upstream";
 import { errorResponse, newRequestId } from "./http";
 import { d1Store } from "./store-d1";
 import { gatewayLogSource, type GatewayLogSource } from "./aig-logs";
 import { SharedTokenSource, type UpstreamCredentialSource } from "./token-minter";
-import { gatewayConfig, perUserModeRequested, type Env } from "./env";
+import { gatewayConfig, perUserModeRequested, upstreamTimeoutMs, type Env } from "./env";
 import type { ControlPlaneStore } from "./store";
 import {
   handleCreateAccount,
@@ -28,6 +29,13 @@ import {
 import { handleMe, handleModels, handleUsage } from "./routes/account";
 import { handleReconcile } from "./routes/reconcile";
 import { handleChatCompletions } from "./routes/chat";
+import {
+  handleAudioSpeech,
+  handleAudioTranscriptions,
+  handleImageGenerations,
+  handleMusicGenerations,
+  handleVideoGenerations,
+} from "./routes/nonchat";
 import { handleEnroll } from "./routes/clients";
 import { handleDeepHealth, handleHealth, SERVICE_NAME } from "./routes/health";
 import type { Ctx } from "./routes/shared";
@@ -99,6 +107,21 @@ export async function handleRequest(ctx: Ctx, request: Request): Promise<Respons
   if (method === "POST" && path === "/v1/chat/completions") {
     return await handleChatCompletions(ctx, request);
   }
+  if (method === "POST" && path === "/v1/images/generations") {
+    return await handleImageGenerations(ctx, request);
+  }
+  if (method === "POST" && path === "/v1/audio/speech") {
+    return await handleAudioSpeech(ctx, request);
+  }
+  if (method === "POST" && path === "/v1/audio/transcriptions") {
+    return await handleAudioTranscriptions(ctx, request);
+  }
+  if (method === "POST" && path === "/v1/videos/generations") {
+    return await handleVideoGenerations(ctx, request);
+  }
+  if (method === "POST" && path === "/v1/music/generations") {
+    return await handleMusicGenerations(ctx, request);
+  }
 
   if (method === "POST" && path === "/admin/accounts") return await handleCreateAccount(ctx, request);
   if (method === "POST" && path === "/admin/enrollments") {
@@ -131,6 +154,17 @@ export default {
       // POST /admin/reconcile into one. Every other route works normally, so a half-configured deploy
       // closes the door that costs money without taking the read surface down with it.
       runner: gatewayRunner(env),
+      nonChatRunner: (() => {
+        const gw = gatewayConfig(env);
+        if (!gw) return null;
+        return nonChatRunnerFor({
+          accountId: gw.accountId,
+          gatewayId: gw.id,
+          timeoutMs: upstreamTimeoutMs(env),
+          collectLog: gw.collectLog,
+          ai: env.AI,
+        });
+      })(),
       credentials: upstreamCredentialSource(env, store, () => Math.floor(now.getTime() / 1000)),
       logs: gatewayLogs(env),
       requestId,

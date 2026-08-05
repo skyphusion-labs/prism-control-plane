@@ -15,13 +15,12 @@ multimodal surface stay in **[prism](https://github.com/skyphusion-labs/prism)**
 **Status: deployed and live at `play-proxy.skyphusion.org`.** Built: the client contract, the Worker
 and its route table, the D1 schema, client-key auth with one-time enrollment, entitlement and rate
 gates, dual-pool spend (monthly allowance then prepaid credit, issue #11), the priced usage ledger
-(**45/45 chat models priced**, LLaVA at measured $0; issue #10), SSE streaming with trailing-usage
-capture, shared `CF_AIG_TOKEN` only (metadata + D1 for attribution), `POST /admin/reconcile` (issue
-#12, operator-triggered, dry run by default), adversarial audit CI, and `POST /admin/plans` for
-operator plan upsert. Provisional `dev` plan entitles **standard+premium** so all priced chat is
-callable. **Not built:** automatic catalog refresh from `compat/models`, receipt-validated
-enrollment, reconcile cron, non-chat modality meters, commercial product plan numbers. No paid
-traffic yet. Aviation-grade `main` (PR + `ci` + `coverage` + CodeQL + adversarial audit).
+(**45/45 chat** token-priced; non-chat **unit-priced doors** for image/tts/stt/video/music), SSE
+streaming, shared `CF_AIG_TOKEN`, `POST /admin/reconcile`, adversarial audit CI, `POST /admin/plans`.
+Non-chat doors: `/v1/images/generations`, `/v1/audio/speech`, `/v1/audio/transcriptions`,
+`/v1/videos/generations`, `/v1/music/generations`. Voice is WebSocket-only (still 501). UB non-@cf
+non-chat needs optional Worker `AI` binding. **Not built:** auto catalog refresh, receipt enrollment,
+reconcile cron, commercial plan numbers. Aviation-grade `main`.
 
 **The spend path addresses the AI Gateway host**
 ([#15](https://github.com/skyphusion-labs/prism-control-plane/issues/15)). `src/upstream.ts` POSTs to

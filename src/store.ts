@@ -53,11 +53,16 @@ export interface UserTokenRow {
   last_used_at: number | null;
 }
 
-/** An operator-set per-token rate. Overrides the compiled-in catalog price. */
+/**
+ * Operator-set rate override. Token columns for chat; optional unit_micro_usd for non-chat.
+ * unit_micro_usd null means this row is a token override only.
+ */
 export interface ModelPriceRow {
   model_id: string;
   input_micro_usd_per_mtok: number;
   output_micro_usd_per_mtok: number;
+  /** Integer micro-USD per catalog unit (request / audio_minute / k_characters). */
+  unit_micro_usd: number | null;
   priced_at: string;
   note: string | null;
 }

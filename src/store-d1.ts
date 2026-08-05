@@ -548,7 +548,8 @@ export function d1Store(db: D1Database): ControlPlaneStore {
     async getModelPrice(modelId) {
       return await db
         .prepare(
-          `SELECT model_id, input_micro_usd_per_mtok, output_micro_usd_per_mtok, priced_at, note
+          `SELECT model_id, input_micro_usd_per_mtok, output_micro_usd_per_mtok, unit_micro_usd,
+                  priced_at, note
              FROM model_prices WHERE model_id = ?`,
         )
         .bind(modelId)
@@ -558,7 +559,8 @@ export function d1Store(db: D1Database): ControlPlaneStore {
     async listModelPrices() {
       const result = await db
         .prepare(
-          `SELECT model_id, input_micro_usd_per_mtok, output_micro_usd_per_mtok, priced_at, note
+          `SELECT model_id, input_micro_usd_per_mtok, output_micro_usd_per_mtok, unit_micro_usd,
+                  priced_at, note
              FROM model_prices ORDER BY model_id`,
         )
         .all<ModelPriceRow>();
@@ -569,11 +571,13 @@ export function d1Store(db: D1Database): ControlPlaneStore {
       await db
         .prepare(
           `INSERT INTO model_prices
-             (model_id, input_micro_usd_per_mtok, output_micro_usd_per_mtok, priced_at, note)
-           VALUES (?, ?, ?, ?, ?)
+             (model_id, input_micro_usd_per_mtok, output_micro_usd_per_mtok, unit_micro_usd,
+              priced_at, note)
+           VALUES (?, ?, ?, ?, ?, ?)
            ON CONFLICT(model_id) DO UPDATE SET
              input_micro_usd_per_mtok  = excluded.input_micro_usd_per_mtok,
              output_micro_usd_per_mtok = excluded.output_micro_usd_per_mtok,
+             unit_micro_usd            = excluded.unit_micro_usd,
              priced_at                 = excluded.priced_at,
              note                      = excluded.note,
              updated_at                = datetime('now')`,
@@ -582,6 +586,7 @@ export function d1Store(db: D1Database): ControlPlaneStore {
           row.model_id,
           row.input_micro_usd_per_mtok,
           row.output_micro_usd_per_mtok,
+          row.unit_micro_usd,
           row.priced_at,
           row.note,
         )

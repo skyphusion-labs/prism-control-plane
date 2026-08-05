@@ -190,6 +190,120 @@ paths:
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
+  /v1/images/generations:
+    post:
+      tags: [inference]
+      summary: Metered image generation
+      description: >-
+        Unit-metered image door. Body requires model + prompt. Workers AI (@cf/) uses REST ai/run;
+        Unified Billing providers need the Worker AI binding.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, prompt]
+              properties:
+                model: { type: string }
+                prompt: { type: string }
+      responses:
+        "200":
+          description: Image (b64_json)
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "402": { $ref: "#/components/responses/QuotaExhausted" }
+        "409": { $ref: "#/components/responses/ModelUnpriced" }
+        "501": { $ref: "#/components/responses/ModelUnsupported" }
+
+  /v1/audio/speech:
+    post:
+      tags: [inference]
+      summary: Metered text-to-speech
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, input]
+              properties:
+                model: { type: string }
+                input: { type: string }
+                text: { type: string }
+      responses:
+        "200":
+          description: Audio (base64)
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "402": { $ref: "#/components/responses/QuotaExhausted" }
+        "409": { $ref: "#/components/responses/ModelUnpriced" }
+
+  /v1/audio/transcriptions:
+    post:
+      tags: [inference]
+      summary: Metered speech-to-text
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, audio]
+              properties:
+                model: { type: string }
+                audio: { type: string, description: base64 or data URL }
+      responses:
+        "200":
+          description: Transcript
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "402": { $ref: "#/components/responses/QuotaExhausted" }
+        "409": { $ref: "#/components/responses/ModelUnpriced" }
+
+  /v1/videos/generations:
+    post:
+      tags: [inference]
+      summary: Metered video generation
+      description: >-
+        Unit-metered video door. Requires the Worker AI binding for Unified Billing providers.
+        Long-running models may time out at UPSTREAM_TIMEOUT_MS.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                model: { type: string }
+                prompt: { type: string }
+                image: { type: string }
+      responses:
+        "200":
+          description: Provider result (opaque)
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "402": { $ref: "#/components/responses/QuotaExhausted" }
+        "409": { $ref: "#/components/responses/ModelUnpriced" }
+
+  /v1/music/generations:
+    post:
+      tags: [inference]
+      summary: Metered music generation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, prompt]
+              properties:
+                model: { type: string }
+                prompt: { type: string }
+                lyrics: { type: string }
+      responses:
+        "200":
+          description: Provider result (opaque)
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "402": { $ref: "#/components/responses/QuotaExhausted" }
+        "409": { $ref: "#/components/responses/ModelUnpriced" }
+
   /v1/chat/completions:
     post:
       tags: [inference]
@@ -197,7 +311,7 @@ paths:
       description: >-
         Gated on entitlement, rate limit, and remaining allowance, then forwarded to AI Gateway /
         Workers AI and metered. Metering facts ride in prism-* response headers so the body stays
-        consumable by an OpenAI SDK unchanged.
+        consumable by an OpenAI SDK unchanged. Non-chat models must use their modality doors.
       requestBody:
         required: true
         content:

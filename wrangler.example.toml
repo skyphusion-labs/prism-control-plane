@@ -11,10 +11,11 @@ compatibility_date = "2026-05-01"
 # workers.dev hostname would be a second, un-DNS'd door to the same metered routes.
 workers_dev = false
 
-# THERE IS NO [ai] BINDING, and its absence is deliberate even though the default credential is a shared
-# one. The binding hard-codes ONE identity: the Worker's. Calling the AI Gateway over HTTP instead
-# (src/upstream.ts) makes the credential a per-request argument, which is what lets UPSTREAM_CREDENTIAL_MODE
-# below be a config switch rather than a rewrite. Adding the binding back would delete that choice.
+# Optional Workers AI binding for Unified Billing non-@cf non-chat (image/video/music).
+# Chat and @cf models use HTTP + CF_AIG_TOKEN. Without this binding those @cf doors still work;
+# google/openai/xai image and all video/music answer 503 until it is added.
+# [ai]
+# binding = "AI"
 
 [[d1_databases]]
 binding = "DB"

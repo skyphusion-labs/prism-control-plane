@@ -51,13 +51,16 @@ export async function handleDeepHealth(ctx: Ctx): Promise<Response> {
   // permanently unhealthy for a reason nobody can fix from here. The door still refuses each one
   // individually (model_unpriced), which is where that gate belongs.
   const chat = CATALOG.filter((entry) => entry.modality === "chat");
-  const unpriced = chat.filter((entry) => entry.price === null);
+  const unpricedChat = chat.filter((entry) => entry.price === null);
+  const nonChat = CATALOG.filter((entry) => entry.modality !== "chat" && entry.modality !== "voice");
+  const unitPriced = nonChat.filter((entry) => entry.unitPrice !== null);
   checks.push({
     name: "catalog_pricing",
     ok: true,
     detail:
-      `${CATALOG.length} models, ${chat.length} chat, ${chat.length - unpriced.length} priced from ` +
-      `Cloudflare; ${unpriced.length} awaiting an operator rate (POST /admin/model-prices)`,
+      `${CATALOG.length} models, ${chat.length} chat (${chat.length - unpricedChat.length} token-priced), ` +
+      `${nonChat.length} non-chat doors (${unitPriced.length} unit-priced); ` +
+      `${unpricedChat.length + (nonChat.length - unitPriced.length)} awaiting operator rate`,
   });
 
   // A missing gateway is reported as NOT ok, because with no gateway the only paid route is closed. The
