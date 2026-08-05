@@ -116,8 +116,8 @@ export interface Env {
  * a mobile client is not held open past the point a user has given up. */
 export const DEFAULT_UPSTREAM_TIMEOUT_MS = 60_000;
 
-/** Video/music unit doors need longer waits than chat first-token (Seedance etc.). */
-export const DEFAULT_NONCHAT_UPSTREAM_TIMEOUT_MS = 120_000;
+/** Video/music unit doors need longer waits than chat first-token (Seedance full can exceed 2 min). */
+export const DEFAULT_NONCHAT_UPSTREAM_TIMEOUT_MS = 180_000;
 
 /** Hard ceiling on the configurable timeout. A misconfigured 10-minute wait would pin a Worker
  * invocation and a phone socket on a request nobody is still waiting for. */

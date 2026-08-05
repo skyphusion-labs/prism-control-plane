@@ -412,19 +412,49 @@ export function buildMusicParams(prompt: string, lyrics?: string): Record<string
   return body;
 }
 
-/** Pull image base64 from various CF / provider shapes. */
+/**
+ * Image asset from provider body. Many UB providers return an **https URL**, not base64.
+ * Callers must not stuff URLs into `b64_json` (iOS clients base64-decode that field).
+ */
+export function extractImageAsset(body: unknown): { b64_json?: string; url?: string } | null {
+  const raw = extractImageRaw(body);
+  if (!raw) return null;
+  if (raw.startsWith("https://") || raw.startsWith("http://")) {
+    return { url: raw };
+  }
+  if (raw.startsWith("data:image/")) {
+    return { b64_json: stripDataUrl(raw) };
+  }
+  // bare base64 (no data: prefix)
+  return { b64_json: raw };
+}
+
+/** @deprecated Prefer extractImageAsset — this may return a URL string. */
 export function extractImageBase64(body: unknown): string | null {
+  return extractImageRaw(body);
+}
+
+function extractImageRaw(body: unknown): string | null {
   if (typeof body !== "object" || body === null) return null;
   const r = body as Record<string, unknown>;
   if (typeof r.image === "string" && r.image.length > 0) {
-    return stripDataUrl(r.image);
+    return r.image;
+  }
+  if (typeof r.url === "string" && r.url.length > 0 && r.url.startsWith("http")) {
+    return r.url;
   }
   if (Array.isArray(r.images) && typeof r.images[0] === "string") {
-    return stripDataUrl(r.images[0]);
+    return r.images[0];
+  }
+  // OpenAI-ish { data: [{ b64_json | url }] }
+  if (Array.isArray(r.data) && r.data[0] && typeof r.data[0] === "object") {
+    const d = r.data[0] as Record<string, unknown>;
+    if (typeof d.b64_json === "string" && d.b64_json.length > 0) return d.b64_json;
+    if (typeof d.url === "string" && d.url.length > 0) return d.url;
   }
   const result = r.result;
   if (typeof result === "object" && result !== null) {
-    return extractImageBase64(result);
+    return extractImageRaw(result);
   }
   return null;
 }
