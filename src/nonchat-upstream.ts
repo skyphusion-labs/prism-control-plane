@@ -232,29 +232,73 @@ function clipPrompt(prompt: string): string {
   return prompt.length <= MAX_PROMPT_CHARS ? prompt : prompt.slice(0, MAX_PROMPT_CHARS);
 }
 
-/** Build default image-gen params (Workers AI + proxied providers). Primitives only. */
-export function buildImageParams(modelId: string, prompt: string): Record<string, unknown> {
+/**
+ * Build image-gen params (Workers AI + proxied providers). Primitives only.
+ *
+ * `imageUrl` is an optional reference (https or data:) for i2i / edit paths.
+ * Field name varies by provider (image, images[], image_input[]).
+ */
+export function buildImageParams(
+  modelId: string,
+  prompt: string,
+  imageUrl?: string,
+): Record<string, unknown> {
   prompt = clipPrompt(prompt);
+  let image: string | undefined;
+  if (typeof imageUrl === "string" && imageUrl.length > 0 && imageUrl.length <= MAX_AUDIO_B64_CHARS) {
+    if (imageUrl.startsWith("data:") || imageUrl.startsWith("https://") || imageUrl.startsWith("http://")) {
+      image = imageUrl;
+    }
+  }
+
   if (modelId.startsWith("@cf/black-forest-labs/flux-1-schnell")) {
-    return { prompt, width: 512, height: 512, steps: 4 };
+    const body: Record<string, unknown> = { prompt, width: 512, height: 512, steps: 4 };
+    if (image) body.image = image;
+    return body;
   }
   if (modelId.startsWith("@cf/black-forest-labs/flux-2")) {
-    // Multipart is required for FLUX.2; JSON is rejected. Callers that need FLUX.2
-    // should use the AI binding path; REST JSON is best-effort for flux-1 only.
-    return { prompt, width: 1024, height: 1024 };
+    // Multi-reference family; JSON path is best-effort (some variants prefer multipart).
+    const body: Record<string, unknown> = { prompt, width: 1024, height: 1024 };
+    if (image) body.image = image;
+    return body;
   }
   if (modelId === "@cf/stabilityai/stable-diffusion-xl-base-1.0") {
-    return { prompt, width: 1024, height: 1024, num_steps: 20 };
+    const body: Record<string, unknown> = { prompt, width: 1024, height: 1024, num_steps: 20 };
+    if (image) body.image = image;
+    return body;
   }
   if (modelId.startsWith("@cf/")) {
-    return { prompt, width: 1024, height: 1024, steps: 25 };
+    const body: Record<string, unknown> = { prompt, width: 1024, height: 1024, steps: 25 };
+    if (image) body.image = image;
+    return body;
   }
-  // Unified Billing providers (mirror prism proxied-image-params)
-  if (modelId.startsWith("google/")) return { prompt, output_format: "png" };
-  if (modelId.startsWith("openai/")) return { prompt, quality: "high", size: "1024x1024" };
-  if (modelId.startsWith("xai/")) return { prompt, response_format: "b64_json" };
-  if (modelId.startsWith("recraft/") || modelId.startsWith("bytedance/")) return { prompt };
-  return { prompt };
+  // Unified Billing providers (mirror prism proxied-image-params + CF image_input shapes)
+  if (modelId.startsWith("google/")) {
+    const body: Record<string, unknown> = { prompt, output_format: "png" };
+    // nano-banana family: image_input[] for reference images
+    if (image) body.image_input = [image];
+    return body;
+  }
+  if (modelId.startsWith("openai/")) {
+    // CF proxy schema: { prompt, images, quality, size, style }
+    const body: Record<string, unknown> = { prompt, quality: "high", size: "1024x1024" };
+    if (image) body.images = [image];
+    return body;
+  }
+  if (modelId.startsWith("xai/")) {
+    // Grok Imagine: optional image object for edit / i2i
+    const body: Record<string, unknown> = { prompt, response_format: "b64_json" };
+    if (image) body.image = { url: image };
+    return body;
+  }
+  if (modelId.startsWith("recraft/") || modelId.startsWith("bytedance/")) {
+    const body: Record<string, unknown> = { prompt };
+    if (image) body.image = image;
+    return body;
+  }
+  const body: Record<string, unknown> = { prompt };
+  if (image) body.image = image;
+  return body;
 }
 
 export function buildTtsParams(modelId: string, text: string): Record<string, unknown> {

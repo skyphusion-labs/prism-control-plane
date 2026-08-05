@@ -1656,6 +1656,48 @@ export function spendable(
 }
 
 /**
+ * Client picker hints (not entitlement).
+ *
+ * - `text-to-image` / pure t2i: works from prompt alone
+ * - `image-input`: accepts optional (or required) reference image for i2i / edit
+ * - `image-input-required`: must pass image (none today on image modality; Hailuo is video)
+ */
+export function capabilitiesFor(entry: CatalogEntry): string[] {
+  if (entry.modality === "image") {
+    const caps = ["text-to-image"];
+    // Models that also accept reference images (i2i / edit). Prompt-only still works for these.
+    if (
+      entry.id.includes("flux-2") ||
+      entry.id.startsWith("xai/grok-imagine-image") ||
+      entry.id.startsWith("google/nano-banana") ||
+      entry.id.startsWith("openai/gpt-image")
+    ) {
+      caps.push("image-input");
+    }
+    return caps;
+  }
+  if (entry.modality === "video") {
+    const caps: string[] = [];
+    // Most video models can t2v; Hailuo is i2v-only on CF.
+    if (entry.id.startsWith("minimax/hailuo")) {
+      caps.push("image-input", "image-input-required");
+    } else {
+      caps.push("text-to-video");
+      if (
+        entry.id.startsWith("bytedance/seedance") ||
+        entry.id.startsWith("xai/grok-imagine-video") ||
+        entry.id.startsWith("runwayml/") ||
+        entry.id.includes("-i2v")
+      ) {
+        caps.push("image-input");
+      }
+    }
+    return caps;
+  }
+  return [];
+}
+
+/**
  * The client-facing projection. One place, so GET /v1/models and the contract cannot drift.
  *
  * `spendable` is computed, not stored. Token rates land in `price`; unit rates land in `unit_price`.
@@ -1679,6 +1721,8 @@ export function publicModel(
     streaming: entry.streaming,
     max_output_tokens: entry.maxOutputTokens,
     spendable: spendable(entry, tOverride, uOverride),
+    // Client hints for pickers (not entitlement). image-input = accepts a reference image.
+    capabilities: capabilitiesFor(entry),
     price:
       price === null
         ? null

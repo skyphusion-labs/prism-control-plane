@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.4.13] - 2026-08-05
+
+### Added
+
+- **Image reference input:** `POST /v1/images/generations` accepts optional `image` / `image_url`
+  (https or data:) for i2i / edit. Provider field names mapped in `buildImageParams` (Google
+  `image_input[]`, OpenAI `images[]`, xAI `image: { url }`, Flux `image`).
+- **`capabilities` on GET /v1/models:** `text-to-image`, `image-input` (optional ref),
+  `text-to-video`, `image-input-required` (e.g. Hailuo). Client picker hints only.
+
 ## [0.4.12] - 2026-08-05
 
 ### Fixed
