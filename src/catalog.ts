@@ -15,7 +15,9 @@
 // PRICE IS NULLABLE. A model with `price: null` is catalogued but not spendable (`model_unpriced`).
 //
 // Workers AI (`@cf/`) rates come from Cloudflare's models API (2026-08-04). Unified Billing rates were
-// filled from CF `compat/models` + live billing verification (issue #10, 2026-08-05). Rates move
+// filled from CF `compat/models` + live billing verification (issue #10, 2026-08-05).
+// UB image/video/music unit rates set 2026-08-05 (vendor docs + operator estimates; see publishedRates).
+// Rates move
 // intraday; operator overrides + POST /admin/reconcile true them up. All 45 chat models are priced.
 // LLaVA 1.5 (`@cf/llava-hf/llava-1.5-7b-hf`) retired 2026-08-05: hanging upstream; vision chat
 // covered by modern multimodal models.
@@ -150,6 +152,8 @@ export interface CatalogEntry {
 const PRICED_AT = "2026-08-04";
 /** Unified Billing rates from CF compat/models + live billing, issue #10 (2026-08-05). */
 const PRICED_AT_UB = "2026-08-05";
+/** Unit rates for UB image/video/music (2026-08-05 unpark). */
+const PRICED_AT_UNIT = "2026-08-05";
 
 export const CATALOG: readonly CatalogEntry[] = [
 
@@ -976,8 +980,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 40000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per image", usdPerUnit: 0.04 }],
   },
   {
     id: "google/nano-banana-2",
@@ -989,8 +993,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 40000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per image", usdPerUnit: 0.04 }],
   },
   {
     id: "google/nano-banana-2-lite",
@@ -1002,8 +1006,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 20000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per image", usdPerUnit: 0.02 }],
   },
   {
     id: "google/imagen-4",
@@ -1015,8 +1019,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 40000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per image", usdPerUnit: 0.04 }],
   },
   {
     id: "openai/gpt-image-1.5",
@@ -1028,8 +1032,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 40000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per image medium 1024", usdPerUnit: 0.04 }],
   },
   {
     id: "openai/gpt-image-2",
@@ -1041,8 +1045,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 55000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per image medium 1024", usdPerUnit: 0.055 }],
   },
   {
     id: "recraft/recraftv4",
@@ -1054,8 +1058,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 40000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per image (operator)", usdPerUnit: 0.04 }],
   },
   {
     id: "recraft/recraftv4-1",
@@ -1067,8 +1071,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 40000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per image (operator)", usdPerUnit: 0.04 }],
   },
   {
     id: "recraft/recraftv4-1-pro",
@@ -1080,8 +1084,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 80000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per image (operator)", usdPerUnit: 0.08 }],
   },
   {
     id: "xai/grok-imagine-image",
@@ -1093,8 +1097,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 20000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per image (xAI)", usdPerUnit: 0.02 }],
   },
   {
     id: "xai/grok-imagine-image-quality",
@@ -1106,8 +1110,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 50000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per image (xAI)", usdPerUnit: 0.05 }],
   },
   {
     id: "bytedance/seedream-5-pro",
@@ -1119,8 +1123,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 40000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per image (operator)", usdPerUnit: 0.04 }],
   },
   {
     id: "bytedance/seedream-5-lite",
@@ -1132,8 +1136,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 20000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per image (operator)", usdPerUnit: 0.02 }],
   },
   {
     id: "@cf/black-forest-labs/flux-2-klein-9b",
@@ -1251,8 +1255,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 2000000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per 5s request @ $0.40/s (operator)", usdPerUnit: 2.0 }],
   },
   {
     id: "google/veo-3.1-fast",
@@ -1264,8 +1268,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 750000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per 5s request @ $0.15/s (operator)", usdPerUnit: 0.75 }],
   },
   {
     id: "bytedance/seedance-2.0",
@@ -1277,8 +1281,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 500000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per 5s request (operator)", usdPerUnit: 0.5 }],
   },
   {
     id: "bytedance/seedance-2.0-fast",
@@ -1290,8 +1294,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 300000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per 5s request (operator)", usdPerUnit: 0.3 }],
   },
   {
     id: "bytedance/seedance-2.0-mini",
@@ -1303,8 +1307,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 200000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per 5s request (operator)", usdPerUnit: 0.2 }],
   },
   {
     id: "minimax/hailuo-2.3",
@@ -1316,8 +1320,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 500000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per 6s request (operator)", usdPerUnit: 0.5 }],
   },
   {
     id: "minimax/hailuo-2.3-fast",
@@ -1329,8 +1333,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 300000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per 6s request (operator)", usdPerUnit: 0.3 }],
   },
   {
     id: "xai/grok-imagine-video",
@@ -1342,8 +1346,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 250000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per 5s @ $0.05/s (xAI)", usdPerUnit: 0.25 }],
   },
   {
     id: "xai/grok-imagine-video-1.5-preview",
@@ -1355,8 +1359,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 400000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per 5s @ $0.08/s (xAI)", usdPerUnit: 0.4 }],
   },
   {
     id: "runwayml/gen-4.5",
@@ -1368,8 +1372,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 500000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per 5s request (operator)", usdPerUnit: 0.5 }],
   },
   {
     id: "alibaba/hh1-t2v",
@@ -1381,8 +1385,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 250000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per 5s request (operator)", usdPerUnit: 0.25 }],
   },
   {
     id: "alibaba/hh1-i2v",
@@ -1394,8 +1398,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 250000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per 5s request (operator)", usdPerUnit: 0.25 }],
   },
   {
     id: "alibaba/hh1.1-t2v",
@@ -1407,8 +1411,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 250000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per 5s request (operator)", usdPerUnit: 0.25 }],
   },
   {
     id: "alibaba/hh1.1-i2v",
@@ -1420,8 +1424,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 250000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per 5s request (operator)", usdPerUnit: 0.25 }],
   },
   {
     id: "alibaba/wan-2.7-i2v",
@@ -1433,8 +1437,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 250000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per 5s request (operator)", usdPerUnit: 0.25 }],
   },
   {
     id: "pixverse/v6",
@@ -1446,8 +1450,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 250000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per 5s request (operator)", usdPerUnit: 0.25 }],
   },
   {
     id: "pixverse/v5.6",
@@ -1459,8 +1463,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 200000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per 5s request (operator)", usdPerUnit: 0.2 }],
   },
   {
     id: "vidu/q3-pro",
@@ -1472,8 +1476,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 300000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per 5s request (operator)", usdPerUnit: 0.3 }],
   },
   {
     id: "vidu/q3-turbo",
@@ -1485,8 +1489,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 200000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per 5s request (operator)", usdPerUnit: 0.2 }],
   },
 
   // ---- tts ----
@@ -1611,8 +1615,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
-    publishedRates: [],
+    unitPrice: { microUsdPerUnit: 50000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per request (operator)", usdPerUnit: 0.05 }],
   },
 ];
 

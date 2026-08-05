@@ -701,7 +701,7 @@ describe("POST /v1/chat/completions", () => {
 });
 
 describe("GET /v1/models", () => {
-  it("publishes spendable for priced chat and unit-priced image; unpriced UB image stays false", async () => {
+  it("publishes spendable for priced chat and unit-priced Workers AI + UB image/video", async () => {
     const h = await harness({ plan: testPlan({ allowed_tiers: "standard,premium" }) });
     const response = await handleRequest(h.ctx, get("/v1/models", h.key));
     const body = (await response.json()) as {
@@ -712,9 +712,13 @@ describe("GET /v1/models", () => {
     const flux = body.data.find((model) => model.id === IMAGE_MODEL);
     expect(flux?.spendable).toBe(true);
     expect(flux?.unit_price).toMatchObject({ unit: "request" });
-    // Unified Billing image with no unit rate stays unspendable.
+    // Unified Billing image/video carry operator unit rates (2026-08-05 unpark).
     const ubImage = body.data.find((model) => model.id === "google/nano-banana-2");
-    expect(ubImage?.spendable).toBe(false);
+    expect(ubImage?.spendable).toBe(true);
+    expect(ubImage?.unit_price).toMatchObject({ unit: "request", micro_usd_per_unit: 40_000 });
+    const ubVideo = body.data.find((model) => model.id === "xai/grok-imagine-video");
+    expect(ubVideo?.spendable).toBe(true);
+    expect(ubVideo?.unit_price).toMatchObject({ unit: "request", micro_usd_per_unit: 250_000 });
     expect(body.data.find((model) => model.id === MODEL)?.spendable).toBe(true);
   });
 
