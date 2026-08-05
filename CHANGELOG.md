@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-08-05
+
 ### Fixed
 
 - **Grok + Fable chat on play-proxy.** Root causes measured against AI Gateway:
