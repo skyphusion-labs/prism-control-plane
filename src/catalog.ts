@@ -1255,8 +1255,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: { microUsdPerUnit: 2000000, unit: "request", pricedAt: PRICED_AT_UNIT },
-    publishedRates: [{ unit: "per 5s request @ $0.40/s (operator)", usdPerUnit: 2.0 }],
+    unitPrice: { microUsdPerUnit: 3200000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per 8s request @ $0.40/s (operator)", usdPerUnit: 3.2 }],
   },
   {
     id: "google/veo-3.1-fast",
@@ -1268,8 +1268,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: { microUsdPerUnit: 750000, unit: "request", pricedAt: PRICED_AT_UNIT },
-    publishedRates: [{ unit: "per 5s request @ $0.15/s (operator)", usdPerUnit: 0.75 }],
+    unitPrice: { microUsdPerUnit: 1200000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per 8s request @ $0.15/s (operator)", usdPerUnit: 1.2 }],
   },
   {
     id: "bytedance/seedance-2.0",
@@ -1346,8 +1346,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: { microUsdPerUnit: 250000, unit: "request", pricedAt: PRICED_AT_UNIT },
-    publishedRates: [{ unit: "per 5s @ $0.05/s (xAI)", usdPerUnit: 0.25 }],
+    unitPrice: { microUsdPerUnit: 400000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per 8s @ $0.05/s (xAI)", usdPerUnit: 0.4 }],
   },
   {
     id: "xai/grok-imagine-video-1.5-preview",
@@ -1359,8 +1359,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: { microUsdPerUnit: 400000, unit: "request", pricedAt: PRICED_AT_UNIT },
-    publishedRates: [{ unit: "per 5s @ $0.08/s (xAI)", usdPerUnit: 0.4 }],
+    unitPrice: { microUsdPerUnit: 640000, unit: "request", pricedAt: PRICED_AT_UNIT },
+    publishedRates: [{ unit: "per 8s @ $0.08/s (xAI)", usdPerUnit: 0.4 }],
   },
   {
     id: "runwayml/gen-4.5",

@@ -283,23 +283,57 @@ export function buildVideoParams(modelId: string, prompt: string, imageUrl?: str
     }
   }
   if (image) {
-    // Minimal i2v shapes; full matrix lives in prism longrun-params.
+    // Per-model i2v shapes (mirror prism longrun-params; additionalProperties is false upstream).
     if (modelId.startsWith("bytedance/seedance")) {
-      return { image, prompt, aspect_ratio: "16:9", duration: 5, resolution: "720p" };
+      return {
+        image,
+        prompt,
+        aspect_ratio: "16:9",
+        duration: 5,
+        resolution: "720p",
+        fps: 24,
+        camera_fixed: false,
+        watermark: false,
+        generate_audio: false,
+      };
     }
     if (modelId.startsWith("minimax/hailuo")) {
-      return { first_frame_image: image, prompt, duration: 6, resolution: "768P" };
+      return {
+        first_frame_image: image,
+        prompt,
+        duration: 6,
+        resolution: "768P",
+        fast_pretreatment: false,
+        prompt_optimizer: true,
+      };
     }
     if (modelId.startsWith("runwayml/")) {
-      return { image_input: image, prompt, duration: 5 };
+      return {
+        image_input: image,
+        prompt,
+        duration: 5,
+        ratio: "1280:720",
+        content_moderation: { public_figure_threshold: "low" },
+      };
+    }
+    if (
+      modelId === "alibaba/hh1-i2v" ||
+      modelId === "alibaba/hh1.1-i2v" ||
+      modelId === "alibaba/wan-2.7-i2v"
+    ) {
+      const params: Record<string, unknown> = { image, resolution: "720P", duration: 5 };
+      if (prompt) params.prompt = prompt;
+      return params;
     }
     return { image, prompt };
   }
+  // text-to-video: prism longrun-params shape (duration is a STRING; generate_audio required on many schemas)
   return {
     prompt,
-    duration: "5s",
+    duration: "8s",
     aspect_ratio: "16:9",
     resolution: "720p",
+    generate_audio: true,
   };
 }
 
