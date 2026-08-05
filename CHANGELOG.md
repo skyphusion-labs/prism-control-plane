@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.4.8] - 2026-08-05
+
+### Fixed
+
+- **Video t2v params:** match prism (`duration: "8s"`, `generate_audio`, full i2v shapes). Rebase xAI/Veo unit rates to 8s default.
+
 ## [0.4.7] - 2026-08-05
 
 ### Added
