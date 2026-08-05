@@ -486,27 +486,27 @@ exists so the operator can see it in `/v1/usage`.
 ## Open decisions (Conrad)
 
 These are named rather than defaulted, because each one is a product or money decision that code
-does not get to invent:
+does not get to invent. Status updated 2026-08-05.
 
-1. **Enrollment source of truth.** Today: operator-minted one-time tokens. The mobile product needs
-   either App Store Server Notifications / Play RTDN receipt validation, a billing provider
-   (RevenueCat), or first-party accounts shared with prism `AUTH_MODE=public`. The enrollment table
-   is the seam; whichever lands mints tokens into it.
-2. **Plan pricing and credit prices.** The seeded `dev` plan (USD 1.00 signup credit, 20 rpm, 1024
-   output tokens, **standard+premium** tiers) is a PROVISIONAL placeholder for local work, not a
-   product tier. Operators can upsert plans via `POST /admin/plans`. What a user pays for credit, and
-   any margin over Cloudflare's rates, is unset.
+1. **Enrollment source of truth.** **DEFERRED** until further control-plane development is done
+   (ruling 2026-08-05). Today: operator-minted one-time tokens only. The enrollment table remains
+   the seam for App Store / Play RTDN, RevenueCat (or similar), or first-party accounts later.
+   Do not build receipt enrollment until this is un-parked.
+2. **Plan pricing and credit prices.** **DEFERRED** (ruling 2026-08-05). The seeded `dev` plan
+   stays provisional. Operators can still upsert via `POST /admin/plans`. Commercial plan numbers,
+   credit prices, and margin over Cloudflare rates are unset until un-parked.
 3. **Rates for the third-party models.** Settled for **chat**: all 45 catalog chat models have a
    rate (CF table or operator measured $0 for LLaVA). Unpriced remains the refusal for any future
-   model that lands without a number. Non-token rates for other modalities are separate (item 4).
-4. **Non-chat unit rates for Unified Billing.** Workers AI non-chat models with published rates are
-   unit-priced in the catalog. Unified Billing image/video/music often have no published unit rate
-   yet -- they need operator `unit_micro_usd` (and the Worker AI binding) before `spendable: true`.
-   Live voice uses `GET/WS /v1/stt/stream` (Flux); also requires AI + STT_SESSION bindings.
+   model that lands without a number. Runtime refresh: `POST /admin/catalog/refresh`. Non-token
+   rates for other modalities are separate (item 4).
+4. **Non-chat unit rates for Unified Billing.** **DEFERRED** (ruling 2026-08-05). Doors and
+   Workers AI published unit rates exist; operator `unit_micro_usd` for the rest of UB image/video
+   music can wait. Unpriced non-chat stays `spendable: false` / `model_unpriced` until un-parked.
 5. **Upstream credential.** Settled: one shared account-scoped Cloudflare token (`CF_AIG_TOKEN`) for
    every Prism account. Per-account attribution is gateway metadata plus this plane's ledger. One
    Cloudflare API token per user is **not product** (account ceiling is
    [500 tokens total](https://developers.cloudflare.com/fundamentals/api/reference/limits/)). No client
    ever sees an upstream credential.
-6. **Deployment identity.** Hostname, gateway id, and whether this plane fronts `play.skyphusion.org`
-   or a separate host.
+6. **Deployment identity.** **Settled (2026-08-05):** this plane stays on **`play-proxy.skyphusion.org`**
+   as a separate host from play (`play.skyphusion.org`). Gateway id remains `prism-proxy`. Do not
+   collapse the commercial proxy onto the play hostname without a new ruling.
