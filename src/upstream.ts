@@ -464,8 +464,14 @@ export function runnerFor(deps: GatewayRunnerDeps): InferenceRunner {
     headers: Record<string, string>,
     body: Record<string, unknown>,
   ): Promise<InferenceResult> {
+    // LLaVA native REST is routinely slower than chat; use the env ceiling (120s) rather than the
+    // default 60s so vision does not 504 on a healthy cold path (measured 2026-08-05).
+    const timeoutMs =
+      request.upstreamModel === LLAVA_MODEL_ID
+        ? Math.max(deps.timeoutMs, 120_000)
+        : deps.timeoutMs;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), deps.timeoutMs);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     let res: Response;
     try {
       res = await doFetch(url, {
@@ -477,7 +483,7 @@ export function runnerFor(deps: GatewayRunnerDeps): InferenceRunner {
     } catch (err) {
       clearTimeout(timer);
       const aborted = err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError");
-      if (aborted) return { outcome: "timeout", waitedMs: deps.timeoutMs };
+      if (aborted) return { outcome: "timeout", waitedMs: timeoutMs };
       return {
         outcome: "upstream_error",
         status: null,
