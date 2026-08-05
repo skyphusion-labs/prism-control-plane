@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **Dev plan `max_output_tokens` 1024 → 8192** (migration `0008`). 1024 was a provisional seed, not a normal chat ceiling; Opus/Sonnet on hard prompts burned the budget on invisible reasoning and returned empty content with `finish_reason=length`. Live D1 already applied; this lands the migration in git for deploy parity.
+
 ## [0.4.0] - 2026-08-05
 
 Ship the commercial metering surface past the v0.3.0 voice/non-chat cut: rate refresh, reconcile cron, DO sqlite migration fix, and product decision parking.
