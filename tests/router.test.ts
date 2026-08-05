@@ -718,7 +718,7 @@ describe("GET /v1/models", () => {
     expect(ubImage?.unit_price).toMatchObject({ unit: "request", micro_usd_per_unit: 40_000 });
     const ubVideo = body.data.find((model) => model.id === "xai/grok-imagine-video");
     expect(ubVideo?.spendable).toBe(true);
-    expect(ubVideo?.unit_price).toMatchObject({ unit: "request", micro_usd_per_unit: 250_000 });
+    expect(ubVideo?.unit_price).toMatchObject({ unit: "request", micro_usd_per_unit: 400_000 });
     expect(body.data.find((model) => model.id === MODEL)?.spendable).toBe(true);
   });
 
