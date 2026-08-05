@@ -19,7 +19,8 @@
 // The injected price is deliberate: a money decision that reads its own config can only be tested
 // against the values the environment happens to hold, not against the values that matter.
 
-import type { ModelPrice } from "./catalog";
+import type { CatalogEntry, TokenPrice } from "./catalog";
+import type { ModelPriceRow } from "./store";
 
 export interface TokenUsage {
   inputTokens: number;
@@ -83,7 +84,7 @@ export function extractUsage(body: unknown): TokenUsage | null {
  * rounding error in the vendor's own per-token rates, and it errs in the direction that keeps a
  * cost-recovery product solvent rather than the direction that silently subsidises it.
  */
-export function priceUsage(usage: TokenUsage, price: ModelPrice): MeterOutcome {
+export function priceUsage(usage: TokenUsage, price: TokenPrice): MeterOutcome {
   if (!Number.isInteger(price.inputMicroUsdPerMTok) || price.inputMicroUsdPerMTok < 0) {
     return {
       outcome: "unmetered",
@@ -109,7 +110,7 @@ export function priceUsage(usage: TokenUsage, price: ModelPrice): MeterOutcome {
  * Kept as one entry point so a caller cannot accidentally price a usage it did not validate, and so
  * the "no usable usage" path has exactly one wording of its reason.
  */
-export function meterResponse(body: unknown, price: ModelPrice): MeterOutcome {
+export function meterResponse(body: unknown, price: TokenPrice): MeterOutcome {
   const usage = extractUsage(body);
   if (!usage) {
     return {
@@ -121,4 +122,42 @@ export function meterResponse(body: unknown, price: ModelPrice): MeterOutcome {
     };
   }
   return priceUsage(usage, price);
+}
+
+/**
+ * The rate this request will be priced at, or null when there is none.
+ *
+ * AN OPERATOR OVERRIDE WINS over the compiled-in Cloudflare rate. That direction is deliberate: the
+ * compiled rate is what Cloudflare published on a stated day, and the day a vendor moves a price an
+ * operator must be able to follow it without shipping a deploy. It is also the ONLY way the 25 chat
+ * models Cloudflare publishes no rate for ever become spendable.
+ *
+ * A malformed override is REFUSED rather than ignored. Falling back to the catalog price would mean an
+ * operator who fat-fingered a rate silently gets the old one and believes the new one is live -- an
+ * invisible pricing error, which is worse than a model that stops serving until the row is fixed.
+ */
+export function resolvePrice(entry: CatalogEntry, override: ModelPriceRow | null): TokenPrice | null {
+  if (!override) return entry.price;
+  const input = override.input_micro_usd_per_mtok;
+  const output = override.output_micro_usd_per_mtok;
+  if (!Number.isInteger(input) || input < 0 || !Number.isInteger(output) || output < 0) return null;
+  return {
+    inputMicroUsdPerMTok: input,
+    outputMicroUsdPerMTok: output,
+    // An override carries no cached-input rate. Null rather than inheriting the catalog's: mixing an
+    // operator's two numbers with Cloudflare's third would produce a rate card nobody actually chose.
+    cachedInputMicroUsdPerMTok: null,
+    pricedAt: override.priced_at,
+  };
+}
+
+/**
+ * Price a usage object that arrived on its own, without a response body around it.
+ *
+ * This is the streaming path: the trailing SSE frame yields a bare `usage` object, and re-wrapping it so
+ * that `extractUsage` can find it keeps ONE reader for both paths. A second parallel usage reader for
+ * streams is exactly how a streamed request ends up priced by different rules than a buffered one.
+ */
+export function meterUsageObject(usage: unknown, price: TokenPrice): MeterOutcome {
+  return meterResponse({ usage }, price);
 }

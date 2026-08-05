@@ -7,13 +7,24 @@ import type { InferenceRunner } from "../inference";
 import type { Caller, ResolveFailure } from "../auth";
 import { resolveClient } from "../auth";
 import type { ControlPlaneStore } from "../store";
+import type { UpstreamCredentialSource } from "../token-minter";
 
 /**
  * Everything a handler needs, injected.
  *
- * `runner` is nullable on purpose: null means no AI Gateway is configured, and the inference route
- * turns that into 503. Routes that do not spend (health, models, usage) work fine without it, so a
- * misconfigured gateway does not take the whole plane down -- it closes the door that costs money.
+ * `runner` and `credentials` are nullable on purpose, and they are TWO separate nulls because they are two
+ * separate misconfigurations:
+ *
+ *   runner null        no account id or no gateway slug. There is nowhere to send inference.
+ *   credentials null   nothing to authenticate upstream with: in shared mode a missing CF_AIG_TOKEN, in
+ *                      per-user mode a missing minting token, KEK, or budget.
+ *
+ * Either closes the inference door with a 503 while leaving the read surface (health, models, usage)
+ * working, so a half-configured deploy is diagnosable instead of dark. Reporting them separately in
+ * /health/deep is what turns "503" into "which secret is missing".
+ *
+ * The routes never learn WHICH credential mode answered, and must not branch on it. That is what makes the
+ * mode a config decision rather than a second code path with its own gates to get wrong.
  *
  * `waitUntil` is passed rather than reached for, so a test can assert that the ledger write was
  * scheduled without running inside workerd.
@@ -22,6 +33,7 @@ export interface Ctx {
   env: Env;
   store: ControlPlaneStore;
   runner: InferenceRunner | null;
+  credentials: UpstreamCredentialSource | null;
   requestId: string;
   now: Date;
   waitUntil: (promise: Promise<unknown>) => void;

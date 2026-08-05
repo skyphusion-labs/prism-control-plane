@@ -11,16 +11,20 @@
 //   - an unmetered event advances requests and unmetered_requests but NOT micro_usd
 //   - consumeEnrollment is single-use and honours expiry
 //   - revokeClient is idempotent and reports whether THIS call revoked a live client
+//   - grantCredit is idempotent on the operator's key and reports whether THIS call granted
+//   - a metered event advances accounts.spent_micro_usd, which is the column the money gate reads
 
 import type {
   AccountRow,
   ClientRow,
   ControlPlaneStore,
+  ModelPriceRow,
   NewClient,
   PeriodRow,
   PlanRow,
   RateBucket,
   UsageEvent,
+  UserTokenRow,
 } from "../src/store";
 
 export interface FakeStoreOptions {
@@ -39,6 +43,9 @@ export class FakeStore implements ControlPlaneStore {
   periods = new Map<string, PeriodRow>();
   events: UsageEvent[] = [];
   buckets = new Map<string, RateBucket>();
+  userTokens = new Map<string, UserTokenRow>();
+  modelPrices = new Map<string, ModelPriceRow>();
+  grants = new Map<string, { account_id: string; micro_usd: number }>();
   nowSeconds: number;
   /** Set to make the next recordUsage throw, exercising the ledger-write-failure path. */
   failNextRecordUsage = false;
@@ -56,20 +63,64 @@ export class FakeStore implements ControlPlaneStore {
     return this.plans.get(id) ?? null;
   }
 
+  /**
+   * A COPY, not the stored object, and this is load-bearing rather than tidiness.
+   *
+   * D1 returns a snapshot: a row read at the top of a request does not change underneath the handler when a
+   * later write moves the same columns. Handing out the live Map value here breaks that, and it broke it in
+   * the direction that matters -- `recordUsage` advancing `spent_micro_usd` retroactively changed the
+   * `account` the route had already read, double-counting the spend in a response header. The bug was in this
+   * fake and not in production, which is the worst kind: a test that fails for a reason the real store does
+   * not have teaches the wrong lesson, and a test that PASSES that way hides a real one.
+   */
   async getAccount(id: string) {
-    return this.accounts.get(id) ?? null;
+    const row = this.accounts.get(id);
+    return row ? { ...row } : null;
   }
 
-  async createAccount(args: { id: string; plan_id: string; label: string | null }) {
+  async createAccount(args: {
+    id: string;
+    plan_id: string;
+    label: string | null;
+    credit_micro_usd: number;
+    grant_id: string;
+    grant_idempotency_key: string;
+  }) {
     const row: AccountRow = {
       id: args.id,
       plan_id: args.plan_id,
       label: args.label,
       created_at: this.iso(),
       suspended_at: null,
+      credit_micro_usd: args.credit_micro_usd,
+      spent_micro_usd: 0,
     };
     this.accounts.set(row.id, row);
+    this.grants.set(args.grant_idempotency_key, {
+      account_id: row.id,
+      micro_usd: args.credit_micro_usd,
+    });
     return row;
+  }
+
+  /** Idempotent on the key, exactly like the D1 INSERT OR IGNORE it stands in for. */
+  async grantCredit(args: {
+    id: string;
+    account_id: string;
+    micro_usd: number;
+    idempotency_key: string;
+    note: string | null;
+  }) {
+    const account = this.accounts.get(args.account_id);
+    const already = this.grants.has(args.idempotency_key);
+    if (!already) {
+      this.grants.set(args.idempotency_key, {
+        account_id: args.account_id,
+        micro_usd: args.micro_usd,
+      });
+      if (account) account.credit_micro_usd += args.micro_usd;
+    }
+    return { applied: !already, creditMicroUsd: account?.credit_micro_usd ?? 0 };
   }
 
   async getClientByKeyId(keyId: string) {
@@ -158,6 +209,49 @@ export class FakeStore implements ControlPlaneStore {
     if (event.metered) row.micro_usd += event.micro_usd;
     else row.unmetered_requests += 1;
     this.periods.set(key, row);
+
+    // The account counter the money gate reads. Advanced here for the same reason the D1 store does it:
+    // a test that asserts the prepaid gate must see spend where production sees it.
+    if (event.metered && event.micro_usd > 0) {
+      const account = this.accounts.get(event.account_id);
+      if (account) account.spent_micro_usd += event.micro_usd;
+    }
+  }
+
+  async getUserToken(accountId: string) {
+    return this.userTokens.get(accountId) ?? null;
+  }
+
+  async putUserToken(row: UserTokenRow) {
+    this.userTokens.set(row.account_id, { ...row });
+  }
+
+  async markUserTokenRevoked(accountId: string, at: number) {
+    const row = this.userTokens.get(accountId);
+    if (row && row.revoked_at === null) row.revoked_at = at;
+  }
+
+  async touchUserToken(accountId: string, at: number) {
+    const row = this.userTokens.get(accountId);
+    if (row) row.last_used_at = at;
+  }
+
+  async countLiveUserTokens() {
+    let n = 0;
+    for (const row of this.userTokens.values()) if (row.revoked_at === null) n += 1;
+    return n;
+  }
+
+  async getModelPrice(modelId: string) {
+    return this.modelPrices.get(modelId) ?? null;
+  }
+
+  async listModelPrices() {
+    return [...this.modelPrices.values()].sort((a, b) => a.model_id.localeCompare(b.model_id));
+  }
+
+  async putModelPrice(row: ModelPriceRow) {
+    this.modelPrices.set(row.model_id, { ...row });
   }
 
   async readRateBucket(key: string) {
@@ -182,7 +276,7 @@ export function testPlan(overrides: Partial<PlanRow> = {}): PlanRow {
   return {
     id: "test",
     name: "Test",
-    included_micro_usd: 1_000_000,
+    signup_credit_micro_usd: 1_000_000,
     requests_per_minute: 20,
     max_output_tokens: 1024,
     allowed_tiers: "standard",

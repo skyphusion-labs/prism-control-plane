@@ -15,10 +15,15 @@ A metering and policy layer in front of Cloudflare AI Gateway / Workers AI. It o
 what, and how much**. It does not own model behavior, prompt construction, or conversation storage.
 
 ```
-mobile client --(bearer client key)--> prism-control-plane --(AI binding)--> AI Gateway / Workers AI
+mobile client --(bearer client key)--> prism-control-plane --(AI REST API)--> AI Gateway --> model
                                               |
-                                              +-- D1: entitlements, per-period usage ledger
+                                              +-- D1: entitlements, prepaid credit, usage ledger
 ```
+
+The client's key never authenticates anything at Cloudflare. It authenticates against this plane, which
+holds its own Cloudflare credential and never hands it out. A device that could reach Cloudflare directly
+would be a device that bypasses the meter, so no version of this contract will ever return an upstream
+credential to a client.
 
 Deliberately NOT in this plane: conversation history, RAG, artifacts, projects. Those are
 [prism](https://github.com/skyphusion-labs/prism) concerns. A client that needs them talks to prism
@@ -28,10 +33,18 @@ as a separate API. This plane is the paid-inference door only.
 
 **Prompt and completion text is never persisted by this plane.** The usage ledger stores counts
 (tokens, micro-USD, model id, status) and nothing else; there is no column that can hold message
-content, and a test enforces that against the migration. AI Gateway request logging is off by
-default (`AI_GATEWAY_COLLECT_LOG` unset or `"false"`), so the gateway does not retain payloads
-either. Any future change that would persist text is a contract change, not an implementation
-detail.
+content, and a test enforces that against the migration.
+
+At the gateway, the two logging switches are set separately and only one of them is configurable:
+
+- `cf-aig-collect-log-payload: false` is sent on **every** upstream call and is **not** driven by any
+  environment variable. This is what drops prompt and completion bodies. It is an invariant, not a
+  default: a privacy line that can be switched off in config is not a line.
+- `cf-aig-collect-log` decides whether the metadata row exists at all, and defaults to on. That row
+  holds token counts, model, provider, status, cost and duration, which is what lets Cloudflare's own
+  per-request cost be reconciled against our ledger. It carries no content.
+
+Any future change that would persist text is a contract change, not an implementation detail.
 
 Consequence a client must understand: **this plane cannot replay, resume, or audit a conversation.**
 If a request fails after the model ran, the client holds the only copy of what it sent.
@@ -58,8 +71,8 @@ Authorization: Bearer pcp_<key_id>_<secret>
   logged.
 - `secret` is 43 characters of base64url (32 random bytes). Only its SHA-256 is stored server side.
   It is returned **exactly once**, at enrollment, and cannot be recovered.
-- A client key belongs to exactly one account. Quota and rate limits are enforced per **account**,
-  so several devices on one account share the allowance.
+- A client key belongs to exactly one account. Credit and rate limits are enforced per **account**,
+  so several devices on one account share one prepaid balance.
 
 Store the key in the platform keystore (iOS Keychain, Android Keystore / EncryptedSharedPreferences).
 Never in plain preferences, never in a log, never in an analytics payload.
@@ -109,25 +122,50 @@ not listed-and-forbidden: the picker in the app should never show an option that
   "object": "list",
   "data": [
     {
-      "id": "@cf/meta/llama-3.1-8b-instruct-fp8-fast",
-      "display_name": "Llama 3.1 8B (fast)",
+      "id": "@cf/meta/llama-3.2-3b-instruct",
+      "display_name": "Llama 3.2 3B",
+      "modality": "chat",
+      "billing": "workers-ai",
       "tier": "standard",
-      "context_window": 128000,
-      "max_output_tokens": 4096,
       "streaming": true,
+      "max_output_tokens": 4096,
+      "spendable": true,
       "price": {
-        "input_micro_usd_per_mtok": 45000,
-        "output_micro_usd_per_mtok": 384000,
-        "priced_at": "2026-08-04"
-      }
+        "input_micro_usd_per_mtok": 50900,
+        "output_micro_usd_per_mtok": 335000,
+        "priced_at": "2026-08-04",
+        "source": "cloudflare"
+      },
+      "published_rates": []
     }
   ]
 }
 ```
 
-`price` is published because this is a cost-recovery product and the client is expected to be able
-to show a user what their usage costs. `priced_at` is the date the rate was read off Cloudflare's
-published pricing; a client MUST NOT cache prices past a session.
+**`spendable` is the field a client branches on.** The catalog lists every model prism offers,
+including ones this plane will currently refuse, and `spendable: false` is how it says so up front. A
+picker should grey those out rather than discover the refusal at the error. Two things make an entry
+unspendable:
+
+- `modality` is not `chat`. Image, video, speech and music models are listed because prism offers
+  them, but their published rates are per tile, per step and per audio minute, and no meter for those
+  units exists here yet. Calling one returns `501 model_unsupported`.
+- `price` is `null`. Cloudflare publishes no per-token rate for the third-party Unified Billing
+  models, so this plane has no number to charge and refuses with `409 model_unpriced` until an
+  operator sets one.
+
+`max_output_tokens` may be `null`, which means **no vendor ceiling this plane can cite**, not
+unlimited: the effective cap is then the plan's alone. Only entries whose ceiling was read off a model
+page carry a number, because filling the rest in from a similar model would put unverified facts in a
+contract clients read.
+
+`price` is published because this is a cost-recovery product and the client is expected to show a
+user what usage costs. `priced_at` is the date the rate was read; `source` is `cloudflare` for a
+vendor-published rate and `operator` for one Skyphusion set itself, because those two carry different
+warranties. A client MUST NOT cache prices past a session.
+
+`published_rates` is **disclosure only**: non-token rates (per image, per audio minute) that this
+plane does not charge against. Never use it to compute a cost.
 
 ### `POST /v1/chat/completions`
 
@@ -155,8 +193,7 @@ so a client cannot believe it sent a parameter that was silently dropped.
   is deliberate: the cap exists to bound one request's cost, and a client should not have to know
   the plan's number to make a successful call.
 - `temperature` in `[0, 2]`, `top_p` in `(0, 1]`.
-- `stream` is part of v1 but **not implemented yet**: `true` returns `501 not_implemented`. See
-  "Open decisions".
+- `stream: true` is **implemented**. See "Streaming".
 
 Response `200` is the OpenAI shape, so an OpenAI-compatible SDK can consume it unchanged:
 
@@ -188,31 +225,58 @@ Metering facts ride in **headers**, not in the body, so the body stays SDK-compa
 | `prism-usage-micro-usd` | What THIS request consumed, integer micro-USD. `0` with `prism-metered: false` means the request was not meterable. |
 | `prism-metered` | `true` / `false`. See "Unmetered requests". |
 | `prism-usage-recorded` | `true` / `false`. Whether the ledger write landed. `false` means this completion was served and NOT charged. Surfaced rather than swallowed so the gap is visible from both ends; a client shows the user nothing for it. |
-| `prism-quota-period` | Billing period key, `YYYY-MM` in UTC. |
-| `prism-quota-used-micro-usd` | Period usage INCLUDING this request. |
-| `prism-quota-included-micro-usd` | Period allowance. |
-| `prism-quota-remaining-micro-usd` | Allowance left, clamped at 0. |
+| `prism-period` | Reporting period key, `YYYY-MM` in UTC. Groups usage for display; it does **not** reset the balance. |
+| `prism-credit-micro-usd` | Total prepaid credit ever granted to this account. |
+| `prism-spent-micro-usd` | Total ever recorded as spent, INCLUDING this request. |
+| `prism-credit-remaining-micro-usd` | Credit left, clamped at 0. |
 
-A client can render a live usage meter from the last four headers with no extra round-trip.
+A client can render a live balance from the last three headers with no extra round-trip.
+
+### Streaming
+
+`stream: true` returns `200` with `content-type: text/event-stream` and `prism-stream: true`. The
+frames are Cloudflare's own, relayed **unmodified**, so an OpenAI-compatible SDK consumes them
+unchanged. The stream ends with a usage frame and then `data: [DONE]`.
+
+**The money headers are absent on a stream, and that absence is deliberate.** `prism-usage-micro-usd`
+and `prism-metered` describe what a request cost, and the token counts only arrive in the final frame,
+long after the response headers were sent. Emitting a zero there would read as a free request, so the
+plane omits them instead. The credit headers are still present and reflect the position **before**
+this request. A client that needs the exact cost of a streamed request reads the usage frame or calls
+`GET /v1/usage` afterwards.
+
+Metering still happens: the plane reads the trailing usage frame as it passes and writes the ledger row
+when the stream settles. If that frame never arrives, the request is recorded **unmetered** with a
+reason rather than as free.
 
 ### `GET /v1/usage`
 
 ```json
 {
+  "credit_micro_usd": 1000000,
+  "spent_micro_usd": 21437,
+  "remaining_micro_usd": 978563,
+  "overage": false,
   "period": "2026-08",
   "period_start": "2026-08-01T00:00:00.000Z",
   "period_end": "2026-09-01T00:00:00.000Z",
-  "included_micro_usd": 1000000,
-  "used_micro_usd": 21437,
-  "remaining_micro_usd": 978563,
-  "requests": 42,
-  "unmetered_requests": 0
+  "period_micro_usd": 21437,
+  "period_requests": 42,
+  "period_unmetered_requests": 0
 }
 ```
 
-`unmetered_requests` is deliberately visible to the client. It is the count of calls this plane
-could not price. It should be zero; a non-zero value means the client got service that was not
-charged, and it is exposed rather than hidden so the gap is observable from both ends.
+The first three fields are the **balance**, and they are lifetime totals rather than per-period: credit
+ever granted, spend ever recorded, and what is left. The `period_*` fields are a reporting rollup for
+display and reset monthly; **the balance does not.** A client that renders the period figures as an
+allowance will be wrong about when service resumes, which is never, until a top-up.
+
+`overage: false` is published as a fact rather than left to be inferred from a missing field, because
+"what happens when I run out" is the first question a client implementer has. The answer is `402`.
+
+`period_unmetered_requests` is deliberately visible. It is the count of calls this plane could not
+price. It should be zero; a non-zero value means the client got service that was not charged, and it is
+exposed rather than hidden so the gap is observable from both ends.
 
 ## Errors
 
@@ -222,7 +286,7 @@ Every non-2xx response is:
 {
   "error": {
     "code": "quota_exhausted",
-    "message": "The account's included allowance for 2026-08 is spent.",
+    "message": "This account's prepaid credit is spent. There is no overage on this plane: top up to continue.",
     "request_id": "req_1a2b3c..."
   }
 }
@@ -237,13 +301,15 @@ Some codes add fields; a client MUST tolerate extra fields.
 | 401 | `client_revoked` | Never | Delete the stored key, return to enrollment. |
 | 403 | `forbidden` | No | Enrollment refused, or account suspended. |
 | 403 | `model_not_entitled` | No | Refresh `/v1/models`; the picker is stale. |
-| 402 | `quota_exhausted` | Not until next period | Show the allowance state. Includes `period` and `resets_at`. |
+| 402 | `quota_exhausted` | **Never** without a top-up | Prepaid credit is spent. Includes `credit_micro_usd` and `spent_micro_usd`. Show the balance; do not retry on a timer. |
 | 404 | `not_found` | No | Unknown route. |
 | 404 | `model_not_found` | No | Model is not in the catalog at all. Refresh `/v1/models`. |
+| 409 | `model_unpriced` | No | The model is real and entitled, but has no rate on our side. Refresh `/v1/models` and respect `spendable`. It becomes usable the moment a price is set, so do NOT drop it from the picker permanently. |
 | 413 | `payload_too_large` | No | Request body over the cap. Trim history. |
 | 429 | `rate_limited` | Yes, after `retry-after` | Back off. `retry-after` is seconds. |
 | 500 | `internal` | Once, with jitter | Report `request_id`. |
-| 501 | `not_implemented` | No | Feature declared in v1 but not shipped (today: `stream: true`). |
+| 501 | `not_implemented` | No | Feature declared in v1 but not shipped on this deployment. |
+| 501 | `model_unsupported` | No | The model's modality has no metered door here (not chat). Respect `spendable`. |
 | 502 | `upstream_error` | Yes, bounded | The model or gateway failed. Includes `upstream_status` when known. |
 | 503 | `unavailable` | Yes, bounded | Plane is misconfigured or a dependency is down. Fail-closed state. |
 | 504 | `upstream_timeout` | Yes, bounded | Model did not answer in time. |
@@ -252,36 +318,43 @@ Retry policy a client SHOULD implement: exponential backoff with jitter on 429 /
 504, at most 3 attempts, and **no retry at all** on 4xx other than 429. Retrying a `quota_exhausted`
 in a loop is the failure mode this table exists to prevent.
 
-### Why `402` for quota and `429` for rate
+### Why `402` for credit and `429` for rate
 
 They are different conditions and a client must be able to act differently:
 
 - `429 rate_limited` is **temporal**. The same request will succeed shortly. Back off and retry.
-- `402 quota_exhausted` is **budgetary**. The same request will not succeed until the period rolls
-  or the plan changes. Retrying is pointless and the UI should say so.
+- `402 quota_exhausted` is **budgetary**. The same request will not succeed until someone tops the
+  account up. Retrying is pointless and the UI should say so.
 
-Collapsing both into 429 would make a spent allowance look like a transient blip, and every client
-would hammer it.
+Collapsing both into 429 would make a spent balance look like a transient blip, and every client would
+hammer it.
 
-## Quota semantics, stated honestly
+## Money semantics, stated honestly
 
-- The allowance is per **account**, per **billing period**, in integer **micro-USD**
-  (1 USD = 1,000,000 micro-USD). Integers only; no floats anywhere in the money path.
-- The period is a **UTC calendar month**, key `YYYY-MM`.
-- The gate is checked **before** the model runs, against usage already recorded. The cost of the
-  request in flight is not known until it returns. So an account can overshoot its allowance by at
-  most **one request**, and that overshoot is bounded by the plan's `max_output_tokens`. This is
-  stated rather than hidden: a pre-flight gate on a post-hoc cost cannot be exact, and pretending
-  otherwise would be worse than the bound.
-- Usage inside the allowance produces **no charge and no overage row**. It is counted, not billed.
-- There is no overage billing in this build. When the allowance is spent, requests are refused.
-  Metered overage is an open decision, not a silent default.
+**Prepaid only. There is no overage, no postpaid, and no grace.** An account spends what it has been
+granted and not one request more. This is the entire money model, and its simplicity is the feature:
+there is no state in which this plane is owed money by a user.
+
+- The balance is per **account**, in integer **micro-USD** (1 USD = 1,000,000 micro-USD). Integers
+  only; no floats anywhere in the money path.
+- Credit is granted by an operator (and once at signup, per the plan's `signup_credit_micro_usd`). It
+  is **cumulative and never expires**. There is no monthly reset. The `YYYY-MM` period key exists to
+  group usage for reporting, nothing more.
+- The gate is checked **before** the model runs, against spend already recorded, because the cost of
+  the request in flight is not known until it returns. So an account can overshoot its balance by at
+  most **one request**, bounded by the plan's `max_output_tokens` against the most expensive entitled
+  model. This is stated rather than hidden: a pre-flight gate on a post-hoc cost cannot be exact, and
+  pretending otherwise would be worse than the bound.
+- **A negative balance is not a debt.** It is the recorded size of that single overshoot. Nobody is
+  invoiced for it; the account simply cannot spend again until credit covers it. `remaining_micro_usd`
+  clamps at 0 so a client never has to interpret a negative number as money owed.
 
 ### Unmetered requests
 
 If a model answers but reports no usable token counts, the plane records the request as
 **unmetered**: a ledger row with `metered = false`, a reason, zero micro-USD, and **no increment to
-the period counter**. The response still carries `prism-metered: false`.
+the spend counter**. The response still carries `prism-metered: false`. A stream that ends without its
+usage frame lands here too.
 
 This is a deliberate third outcome, not an error and not a zero. "Nothing was owed" and "we could
 not tell what was owed" are different facts, and collapsing them would turn every gap in the meter
@@ -296,19 +369,21 @@ exists so the operator can see it in `/v1/usage`.
 | Messages per request | 200 | `400 invalid_request` |
 | Requests per minute | plan `requests_per_minute` | `429 rate_limited` |
 | Output tokens per request | plan `max_output_tokens` | clamped, not rejected |
-| Included spend per period | plan `included_micro_usd` | `402 quota_exhausted` |
+| Total spend | account prepaid credit | `402 quota_exhausted` |
 
 ## Client checklist
 
 1. Store the client key in the platform keystore. Send it as `Authorization: Bearer`.
 2. On `401 client_revoked`, delete the key and re-enroll. Never retry.
 3. Fetch `/v1/models` at launch. Never hardcode a model id or a price.
-4. Clamp nothing client side; send what the user asked and read
+4. Offer only models with `spendable: true`. Everything else will be refused.
+5. Clamp nothing client side; send what the user asked and read
    `prism-max-tokens-applied`.
-5. Read the `prism-quota-*` headers on every completion to keep a local usage meter.
-6. Back off on 429 using `retry-after`. Do not retry 402.
-7. Tolerate unknown JSON fields and unknown error codes.
-8. Treat this plane as having no memory of your conversation. Persist locally.
+6. Read the `prism-credit-*` and `prism-spent-*` headers on every completion to keep a local balance.
+   Expect them to be absent from a streamed response's trailing facts; the cost is in the usage frame.
+7. Back off on 429 using `retry-after`. Do not retry 402; there is no timer that fixes it.
+8. Tolerate unknown JSON fields and unknown error codes.
+9. Treat this plane as having no memory of your conversation. Persist locally.
 
 ## Open decisions (Conrad)
 
@@ -319,18 +394,20 @@ does not get to invent:
    either App Store Server Notifications / Play RTDN receipt validation, a billing provider
    (RevenueCat), or first-party accounts shared with prism `AUTH_MODE=public`. The enrollment table
    is the seam; whichever lands mints tokens into it.
-2. **Plan pricing.** The seeded `dev` plan (USD 1.00 per month included, 20 rpm, 1024 output tokens)
-   is a PROVISIONAL placeholder for local work, not a product tier.
-3. **Overage.** Refuse at the allowance (today) or meter overage and bill it. If overage, the ledger
-   needs a settlement path and a payment rail.
-4. **Streaming.** `stream: true` is in the contract and returns 501. Shipping it means teeing the
-   SSE body to capture the trailing usage chunk; the meter already models "usage unavailable".
-5. **Model set and tiers.** The seeded catalog is Workers-AI-only (`@cf/`), which keeps spend on
-   Workers AI pricing rather than Unified Billing credits. Adding third-party models
-   (`openai/`, `anthropic/`) is a spend decision.
-6. **Gateway logging posture.** Default is `collectLog: false`, so the gateway retains nothing. The
-   alternative (log metadata but not payloads, via the REST path and
-   `cf-aig-collect-log-payload: false`) would give authoritative per-request cost from Cloudflare
-   instead of our own priced estimate. That is a privacy-vs-accuracy call.
-7. **Deployment identity.** Hostname, gateway id, and whether this plane fronts `play.skyphusion.org`
-   or a separate `api.` host.
+2. **Plan pricing and credit prices.** The seeded `dev` plan (USD 1.00 signup credit, 20 rpm, 1024
+   output tokens) is a PROVISIONAL placeholder for local work, not a product tier. What a user pays
+   for credit, and any margin over Cloudflare's rates, is unset.
+3. **Rates for the third-party models.** Cloudflare publishes no per-token rate for the Unified
+   Billing models, so they are listed as `spendable: false` and refused until an operator sets a price.
+   Each one needs a number before it can be sold.
+4. **Non-chat modalities.** Image, video, speech and music models are listed and refused. Metering them
+   needs a per-unit meter (per tile, per step, per audio minute) that does not exist yet.
+5. **Upstream credential mode.** This deployment authenticates to Cloudflare with a single
+   account-scoped credential and attributes per user through gateway metadata plus its own ledger. The
+   alternative, one Cloudflare API token per user, is implemented and bounded but **not** the default,
+   because a Cloudflare account may hold only
+   [500 API tokens in total](https://developers.cloudflare.com/fundamentals/api/reference/limits/)
+   across every service on it. Nothing in this contract changes either way: no client ever sees an
+   upstream credential.
+6. **Deployment identity.** Hostname, gateway id, and whether this plane fronts `play.skyphusion.org`
+   or a separate host.

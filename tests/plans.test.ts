@@ -23,26 +23,26 @@ describe("planFromRow", () => {
     const result = planFromRow(testPlan());
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.plan.includedMicroUsd).toBe(1_000_000);
+      expect(result.plan.signupCreditMicroUsd).toBe(1_000_000);
       expect(result.plan.allowedTiers).toEqual(["standard"]);
     }
   });
 
-  it("accepts an explicit zero allowance", () => {
-    // Zero is a decision (bill from the first micro-USD, refuse everything). Only a MALFORMED value is
-    // refused, and this asserts the two are not conflated.
-    expect(planFromRow(testPlan({ included_micro_usd: 0 })).ok).toBe(true);
+  it("accepts an explicit zero signup credit", () => {
+    // Zero is a decision (an account that must be topped up before it can do anything). Only a MALFORMED
+    // value is refused, and this asserts the two are not conflated.
+    expect(planFromRow(testPlan({ signup_credit_micro_usd: 0 })).ok).toBe(true);
   });
 
-  it("refuses a malformed allowance rather than coercing it", () => {
-    expect(planFromRow(testPlan({ included_micro_usd: -1 }))).toMatchObject({ ok: false });
-    expect(planFromRow(testPlan({ included_micro_usd: 1.5 }))).toMatchObject({ ok: false });
+  it("refuses a malformed signup credit rather than coercing it", () => {
+    expect(planFromRow(testPlan({ signup_credit_micro_usd: -1 }))).toMatchObject({ ok: false });
+    expect(planFromRow(testPlan({ signup_credit_micro_usd: 1.5 }))).toMatchObject({ ok: false });
   });
 
   it("refuses a non-positive rate limit or output ceiling", () => {
     expect(planFromRow(testPlan({ requests_per_minute: 0 }))).toMatchObject({ ok: false });
-    // max_output_tokens is what BOUNDS the single-request quota overshoot, so a bad value there quietly
-    // invalidates the contract's honest statement about how far an account can exceed its allowance.
+    // max_output_tokens is what BOUNDS the single-request prepaid overshoot, so a bad value there quietly
+    // invalidates the contract's honest statement about how far an account can exceed its credit.
     expect(planFromRow(testPlan({ max_output_tokens: 0 }))).toMatchObject({ ok: false });
   });
 });

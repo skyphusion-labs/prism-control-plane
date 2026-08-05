@@ -226,27 +226,41 @@ paths:
                 Whether the ledger write landed. "false" means this completion was served and not
                 charged; it is published rather than swallowed so the gap is visible.
               schema: { type: string, enum: ["true", "false"] }
-            prism-quota-remaining-micro-usd:
-              description: Period allowance left, clamped at 0.
-              schema: { type: integer }
-            prism-quota-period:
-              description: Billing period key, YYYY-MM in UTC.
+            prism-stream:
+              description: >-
+                Present and "true" only on a streamed response. On a stream, prism-usage-micro-usd and
+                prism-metered are ABSENT: the token counts arrive in the final SSE frame, after these
+                headers were sent, and emitting a zero would read as a free request.
+              schema: { type: string, enum: ["true"] }
+            prism-period:
+              description: >-
+                Reporting period key, YYYY-MM in UTC. Groups usage for display only; the prepaid
+                balance does not reset with it.
               schema: { type: string }
-            prism-quota-used-micro-usd:
-              description: Period usage including this request.
+            prism-credit-micro-usd:
+              description: Total prepaid credit ever granted to this account.
               schema: { type: integer }
-            prism-quota-included-micro-usd:
-              description: Period allowance.
+            prism-spent-micro-usd:
+              description: Total ever recorded as spent, including this request.
+              schema: { type: integer }
+            prism-credit-remaining-micro-usd:
+              description: Prepaid credit left, clamped at 0. Never negative; there is no debt.
               schema: { type: integer }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ChatCompletion" }
+            text/event-stream:
+              description: >-
+                Returned when `stream` is true. Cloudflare's own SSE frames, relayed unmodified, ending
+                with a usage frame and then `data: [DONE]`. Metering reads that usage frame in passing;
+                a stream that omits it is recorded unmetered rather than free.
+              schema: { type: string }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "402":
           description: >-
-            The account's included allowance for the period is spent. Code `quota_exhausted`.
-            Budgetary, not temporal: retrying will not help until the period rolls.
+            The account's prepaid credit is spent. Code `quota_exhausted`. Budgetary, not temporal:
+            there is no overage and no reset, so retrying will not help until someone tops up.
           content:
             application/json:
               schema:
@@ -257,11 +271,20 @@ paths:
                       error:
                         type: object
                         properties:
-                          period: { type: string }
-                          resets_at: { type: string, format: date-time }
+                          credit_micro_usd: { type: integer }
+                          spent_micro_usd: { type: integer }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404":
           description: The model is not in the catalog at all. Code `model_not_found`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "409":
+          description: >-
+            Code `model_unpriced`. The model is real and the plan entitles it, but this plane holds no
+            per-token rate for it, so serving it would be unmeterable spend. Not 404 and not 403: the
+            model returns the moment a rate is set, so a client must not drop it from its picker.
+            GET /v1/models publishes `spendable: false` for exactly these.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorEnvelope" }
@@ -274,8 +297,9 @@ paths:
         "500": { $ref: "#/components/responses/Internal" }
         "501":
           description: >-
-            Declared in v1 but not shipped. Today this is the only response to `stream: true`.
-            Code `not_implemented`.
+            Either `model_unsupported` (the model's modality has no metered door here: image, video,
+            speech and music are listed but not chargeable in token units) or `not_implemented` for a
+            v1 feature this deployment does not ship.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorEnvelope" }
@@ -377,6 +401,8 @@ components:
                 - payload_too_large
                 - rate_limited
                 - quota_exhausted
+                - model_unpriced
+                - model_unsupported
                 - not_implemented
                 - upstream_error
                 - upstream_timeout
@@ -399,13 +425,16 @@ components:
     Plan:
       type: object
       required:
-        [id, name, included_micro_usd, requests_per_minute, max_output_tokens, allowed_tiers]
+        [id, name, signup_credit_micro_usd, requests_per_minute, max_output_tokens, allowed_tiers]
       properties:
         id: { type: string }
         name: { type: string }
-        included_micro_usd:
+        signup_credit_micro_usd:
           type: integer
-          description: Period allowance in integer micro-USD. 1 USD = 1,000,000 micro-USD.
+          description: >-
+            One-time prepaid credit granted when an account is created on this plan, in integer
+            micro-USD (1 USD = 1,000,000 micro-USD). NOT a recurring allowance: nothing about this
+            number resets.
         requests_per_minute: { type: integer }
         max_output_tokens: { type: integer }
         allowed_tiers:
@@ -414,47 +443,118 @@ components:
 
     ModelPrice:
       type: object
-      required: [input_micro_usd_per_mtok, output_micro_usd_per_mtok, priced_at]
+      required: [input_micro_usd_per_mtok, output_micro_usd_per_mtok, priced_at, source]
       properties:
         input_micro_usd_per_mtok: { type: integer }
         output_micro_usd_per_mtok: { type: integer }
         priced_at:
           type: string
           format: date
-          description: Date the rate was read off published Cloudflare pricing.
+          description: Date the rate was read. A stale rate should look stale, not authoritative.
+        source:
+          type: string
+          enum: [cloudflare, operator]
+          description: >-
+            Whether this rate came from Cloudflare's published pricing or was set by a Skyphusion
+            operator. The two carry different warranties, so the origin is published rather than
+            flattened.
+
+    UnitRate:
+      type: object
+      required: [unit, usd_per_unit]
+      description: >-
+        A published rate whose unit is not tokens. DISCLOSURE ONLY: this plane charges nothing against
+        these, and a client must never use one to compute a cost.
+      properties:
+        unit: { type: string, examples: ["per 512x512 tile"] }
+        usd_per_unit: { type: number }
 
     Model:
       type: object
-      required: [id, display_name, tier, context_window, max_output_tokens, streaming, price]
+      required:
+        - id
+        - display_name
+        - modality
+        - billing
+        - tier
+        - streaming
+        - max_output_tokens
+        - spendable
+        - price
+        - published_rates
       properties:
         id: { type: string }
         display_name: { type: string }
+        modality:
+          type: string
+          enum: [chat, image, tts, stt, voice, music, video]
+        billing:
+          type: string
+          enum: [workers-ai, unified-billing]
+          description: Which Cloudflare rate card this model bills against.
         tier: { type: string, enum: [standard, premium] }
-        context_window: { type: integer }
-        max_output_tokens: { type: integer }
         streaming: { type: boolean }
-        price: { $ref: "#/components/schemas/ModelPrice" }
+        max_output_tokens:
+          type: [integer, "null"]
+          description: >-
+            Vendor ceiling on output tokens, or null when this plane has not verified one. NULL IS NOT
+            UNLIMITED: the effective cap is then the plan's alone.
+        spendable:
+          type: boolean
+          description: >-
+            Whether this plane will actually run this model. THE FIELD TO BRANCH ON. False when the
+            modality is not chat (501 model_unsupported) or when there is no rate (409 model_unpriced).
+        price:
+          oneOf:
+            - $ref: "#/components/schemas/ModelPrice"
+            - type: "null"
+          description: The rate that will be charged, or null when there is none.
+        published_rates:
+          type: array
+          items: { $ref: "#/components/schemas/UnitRate" }
 
     Usage:
       type: object
       required:
+        - credit_micro_usd
+        - spent_micro_usd
+        - remaining_micro_usd
+        - overage
         - period
         - period_start
         - period_end
-        - included_micro_usd
-        - used_micro_usd
-        - remaining_micro_usd
-        - requests
-        - unmetered_requests
+        - period_micro_usd
+        - period_requests
+        - period_unmetered_requests
+      description: >-
+        The first three fields are LIFETIME totals, not per-period: prepaid credit is cumulative and
+        never expires. The period_* fields are a reporting rollup that resets monthly; the BALANCE does
+        not. A client that treats the period figures as an allowance will be wrong about when service
+        resumes, which is never, until a top-up.
       properties:
+        credit_micro_usd:
+          type: integer
+          description: Total prepaid credit ever granted to this account.
+        spent_micro_usd:
+          type: integer
+          description: Total ever recorded as spent.
+        remaining_micro_usd:
+          type: integer
+          description: >-
+            Clamped at 0; never negative. A single request may overshoot the balance because its cost is
+            unknowable until the model answers, but that overshoot is not a debt and is never invoiced.
+        overage:
+          type: boolean
+          description: >-
+            Always false. Published as a fact rather than left to be inferred from a missing field,
+            because "what happens when I run out" is the first question a client implementer has. The
+            answer is 402.
         period: { type: string, examples: ["2026-08"] }
         period_start: { type: string, format: date-time }
         period_end: { type: string, format: date-time }
-        included_micro_usd: { type: integer }
-        used_micro_usd: { type: integer }
-        remaining_micro_usd: { type: integer, description: Clamped at 0; never negative. }
-        requests: { type: integer }
-        unmetered_requests:
+        period_micro_usd: { type: integer }
+        period_requests: { type: integer }
+        period_unmetered_requests:
           type: integer
           description: >-
             Calls this plane could not price. Should be 0. Exposed rather than hidden so a gap in the
@@ -491,7 +591,10 @@ components:
         stream:
           type: boolean
           default: false
-          description: Declared in v1; `true` currently returns 501 not_implemented.
+          description: >-
+            Stream the answer as SSE. Supported. The response is Cloudflare's own frames relayed
+            unmodified, and the per-request cost headers are absent because the token counts arrive
+            after the headers are sent.
 
     ChatCompletion:
       type: object

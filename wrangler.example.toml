@@ -1,75 +1,101 @@
-# prism-control-plane -- wrangler config TEMPLATE.
+# prism-control-plane deploy template. Copy to wrangler.toml (gitignored) and fill in the ids.
 #
-# THE TEMPLATE, not the config. `npm run bootstrap` copies this to wrangler.toml, which is
-# gitignored because it carries the D1 database id and (for a real deploy) the account's routing
-# facts. Edit THIS file; every binding change must also be mirrored in the hand-authored Env
-# interface (src/env.ts), which is what tsc checks against. Do NOT commit a generated
-# worker-configuration.d.ts.
-#
-# Estate convention, same as prism: no build step, no framework, TypeScript straight to workerd.
+# The committed file is a TEMPLATE, matching prism's convention: the live worker deploys from a
+# per-deployer wrangler.toml so that database ids and account ids are not baked into git.
 
 name = "prism-control-plane"
 main = "src/index.ts"
-compatibility_date = "2026-08-01"
+compatibility_date = "2026-05-01"
 
-# No workers.dev hostname and no preview URLs. Enrollment and the metered inference door are the
-# whole attack surface of this Worker, and a *.workers.dev host would be a second, unrouted way in
-# that no route rule or WAF policy covers.
+# NO *.workers.dev SURFACE. The plane is reached at play-proxy.skyphusion.org and nowhere else; a
+# workers.dev hostname would be a second, un-DNS'd door to the same metered routes.
 workers_dev = false
-preview_urls = false
 
-# Workers Logs. This is a LOW-volume Worker whose interesting events (an enrollment, a refused
-# quota, an unmetered request) are individually important, so full-rate capture is explicit rather
-# than left to a default that might sample away the one line that mattered.
-[observability]
-enabled = true
-head_sampling_rate = 1
+# THERE IS NO [ai] BINDING, and its absence is deliberate even though the default credential is a shared
+# one. The binding hard-codes ONE identity: the Worker's. Calling the AI REST API instead (src/upstream.ts)
+# makes the credential a per-request argument, which is what lets UPSTREAM_CREDENTIAL_MODE below be a config
+# switch rather than a rewrite. Adding the binding back would delete that choice.
 
-# The unified AI binding: Workers AI models directly, and third-party models through AI Gateway with
-# Unified Billing. This plane only ever calls models from src/catalog.ts, which is Workers-AI-only
-# today (see docs/CONTRACT.md open decision 5).
-[ai]
-binding = "AI"
-
-# Control-plane D1: accounts, plans, client keys, enrollments, the usage ledger, rate buckets.
-#
-# NO PROMPT OR COMPLETION TEXT EVER LANDS HERE. That is the privacy invariant in
-# docs/CONTRACT.md and tests/schema-privacy.test.ts enforces it against migrations/.
-#
-# Create it, then paste the id below:
-#   npx wrangler d1 create prism-control-plane
-#   npx wrangler d1 migrations apply prism-control-plane --local
 [[d1_databases]]
 binding = "DB"
 database_name = "prism-control-plane"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
-migrations_dir = "migrations"
+database_id = "PLACEHOLDER_RUN_wrangler_d1_create_THEN_PASTE_HERE"
+# Migrations live in ./migrations/. Apply with:
+#   npx wrangler d1 migrations apply prism-control-plane --remote
+
+# The custom domain. Wrangler creates the DNS record and the route for a hostname on a zone in this
+# account, so the hostname is IaC rather than a dashboard click.
+[[routes]]
+pattern = "play-proxy.skyphusion.org"
+custom_domain = true
+
+[observability]
+enabled = true
 
 [vars]
-# The AI Gateway slug every inference call is routed through. Empty is MEANINGFUL and is the
-# fail-closed default: with no gateway named, POST /v1/chat/completions answers
-# 503 unavailable rather than calling the model off-gateway. A metering plane whose calls bypass the
-# gateway has lost the attribution it exists to provide, so it refuses instead.
-AI_GATEWAY_ID = ""
+# The Cloudflare account inference runs on. A plain var: an account id is not a secret, and having it in
+# git is what lets a reviewer see which account this deploy spends against.
+CF_ACCOUNT_ID = "fabcb25d9c7eb087110ec474a03e50d2"
 
-# Whether AI Gateway stores a log row for each request. DEFAULT IS OFF, and that is a privacy
-# decision, not an oversight: the binding's gateway option is all-or-nothing (collectLog), so a
-# logged request stores the PAYLOAD, meaning prompts. Our own ledger prices the request from token
-# counts and never sees the text, so nothing is lost that this plane needs.
+# The AI Gateway slug every call routes through. UNSET CLOSES THE INFERENCE DOOR (503) rather than
+# calling Cloudflare directly: a metering plane whose traffic bypasses the gateway has thrown away the
+# attribution it exists for.
+AI_GATEWAY_ID = "prism-proxy"
+
+# Whether AI Gateway keeps a per-request METADATA row. Defaults on; only "false" turns it off.
 #
-# Set to "true" only with a deliberate decision recorded. The middle option (log metadata, drop
-# payloads, via the REST path plus cf-aig-collect-log-payload:false) is not wired; see
-# docs/CONTRACT.md open decision 6.
-AI_GATEWAY_COLLECT_LOG = "false"
+# THIS IS NOT THE PAYLOAD SWITCH. `cf-aig-collect-log-payload: false` is hard-wired in src/upstream.ts with
+# no env override, so prompts and completions are never stored either way -- privacy is an invariant here,
+# not a setting. This var only decides whether the row holding token counts, model, cost and duration
+# exists, and keeping it is what lets Cloudflare's own cost figure be reconciled against our ledger.
+# AI_GATEWAY_COLLECT_LOG = "true"
 
-# Upper bound on how long the plane waits for a model, in milliseconds. A request that outlives it
-# answers 504 upstream_timeout rather than holding a mobile client open. Empty means the documented
-# default in src/env.ts applies.
-UPSTREAM_TIMEOUT_MS = "60000"
-
-# SECRETS (npx wrangler secret put <NAME>; for local dev put them in .dev.vars, which is gitignored):
+# Which credential reaches the model: "shared" (default) or "per-user".
 #
-#   ADMIN_TOKEN  -- bearer for the operator surface (minting enrollment tokens, provisioning
-#                   accounts). UNSET MEANS THERE IS NO OPERATOR SURFACE: every /admin/* route
-#                   answers 503 unavailable. Fails closed by construction, so a deploy that forgot
-#                   the secret cannot be driven by anyone.
+# SHARED IS THE DEFAULT BECAUSE OF A HARD CLOUDFLARE CEILING: an account may hold 500 API tokens, total,
+# across every service on it (https://developers.cloudflare.com/fundamentals/api/reference/limits/). One
+# token per Prism user therefore caps the product in the low hundreds AND competes with vivijure's
+# per-tenant provisioning for the same slots. Cloudflare's documented way to attribute spend per user is
+# custom metadata, which this plane sends in both modes.
+#
+# "per-user" is supported and bounded, and buys Cloudflare-layer per-user revocation. Choose it only for a
+# deployment small enough to afford the slots, and set USER_TOKEN_BUDGET when you do.
+# UPSTREAM_CREDENTIAL_MODE = "shared"
+
+# Milliseconds to wait for a model before answering 504. Default 60000, ceiling 120000.
+# UPSTREAM_TIMEOUT_MS = "60000"
+
+# PER-USER MODE ONLY. How many of the account's 500 token slots this plane may consume. No default, on
+# purpose: a default would be a guess about how much of a SHARED quota one product may take. Subtract the
+# operator tokens and vivijure's tenant tokens yourself, then write down what is left.
+# USER_TOKEN_BUDGET = "50"
+
+# Worker secrets (npx wrangler secret put <NAME>):
+#
+#   CF_AIG_TOKEN       SHARED MODE (the default). One account-scoped token with AI Gateway Run and
+#                      Workers AI Read, and nothing else. Required in shared mode; without it the
+#                      inference route answers 503. Never sent to a client, never used to manage tokens.
+#
+#   ADMIN_TOKEN        Operator bearer for /admin/*. UNSET means there is no operator surface at all
+#                      (every /admin route answers 503), by construction rather than by discipline.
+#
+# PER-USER MODE ONLY, all three required together (partial config closes the door rather than falling
+# back to shared -- silently sharing a credential when isolation was asked for is worse than a 503):
+#
+#   PCP_CF_API_TOKEN   The ACCOUNT-LEVEL Cloudflare token used ONLY to mint and revoke per-user tokens.
+#                      Needs "Account API Tokens Write" (the dashboard calls it Account Tokens: Edit)
+#                      plus Workers AI Read and AI Gateway Run/Read so the tokens it mints can carry
+#                      them. MUST be dashboard-created: Cloudflare refuses API-created tokens any
+#                      token-management rights, so a token minted through this plane can never replace
+#                      it. Never used for inference; src/cf-api.ts has no path to a model.
+#
+#   USER_TOKEN_KEK     Base64 32-byte AES key encrypting minted per-user tokens at rest. Generate with:
+#                        openssl rand -base64 32
+#                      UNSET CLOSES THE INFERENCE DOOR. A plane that cannot encrypt a minted credential
+#                      must not mint one; the alternative is a spendable Cloudflare token in plaintext D1.
+#
+#   USER_TOKEN_KEK_NEXT             Optional second key, installed only during a rotation window.
+#                                   Reads try both keys; writes use the slot below. See token-crypto.ts.
+#   USER_TOKEN_KEK_ENCRYPT_SLOT     Optional "primary" (default) or "next": which key NEW ciphertext is
+#                                   written under. Naming "next" without installing it is a hard refusal,
+#                                   not a fallback.

@@ -12,7 +12,14 @@ import { FakeStore, testPlan } from "./fake-store";
 async function seededStore() {
   const store = new FakeStore();
   store.plans.set("test", testPlan());
-  await store.createAccount({ id: "acct_1", plan_id: "test", label: null });
+  await store.createAccount({
+    id: "acct_1",
+    plan_id: "test",
+    label: null,
+    credit_micro_usd: 1_000_000,
+    grant_id: "grant_seed",
+    grant_idempotency_key: "signup:acct_1",
+  });
   const minted = await mintClientKey();
   await store.createClient({
     id: minted.clientId,

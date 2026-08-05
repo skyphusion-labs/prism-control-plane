@@ -9,8 +9,13 @@ import type { PlanRow } from "./store";
 export interface Plan {
   id: string;
   name: string;
-  /** Period allowance in integer micro-USD. */
-  includedMicroUsd: number;
+  /**
+   * The OPENING GRANT in integer micro-USD, applied once when an account is created.
+   *
+   * NOT a recurring allowance. Prepaid means a balance that only moves when someone tops it up or
+   * something is spent; a monthly reset would be a grant of money nobody decided to give. See balance.ts.
+   */
+  signupCreditMicroUsd: number;
   requestsPerMinute: number;
   maxOutputTokens: number;
   allowedTiers: ModelTier[];
@@ -45,9 +50,9 @@ export type PlanResult =
  * malformed plan with a default has invented a policy at runtime. The three failure directions this
  * closes, all of which have a wrong-but-plausible fallback someone would otherwise reach for:
  *
- *   A non-integer or negative allowance. "Round it" or "treat it as 0" are both decisions this code
- *   does not get to make; one bills from the first micro-USD, the other refuses everything. Neither
- *   is what a typo meant.
+ *   A non-integer or negative opening grant. "Round it" or "treat it as 0" are both decisions this code
+ *   does not get to make; one grants money nobody approved, the other refuses every new account.
+ *   Neither is what a typo meant.
  *
  *   A non-positive rate limit. Defaulting to some number would mean the operator's intent (throttle
  *   this plan) is replaced by ours.
@@ -60,13 +65,13 @@ export type PlanResult =
  * this caller is entitled to, so it does not spend on their behalf.
  */
 export function planFromRow(row: PlanRow): PlanResult {
-  if (!Number.isInteger(row.included_micro_usd) || row.included_micro_usd < 0) {
+  if (!Number.isInteger(row.signup_credit_micro_usd) || row.signup_credit_micro_usd < 0) {
     return {
       ok: false,
       reason:
-        `plan "${row.id}" has included_micro_usd ${String(row.included_micro_usd)}, which is not a ` +
-        "non-negative integer. Refusing rather than coercing it: a malformed allowance and a chosen " +
-        "allowance of zero must not be the same outcome",
+        `plan "${row.id}" has signup_credit_micro_usd ${String(row.signup_credit_micro_usd)}, which is ` +
+        "not a non-negative integer. Refusing rather than coercing it: a malformed grant and a chosen " +
+        "grant of zero must not be the same outcome",
     };
   }
   if (!Number.isInteger(row.requests_per_minute) || row.requests_per_minute <= 0) {
@@ -86,7 +91,7 @@ export function planFromRow(row: PlanRow): PlanResult {
     plan: {
       id: row.id,
       name: row.name,
-      includedMicroUsd: row.included_micro_usd,
+      signupCreditMicroUsd: row.signup_credit_micro_usd,
       requestsPerMinute: row.requests_per_minute,
       maxOutputTokens: row.max_output_tokens,
       allowedTiers: parseTiers(row.allowed_tiers),
@@ -105,13 +110,17 @@ export function entitlesTier(plan: Plan, tier: ModelTier): boolean {
  * CLAMPS RATHER THAN REJECTS, and the contract promises that. The cap exists to bound one request's
  * cost, and a client should not need to know the plan's number to make a successful call. The applied
  * value is reported back in `prism-max-tokens-applied` so the clamp is visible rather than silent.
+ *
+ * `modelMax` of null means the catalog has no verified vendor ceiling for this model (most entries; see
+ * catalog.ts). The plan's cap then stands alone. Null is NOT unlimited: the plan's number is always
+ * enforced, so the bound that makes the balance overshoot finite still holds.
  */
 export function effectiveMaxTokens(
   requested: number | undefined,
   planMax: number,
-  modelMax: number,
+  modelMax: number | null,
 ): number {
-  const ceiling = Math.min(planMax, modelMax);
+  const ceiling = modelMax === null ? planMax : Math.min(planMax, modelMax);
   if (requested === undefined || !Number.isFinite(requested)) return ceiling;
   return Math.max(1, Math.min(Math.floor(requested), ceiling));
 }
@@ -121,7 +130,7 @@ export function publicPlan(plan: Plan): Record<string, unknown> {
   return {
     id: plan.id,
     name: plan.name,
-    included_micro_usd: plan.includedMicroUsd,
+    signup_credit_micro_usd: plan.signupCreditMicroUsd,
     requests_per_minute: plan.requestsPerMinute,
     max_output_tokens: plan.maxOutputTokens,
     allowed_tiers: plan.allowedTiers,

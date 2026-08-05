@@ -10,14 +10,32 @@
 //
 // Splitting them is what keeps "does the gate refuse" a unit test rather than an integration exercise.
 
-import { aiBindingRunner } from "./inference";
+import { restRunner } from "./upstream";
 import { errorResponse, newRequestId } from "./http";
 import { d1Store } from "./store-d1";
-import type { Env } from "./env";
+import { CfApi } from "./cf-api";
+import {
+  CF_ACCOUNT_TOKEN_QUOTA,
+  CfUserTokenProvider,
+  SharedTokenSource,
+  type UpstreamCredentialSource,
+} from "./token-minter";
+import { kekRing } from "./token-crypto";
+import {
+  credentialMode,
+  gatewayConfig,
+  userTokenBudget,
+  userTokenKekConfig,
+  type Env,
+} from "./env";
+import type { ControlPlaneStore } from "./store";
 import {
   handleCreateAccount,
   handleCreateEnrollment,
+  handleGrantCredit,
   handleRevokeClient,
+  handleRevokeUserToken,
+  handleSetModelPrice,
 } from "./routes/admin";
 import { handleMe, handleModels, handleUsage } from "./routes/account";
 import { handleChatCompletions } from "./routes/chat";
@@ -27,7 +45,43 @@ import type { Ctx } from "./routes/shared";
 
 export { SERVICE_NAME };
 
-const REVOKE_PATH = /^\/admin\/clients\/([A-Za-z0-9_-]{1,64})\/revoke$/;
+const REVOKE_CLIENT_PATH = /^\/admin\/clients\/([A-Za-z0-9_-]{1,64})\/revoke$/;
+const CREDIT_PATH = /^\/admin\/accounts\/([A-Za-z0-9_-]{1,64})\/credits$/;
+const REVOKE_TOKEN_PATH = /^\/admin\/accounts\/([A-Za-z0-9_-]{1,64})\/upstream-token\/revoke$/;
+
+/**
+ * The upstream credential source for this deployment, or null when it cannot issue one at all.
+ *
+ * NULL IS A CLOSED INFERENCE DOOR, never a fallback to the other mode. Falling back would be the worst
+ * possible behaviour in both directions: silently sharing one credential when the operator asked for
+ * per-user isolation, or silently minting against a finite account quota when they asked for shared. A
+ * half-configured deploy refuses to spend and says which switch is missing.
+ *
+ * PER-USER MODE NEEDS THREE THINGS and has no degraded mode. Without the minting token there is nothing to
+ * mint with; without a KEK there is nowhere safe to keep what was minted, and a spendable Cloudflare token
+ * in plaintext D1 is not a fallback but a breach waiting for a database dump; without a budget there is
+ * nothing stopping it from eating the account's shared token quota.
+ */
+export function upstreamCredentialSource(
+  env: Env,
+  store: ControlPlaneStore,
+  now: () => number,
+): UpstreamCredentialSource | null {
+  const gateway = gatewayConfig(env);
+  if (!gateway) return null;
+
+  if (credentialMode(env) === "shared") {
+    const token = (env.CF_AIG_TOKEN ?? "").trim();
+    return token ? new SharedTokenSource(token) : null;
+  }
+
+  const minting = (env.PCP_CF_API_TOKEN ?? "").trim();
+  const kek = userTokenKekConfig(env);
+  const budget = userTokenBudget(env, CF_ACCOUNT_TOKEN_QUOTA);
+  if (!minting || !kek || budget === null) return null;
+  const cf = new CfApi({ accountId: gateway.accountId, token: minting });
+  return new CfUserTokenProvider(cf, store, kekRing(kek.primary, kek.next, kek.slot), now, budget);
+}
 
 /**
  * The route table.
@@ -57,8 +111,15 @@ export async function handleRequest(ctx: Ctx, request: Request): Promise<Respons
   if (method === "POST" && path === "/admin/enrollments") {
     return await handleCreateEnrollment(ctx, request);
   }
-  const revoke = method === "POST" ? REVOKE_PATH.exec(path) : null;
-  if (revoke) return await handleRevokeClient(ctx, request, revoke[1]);
+  if (method === "POST" && path === "/admin/model-prices") {
+    return await handleSetModelPrice(ctx, request);
+  }
+  const revokeClient = method === "POST" ? REVOKE_CLIENT_PATH.exec(path) : null;
+  if (revokeClient) return await handleRevokeClient(ctx, request, revokeClient[1]);
+  const credit = method === "POST" ? CREDIT_PATH.exec(path) : null;
+  if (credit) return await handleGrantCredit(ctx, request, credit[1]);
+  const revokeToken = method === "POST" ? REVOKE_TOKEN_PATH.exec(path) : null;
+  if (revokeToken) return await handleRevokeUserToken(ctx, request, revokeToken[1]);
 
   return errorResponse(ctx.requestId, "not_found", `No route for ${method} ${path}.`);
 }
@@ -66,18 +127,22 @@ export async function handleRequest(ctx: Ctx, request: Request): Promise<Respons
 export default {
   async fetch(request: Request, env: Env, executionCtx: ExecutionContext): Promise<Response> {
     const requestId = newRequestId();
+    const now = new Date();
+    const store = d1Store(env.DB);
     const ctx: Ctx = {
       env,
-      store: d1Store(env.DB),
-      // NULL WHEN NO GATEWAY IS CONFIGURED, decided here at wiring time rather than mid-request. The
-      // inference route turns null into 503; every other route works normally, so a missing gateway closes
-      // the door that costs money without taking the read surface down with it.
-      runner: aiBindingRunner(env),
+      store,
+      // BOTH NULLS ARE DECIDED HERE, at wiring time rather than mid-request. A plane that discovers it has
+      // no gateway or no minting credential in the middle of a request has already decided to spend. The
+      // inference route turns either null into 503; every other route works normally, so a half-configured
+      // deploy closes the door that costs money without taking the read surface down with it.
+      runner: restRunner(env),
+      credentials: upstreamCredentialSource(env, store, () => Math.floor(now.getTime() / 1000)),
       requestId,
       // ONE clock per request. Threaded rather than read at each use so the period key, the completion's
       // `created`, and an enrollment's expiry cannot land either side of a period boundary within a single
       // request, and so tests can pin time without mocking the global Date.
-      now: new Date(),
+      now,
       waitUntil: (promise) => executionCtx.waitUntil(promise),
     };
 

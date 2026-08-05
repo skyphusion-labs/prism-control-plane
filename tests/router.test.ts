@@ -10,11 +10,16 @@ import { mintClientKey } from "../src/auth";
 import { sha256Hex } from "../src/crypto";
 import type { Env } from "../src/env";
 import type { InferenceRequest, InferenceResult, InferenceRunner } from "../src/inference";
+import type { CredentialOutcome, UpstreamCredentialSource } from "../src/token-minter";
 import type { Ctx } from "../src/routes/shared";
 import { FakeStore, testPlan } from "./fake-store";
 
 const NOW = new Date("2026-08-04T12:00:00.000Z");
 const MODEL = "@cf/meta/llama-3.2-3b-instruct";
+/** A catalog model Cloudflare publishes no per-token rate for. Unpriced until an operator says otherwise. */
+const UNPRICED_MODEL = "anthropic/claude-sonnet-5";
+/** A catalog model that is not chat, so it has no door here. */
+const IMAGE_MODEL = "@cf/black-forest-labs/flux-1-schnell";
 
 class FakeRunner implements InferenceRunner {
   calls: InferenceRequest[] = [];
@@ -24,6 +29,55 @@ class FakeRunner implements InferenceRunner {
     return this.result;
   }
 }
+
+/**
+ * A credential source that hands back a fixed credential.
+ *
+ * The point of asserting through a fake here is that the ROUTE's behaviour is what matters: that it asks for
+ * a credential, refuses when there is none, and never puts the value anywhere a client can see it. Which
+ * MODE produced the credential is deliberately invisible to the route, so the same fake covers both, and the
+ * real minter's Cloudflare conversation is tested separately in token-minter.test.ts.
+ */
+class FakeCredentialSource implements UpstreamCredentialSource {
+  asked: string[] = [];
+  revoked: string[] = [];
+  constructor(
+    private readonly outcome: CredentialOutcome,
+    readonly mode: "shared" | "per-user" = "per-user",
+  ) {}
+  async forAccount(accountId: string): Promise<CredentialOutcome> {
+    this.asked.push(accountId);
+    return this.outcome;
+  }
+  async revokeForAccount(accountId: string): Promise<boolean> {
+    this.revoked.push(accountId);
+    return true;
+  }
+}
+
+const OK_CREDENTIAL: CredentialOutcome = {
+  outcome: "ok",
+  credential: { tokenId: "cftok_1", value: "cf-secret-value" },
+  minted: false,
+};
+
+/** Build an SSE body the way Cloudflare's OpenAI-compatible stream does, usage last. */
+function sseStream(frames: string[]): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const frame of frames) controller.enqueue(encoder.encode(frame));
+      controller.close();
+    },
+  });
+}
+
+const STREAM_FRAMES = [
+  'data: {"choices":[{"delta":{"content":"Neurons "}}]}\n\n',
+  'data: {"choices":[{"delta":{"content":"measure compute."}}]}\n\n',
+  'data: {"choices":[],"usage":{"prompt_tokens":1000000,"completion_tokens":1000000}}\n\n',
+  "data: [DONE]\n\n",
+];
 
 /** A Workers-AI-shaped answer with usable token counts. */
 function okResult(inputTokens = 1_000_000, outputTokens = 1_000_000): InferenceResult {
@@ -41,17 +95,35 @@ interface Harness {
   ctx: Ctx;
   store: FakeStore;
   runner: FakeRunner | null;
+  credentials: FakeCredentialSource | null;
   key: string;
   clientId: string;
   deferred: Promise<unknown>[];
 }
 
 async function harness(
-  options: { result?: InferenceResult; plan?: ReturnType<typeof testPlan>; env?: Partial<Env>; withRunner?: boolean } = {},
+  options: {
+    result?: InferenceResult;
+    plan?: ReturnType<typeof testPlan>;
+    env?: Partial<Env>;
+    withRunner?: boolean;
+    withTokens?: boolean;
+    credential?: CredentialOutcome;
+    credentialMode?: "shared" | "per-user";
+    credit?: number;
+  } = {},
 ): Promise<Harness> {
   const store = new FakeStore({ nowSeconds: Math.floor(NOW.getTime() / 1000) });
-  store.plans.set("test", options.plan ?? testPlan());
-  await store.createAccount({ id: "acct_1", plan_id: "test", label: null });
+  const plan = options.plan ?? testPlan();
+  store.plans.set("test", plan);
+  await store.createAccount({
+    id: "acct_1",
+    plan_id: "test",
+    label: null,
+    credit_micro_usd: options.credit ?? plan.signup_credit_micro_usd,
+    grant_id: "grant_seed",
+    grant_idempotency_key: "signup:acct_1",
+  });
   const minted = await mintClientKey();
   await store.createClient({
     id: minted.clientId,
@@ -63,18 +135,30 @@ async function harness(
   });
 
   const runner = options.withRunner === false ? null : new FakeRunner(options.result ?? okResult());
+  const credentials =
+    options.withTokens === false
+      ? null
+      : new FakeCredentialSource(
+          options.credential ?? OK_CREDENTIAL,
+          options.credentialMode ?? "per-user",
+        );
   const deferred: Promise<unknown>[] = [];
   const ctx: Ctx = {
-    env: { AI_GATEWAY_ID: "prism-hosted", ...options.env } as Env,
+    env: {
+      CF_ACCOUNT_ID: "acct-cf",
+      AI_GATEWAY_ID: "prism-proxy",
+      ...options.env,
+    } as Env,
     store,
     runner,
+    credentials,
     requestId: "req_test0000000000000000",
     now: NOW,
     waitUntil: (promise) => {
       deferred.push(promise);
     },
   };
-  return { ctx, store, runner, key: minted.key, clientId: minted.clientId, deferred };
+  return { ctx, store, runner, credentials, key: minted.key, clientId: minted.clientId, deferred };
 }
 
 function chat(key: string | null, body: unknown): Request {
@@ -119,6 +203,51 @@ describe("health", () => {
     expect(response.status).toBe(503);
     const body = (await response.json()) as { checks: { name: string; ok: boolean }[] };
     expect(body.checks.find((check) => check.name === "ai_gateway")?.ok).toBe(false);
+  });
+
+  it("distinguishes a missing credential from a missing gateway", async () => {
+    // Both close the inference door with the same 503, which is correct behaviour and useless diagnostics.
+    // Separate checks are what turn "inference is down" into "which secret is missing".
+    const h = await harness({ withTokens: false });
+    const response = await handleRequest(h.ctx, get("/health/deep"));
+    expect(response.status).toBe(503);
+    const body = (await response.json()) as { checks: { name: string; ok: boolean }[] };
+    expect(body.checks.find((check) => check.name === "ai_gateway")?.ok).toBe(true);
+    expect(body.checks.find((check) => check.name === "upstream_credential")?.ok).toBe(false);
+  });
+
+  it("names the configured credential mode so a wrong deploy is visible", async () => {
+    // The mode is invisible to the routes by design, which is exactly why readiness has to say it out loud.
+    // A deploy that silently landed in shared mode when the operator meant per-user is otherwise
+    // indistinguishable from a working one until someone needs a per-user revocation and finds none.
+    const shared = await harness();
+    const sharedBody = (await (await handleRequest(shared.ctx, get("/health/deep"))).json()) as {
+      checks: { name: string; detail: string }[];
+    };
+    expect(
+      sharedBody.checks.find((check) => check.name === "upstream_credential")?.detail,
+    ).toContain("shared");
+
+    const perUser = await harness({ env: { UPSTREAM_CREDENTIAL_MODE: "per-user" } });
+    const perUserBody = (await (await handleRequest(perUser.ctx, get("/health/deep"))).json()) as {
+      checks: { name: string; detail: string }[];
+    };
+    expect(
+      perUserBody.checks.find((check) => check.name === "upstream_credential")?.detail,
+    ).toContain("per-user");
+  });
+
+  it("does not fail readiness over models Cloudflare publishes no rate for", async () => {
+    // Unpriced is the EXPECTED state for third-party Unified Billing models, so failing readiness over it
+    // would make the plane permanently unhealthy for a reason nobody can fix from here. The per-request
+    // model_unpriced refusal is where that gate belongs.
+    const h = await harness();
+    const response = await handleRequest(h.ctx, get("/health/deep"));
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { checks: { name: string; ok: boolean; detail: string }[] };
+    const pricing = body.checks.find((check) => check.name === "catalog_pricing");
+    expect(pricing?.ok).toBe(true);
+    expect(pricing?.detail).toContain("awaiting an operator rate");
   });
 
   it("answers readiness 200 when everything is wired", async () => {
@@ -211,14 +340,14 @@ describe("POST /v1/chat/completions", () => {
     const response = await handleRequest(h.ctx, chat(h.key, ASK));
     expect(response.status).toBe(200);
 
-    // 1,000,000 input at 51,000/Mtok = 51,000; 1,000,000 output at 335,000/Mtok = 335,000.
-    expect(response.headers.get("prism-usage-micro-usd")).toBe("386000");
+    // 1,000,000 input at 50,900/Mtok = 50,900; 1,000,000 output at 335,000/Mtok = 335,000.
+    expect(response.headers.get("prism-usage-micro-usd")).toBe("385900");
     expect(response.headers.get("prism-metered")).toBe("true");
     expect(response.headers.get("prism-usage-recorded")).toBe("true");
-    expect(response.headers.get("prism-quota-period")).toBe("2026-08");
-    expect(response.headers.get("prism-quota-used-micro-usd")).toBe("386000");
-    expect(response.headers.get("prism-quota-included-micro-usd")).toBe("1000000");
-    expect(response.headers.get("prism-quota-remaining-micro-usd")).toBe("614000");
+    expect(response.headers.get("prism-period")).toBe("2026-08");
+    expect(response.headers.get("prism-credit-micro-usd")).toBe("1000000");
+    expect(response.headers.get("prism-spent-micro-usd")).toBe("385900");
+    expect(response.headers.get("prism-credit-remaining-micro-usd")).toBe("614100");
     expect(response.headers.get("prism-model")).toBe(MODEL);
 
     // OpenAI-shaped body so an OpenAI SDK consumes it unchanged.
@@ -230,12 +359,26 @@ describe("POST /v1/chat/completions", () => {
     });
 
     expect(h.store.events).toHaveLength(1);
-    expect(h.store.events[0]).toMatchObject({ metered: true, micro_usd: 386_000, gateway_log_id: "log_1" });
+    expect(h.store.events[0]).toMatchObject({ metered: true, micro_usd: 385_900, gateway_log_id: "log_1" });
     expect(h.store.periods.get("acct_1|2026-08")).toMatchObject({
-      micro_usd: 386_000,
+      micro_usd: 385_900,
       requests: 1,
       unmetered_requests: 0,
     });
+    // The account counter, not just the period counter. This is the one the prepaid gate reads, so a period
+    // row that moves while the account's spend does not would leave the gate permanently open.
+    expect(h.store.accounts.get("acct_1")?.spent_micro_usd).toBe(385_900);
+  });
+
+  it("never leaks the upstream credential to the client", async () => {
+    // THE CUSTODY ASSERTION. A device holding this value could call api.cloudflare.com directly, on our
+    // account, past every gate in this plane. It must not appear in a body, a header, or an error.
+    const h = await harness();
+    const response = await handleRequest(h.ctx, chat(h.key, ASK));
+    const body = await response.text();
+    expect(body).not.toContain("cf-secret-value");
+    expect(JSON.stringify([...response.headers])).not.toContain("cf-secret-value");
+    expect(h.credentials?.asked).toEqual(["acct_1"]);
   });
 
   it("passes account attribution to the gateway and never message text", async () => {
@@ -253,36 +396,54 @@ describe("POST /v1/chat/completions", () => {
     expect(h.runner?.calls[0].maxTokens).toBe(1024);
   });
 
-  it("402s a spent allowance with the period and reset instant", async () => {
+  it("402s spent prepaid credit and does not spend anything more", async () => {
     const h = await harness();
-    h.store.periods.set("acct_1|2026-08", {
-      account_id: "acct_1",
-      period_key: "2026-08",
-      micro_usd: 1_000_000,
-      requests: 3,
-      unmetered_requests: 0,
-    });
+    const account = h.store.accounts.get("acct_1");
+    if (account) account.spent_micro_usd = account.credit_micro_usd;
     const response = await handleRequest(h.ctx, chat(h.key, ASK));
-    // 402, not 429: budgetary, not temporal. Retrying will not help until the period rolls.
+    // 402, not 429: budgetary, not temporal. Retrying will not help; only a top-up will.
     expect(response.status).toBe(402);
     expect(await response.json()).toMatchObject({
-      error: { code: "quota_exhausted", period: "2026-08", resets_at: "2026-09-01T00:00:00.000Z" },
+      error: { code: "quota_exhausted", credit_micro_usd: 1_000_000, spent_micro_usd: 1_000_000 },
     });
-    // And nothing was spent.
+    // Refused BEFORE the upstream call and before a credential was even requested: a refusal that has
+    // already asked Cloudflare for something is a refusal that costs money.
+    expect(h.runner?.calls).toHaveLength(0);
+    expect(h.credentials?.asked).toEqual([]);
+  });
+
+  it("stays 402 after the bounded overshoot rather than reporting a debt", async () => {
+    // The last allowed request can carry an account past its credit, because the cost is unknowable until
+    // the model answers. What must not happen is that state reading as anything other than "top up".
+    const h = await harness();
+    const account = h.store.accounts.get("acct_1");
+    if (account) account.spent_micro_usd = account.credit_micro_usd + 500_000;
+    const response = await handleRequest(h.ctx, chat(h.key, ASK));
+    expect(response.status).toBe(402);
     expect(h.runner?.calls).toHaveLength(0);
   });
 
-  it("503s an indeterminate usage position rather than blaming the account", async () => {
+  it("503s an indeterminate credit position rather than blaming the account", async () => {
+    // A corrupt counter is OUR bug. Answering 402 would tell a paying user their credit is gone when it may
+    // be untouched: plausible, user-blaming, and invisible to us.
     const h = await harness();
-    h.store.periods.set("acct_1|2026-08", {
-      account_id: "acct_1",
-      period_key: "2026-08",
-      micro_usd: -1,
-      requests: 0,
-      unmetered_requests: 0,
+    const account = h.store.accounts.get("acct_1");
+    if (account) account.spent_micro_usd = -1;
+    const response = await handleRequest(h.ctx, chat(h.key, ASK));
+    expect(response.status).toBe(503);
+    expect(h.runner?.calls).toHaveLength(0);
+  });
+
+  it("503s when no upstream credential can be obtained, without leaking why", async () => {
+    const h = await harness({
+      credential: { outcome: "unavailable", reason: "mint refused by Cloudflare: HTTP 403 authz" },
     });
     const response = await handleRequest(h.ctx, chat(h.key, ASK));
     expect(response.status).toBe(503);
+    const body = await response.text();
+    // The operator reason is a Cloudflare permissions detail. It belongs in the log, not on a phone.
+    expect(body).not.toContain("Cloudflare");
+    expect(body).not.toContain("403");
     expect(h.runner?.calls).toHaveLength(0);
   });
 
@@ -298,12 +459,53 @@ describe("POST /v1/chat/completions", () => {
     expect(await forbidden.json()).toMatchObject({ error: { code: "model_not_entitled" } });
   });
 
-  it("501s streaming rather than silently ignoring it", async () => {
-    const h = await harness();
+  it("relays a stream byte-for-byte and meters it from the trailing usage frame", async () => {
+    // TWO THINGS AT ONCE, and both matter. The bytes must reach the client unmodified, so an OpenAI SDK sees
+    // Cloudflare's own frames; and the token counts in the LAST frame must still land in the ledger, because
+    // a stream that serves without metering is exactly the hole this plane exists to close.
+    const h = await harness({
+      result: { outcome: "stream", stream: sseStream(STREAM_FRAMES), gatewayLogId: "log_stream" },
+    });
     const response = await handleRequest(h.ctx, chat(h.key, { ...ASK, stream: true }));
-    expect(response.status).toBe(501);
-    expect(await response.json()).toMatchObject({ error: { code: "not_implemented" } });
-    expect(h.runner?.calls).toHaveLength(0);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    expect(response.headers.get("prism-stream")).toBe("true");
+    // The price CANNOT be a header on a stream: the counts arrive after the headers are already sent. An
+    // honest absence is required here -- a zero would read as a free request.
+    expect(response.headers.get("prism-usage-micro-usd")).toBeNull();
+    expect(response.headers.get("prism-metered")).toBeNull();
+
+    expect(await response.text()).toBe(STREAM_FRAMES.join(""));
+
+    // The ledger row is written when the stream settles, via waitUntil.
+    await Promise.all(h.deferred);
+    expect(h.store.events).toHaveLength(1);
+    expect(h.store.events[0]).toMatchObject({
+      metered: true,
+      micro_usd: 385_900,
+      input_tokens: 1_000_000,
+      output_tokens: 1_000_000,
+      gateway_log_id: "log_stream",
+    });
+  });
+
+  it("records a stream with no usage frame as unmetered rather than as free", async () => {
+    // The unmetered doctrine, on the streaming path. A stream that ends without the usage frame we asked for
+    // is service we cannot price; it goes in the ledger with a reason so the gap is countable.
+    const h = await harness({
+      result: {
+        outcome: "stream",
+        stream: sseStream(['data: {"choices":[{"delta":{"content":"hi"}}]}\n\n', "data: [DONE]\n\n"]),
+        gatewayLogId: null,
+      },
+    });
+    const response = await handleRequest(h.ctx, chat(h.key, { ...ASK, stream: true }));
+    expect(response.status).toBe(200);
+    await response.text();
+    await Promise.all(h.deferred);
+    expect(h.store.events).toHaveLength(1);
+    expect(h.store.events[0]).toMatchObject({ metered: false, micro_usd: 0 });
+    expect(h.store.events[0].unmetered_reason).toBeTruthy();
   });
 
   it("503s when no gateway is configured instead of calling off-gateway", async () => {
@@ -370,7 +572,7 @@ describe("POST /v1/chat/completions", () => {
     expect(response.status).toBe(504);
     expect(await response.json()).toMatchObject({ error: { code: "upstream_timeout" } });
     expect(h.store.events[0]).toMatchObject({ metered: false, micro_usd: 0 });
-    expect(h.store.events[0].unmetered_reason).toContain("may have run");
+    expect(h.store.events[0].unmetered_reason).toContain("did not answer");
     expect(h.store.periods.get("acct_1|2026-08")?.unmetered_requests).toBe(1);
   });
 
@@ -421,7 +623,9 @@ describe("POST /v1/chat/completions", () => {
     // rather than swallowed.
     expect(response.status).toBe(200);
     expect(response.headers.get("prism-usage-recorded")).toBe("false");
-    expect(response.headers.get("prism-quota-used-micro-usd")).toBe("0");
+    // The spend header reports what was RECORDED, so an unrecorded charge reads as zero spend rather than as
+    // a balance movement that never happened.
+    expect(response.headers.get("prism-spent-micro-usd")).toBe("0");
     expect(h.store.events).toHaveLength(0);
   });
 
@@ -432,31 +636,111 @@ describe("POST /v1/chat/completions", () => {
     // Same pinned request id both times: the ledger ignores the duplicate and the counter does not move
     // twice. A retried write must never advance the rolled-up total past the rows it summarises.
     expect(h.store.events).toHaveLength(1);
-    expect(h.store.periods.get("acct_1|2026-08")?.micro_usd).toBe(386_000);
+    expect(h.store.periods.get("acct_1|2026-08")?.micro_usd).toBe(385_900);
+    expect(h.store.accounts.get("acct_1")?.spent_micro_usd).toBe(385_900);
+  });
+
+  it("409s a chat model Cloudflare publishes no rate for", async () => {
+    // The model is real and the plan may well entitle it. What is missing is a rate on OUR side, so this is a
+    // conflict with server state (409) and not a fact about the request. Serving it would be unmeterable
+    // spend, which is the one thing this plane exists to prevent.
+    const h = await harness({ plan: testPlan({ allowed_tiers: "standard,premium" }) });
+    const response = await handleRequest(h.ctx, chat(h.key, { ...ASK, model: UNPRICED_MODEL }));
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: "model_unpriced" } });
+    expect(h.runner?.calls).toHaveLength(0);
+  });
+
+  it("serves an unpriced model once an operator sets a rate", async () => {
+    // The override is what makes the catalog's unpriced half reachable, and it must flow all the way through
+    // to the meter -- not just to the listing. If it did not, the 409 above would be permanent.
+    const h = await harness({ plan: testPlan({ allowed_tiers: "standard,premium" }) });
+    await h.store.putModelPrice({
+      model_id: UNPRICED_MODEL,
+      input_micro_usd_per_mtok: 3_000_000,
+      output_micro_usd_per_mtok: 15_000_000,
+      priced_at: "2026-08-04",
+      note: null,
+    });
+    const response = await handleRequest(h.ctx, chat(h.key, { ...ASK, model: UNPRICED_MODEL }));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("prism-usage-micro-usd")).toBe("18000000");
+    expect(h.store.events[0]).toMatchObject({ metered: true, micro_usd: 18_000_000 });
+  });
+
+  it("501s a non-chat modality rather than pretending to meter it", async () => {
+    // Image, video and audio models are in the catalog because prism offers them, but their published rates
+    // are per tile, per step and per audio minute, and no meter for those units exists here. Listing them and
+    // refusing with a named reason beats hiding them or charging a guess.
+    const h = await harness({ plan: testPlan({ allowed_tiers: "standard,premium" }) });
+    const response = await handleRequest(h.ctx, chat(h.key, { ...ASK, model: IMAGE_MODEL }));
+    expect(response.status).toBe(501);
+    expect(await response.json()).toMatchObject({ error: { code: "model_unsupported" } });
+    expect(h.runner?.calls).toHaveLength(0);
+  });
+});
+
+describe("GET /v1/models", () => {
+  it("publishes spendable=false for a model it would refuse", async () => {
+    // The contract's promise: a well-behaved client never has to discover the 409 or the 501, because this
+    // list already told it which models are actually usable.
+    const h = await harness({ plan: testPlan({ allowed_tiers: "standard,premium" }) });
+    const response = await handleRequest(h.ctx, get("/v1/models", h.key));
+    const body = (await response.json()) as {
+      data: { id: string; spendable: boolean; price: unknown }[];
+    };
+    const unpriced = body.data.find((model) => model.id === UNPRICED_MODEL);
+    expect(unpriced).toMatchObject({ spendable: false, price: null });
+    const image = body.data.find((model) => model.id === IMAGE_MODEL);
+    expect(image?.spendable).toBe(false);
+    expect(body.data.find((model) => model.id === MODEL)?.spendable).toBe(true);
+  });
+
+  it("publishes an operator override as the price that will be charged", async () => {
+    // Publishing the catalog's null while metering against an override would make the published price a lie
+    // in the direction of a surprise bill.
+    const h = await harness({ plan: testPlan({ allowed_tiers: "standard,premium" }) });
+    await h.store.putModelPrice({
+      model_id: UNPRICED_MODEL,
+      input_micro_usd_per_mtok: 3_000_000,
+      output_micro_usd_per_mtok: 15_000_000,
+      priced_at: "2026-08-04",
+      note: null,
+    });
+    const response = await handleRequest(h.ctx, get("/v1/models", h.key));
+    const body = (await response.json()) as {
+      data: { id: string; spendable: boolean; price: { source: string } | null }[];
+    };
+    const overridden = body.data.find((model) => model.id === UNPRICED_MODEL);
+    expect(overridden?.spendable).toBe(true);
+    expect(overridden?.price?.source).toBe("operator");
   });
 });
 
 describe("GET /v1/usage", () => {
-  it("reports the period, the allowance, and the unmetered count", async () => {
+  it("reports the prepaid position and the unmetered count", async () => {
     const h = await harness();
     await handleRequest(h.ctx, chat(h.key, ASK));
     const response = await handleRequest(h.ctx, get("/v1/usage", h.key));
     expect(await response.json()).toEqual({
+      credit_micro_usd: 1_000_000,
+      spent_micro_usd: 385_900,
+      remaining_micro_usd: 614_100,
+      // Published as a fact rather than left to be inferred from the absence of an overage field.
+      overage: false,
       period: "2026-08",
       period_start: "2026-08-01T00:00:00.000Z",
       period_end: "2026-09-01T00:00:00.000Z",
-      included_micro_usd: 1_000_000,
-      used_micro_usd: 386_000,
-      remaining_micro_usd: 614_000,
-      requests: 1,
-      unmetered_requests: 0,
+      period_micro_usd: 385_900,
+      period_requests: 1,
+      period_unmetered_requests: 0,
     });
   });
 
-  it("reports a fresh account as zero rather than failing", async () => {
+  it("reports a fresh account as zero spend rather than failing", async () => {
     const h = await harness();
     const response = await handleRequest(h.ctx, get("/v1/usage", h.key));
-    expect(await response.json()).toMatchObject({ used_micro_usd: 0, requests: 0 });
+    expect(await response.json()).toMatchObject({ spent_micro_usd: 0, period_requests: 0 });
   });
 });
 
@@ -467,7 +751,7 @@ describe("GET /v1/me", () => {
     expect(await response.json()).toMatchObject({
       client: { id: h.clientId, platform: "ios" },
       account: { id: "acct_1", plan_id: "test", status: "active" },
-      plan: { id: "test", included_micro_usd: 1_000_000, allowed_tiers: ["standard"] },
+      plan: { id: "test", signup_credit_micro_usd: 1_000_000, allowed_tiers: ["standard"] },
       usage: { period: "2026-08" },
     });
   });

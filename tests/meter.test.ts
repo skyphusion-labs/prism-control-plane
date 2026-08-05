@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { extractUsage, meterResponse, priceUsage } from "../src/meter";
-import type { ModelPrice } from "../src/catalog";
+import type { TokenPrice } from "../src/catalog";
 
-const PRICE: ModelPrice = {
+const PRICE: TokenPrice = {
   inputMicroUsdPerMTok: 100_000,
   outputMicroUsdPerMTok: 300_000,
+  cachedInputMicroUsdPerMTok: null,
   pricedAt: "2026-08-04",
 };
 

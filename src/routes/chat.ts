@@ -6,27 +6,31 @@
 //   2. shape            refuse before authenticating (a malformed body needs no D1 read)
 //   3. identity         who is this
 //   4. plan             what are they entitled to, or refuse if we cannot tell
-//   5. rate limit       before touching the catalog or the quota counter
-//   6. model + tier     is this model real, and may they have it
-//   7. gateway wired    fail closed if we cannot route through the meter
-//   8. allowance        do they have budget left
-//   9. spend            call the model
-//  10. meter            price it, record it, THEN answer
+//   5. rate limit       before touching the catalog or the money counters
+//   6. model + tier     is this model real, is it a chat model, and may they have it
+//   7. price            is there a rate at all -- a model we cannot price is not spendable
+//   8. wiring           gateway and minting credential, or fail closed
+//   9. balance          is there prepaid credit left
+//  10. credential       get or mint this user's own upstream token
+//  11. spend            call the model
+//  12. meter            price it, record it, THEN answer
 //
-// Nothing that costs money happens before step 9, and step 10 is awaited: this plane does not hand back
-// a completion it has not tried to record.
+// Nothing that costs money happens before step 11. For a buffered response step 12 is AWAITED: this plane
+// does not hand back a completion it has not tried to record. For a stream it cannot be, because the token
+// counts arrive after the headers -- see the streaming section for what replaces it.
 
 import { errorResponse, jsonResponse } from "../http";
 import { findModel } from "../catalog";
 import { parseChatRequest } from "../chat-request";
 import { extractFinishReason, extractText } from "../inference";
-import { meterResponse } from "../meter";
+import { meterResponse, meterUsageObject, resolvePrice } from "../meter";
 import { periodBounds } from "../period";
 import { effectiveMaxTokens, entitlesTier, planFromRow } from "../plans";
-import { decideAllowance, remainingMicroUsd } from "../quota";
+import { decideBalance, remainingMicroUsd } from "../balance";
 import { checkRateLimit, inferenceBucket } from "../rate-limit";
 import { newId } from "../crypto";
 import { readJsonBody } from "../http";
+import { meteredRelay } from "../stream";
 import type { UsageEvent } from "../store";
 import { requireCaller, type Ctx } from "./shared";
 
@@ -69,15 +73,27 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
     );
   }
 
-  // 6. The allowlist. An id outside the catalog is a 404 (it does not exist here at all); an id inside
-  // the catalog that the plan does not reach is a 403. Different facts, different client actions: the
-  // first means the picker is wrong, the second means the plan is.
+  // 6. The allowlist. An id outside the catalog is a 404 (it does not exist here at all); an id inside the
+  // catalog that the plan does not reach is a 403. Different facts, different client actions: the first
+  // means the picker is wrong, the second means the plan is.
   const model = findModel(req.model);
   if (!model) {
     return errorResponse(
       ctx.requestId,
       "model_not_found",
       `Model "${req.model}" is not in this deployment's catalog. Refresh GET /v1/models.`,
+    );
+  }
+  // The catalog carries every model prism offers, across seven modalities. This door serves chat. An
+  // image or video model reaching here is a real client mistake and deserves its own answer rather than a
+  // confusing shape error from a model that was never going to return a completion.
+  if (model.modality !== "chat") {
+    return errorResponse(
+      ctx.requestId,
+      "model_unsupported",
+      `Model "${model.id}" is a ${model.modality} model. This deployment exposes chat only; ` +
+        "its price is per tile, step or audio minute and no meter for those units exists yet.",
+      { modality: model.modality },
     );
   }
   if (!entitlesTier(plan, model.tier)) {
@@ -87,19 +103,34 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
       `Plan "${plan.id}" does not include ${model.tier}-tier models. Refresh GET /v1/models.`,
     );
   }
-
-  // Declared in the contract, not shipped. A 501 naming the reason beats silently ignoring `stream` and
-  // returning one big non-streaming blob, which would look like a broken client to whoever debugs it.
-  if (req.stream) {
+  if (req.stream && !model.streaming) {
     return errorResponse(
       ctx.requestId,
-      "not_implemented",
-      "Streaming is declared in contract v1 but is not implemented yet. Send stream:false.",
+      "invalid_request",
+      `Model "${model.id}" does not stream. Send stream:false, or see GET /v1/models.`,
     );
   }
 
-  // 7. Fail closed on an unconfigured gateway. A metering plane whose traffic bypasses the gateway has
-  // discarded the attribution it exists for, so it declines rather than calling the model directly.
+  // 7. THE PRICE GATE. Cloudflare publishes no per-token rate for third-party Unified Billing models, so a
+  // large part of the catalog arrives unpriced. Serving one would be host-billed spend with no meter behind
+  // it, which is the single failure this plane exists to prevent. An operator sets a rate in `model_prices`
+  // and the model becomes spendable with no deploy. GET /v1/models publishes `spendable` so a correct
+  // client never reaches this refusal.
+  const priceOverride = await ctx.store.getModelPrice(model.id);
+  const price = resolvePrice(model, priceOverride);
+  if (!price) {
+    return errorResponse(
+      ctx.requestId,
+      "model_unpriced",
+      `Model "${model.id}" has no per-token rate on this deployment, so it cannot be metered and is ` +
+        "refused. An operator must set one before it can be spent against.",
+      { billing: model.billing },
+    );
+  }
+
+  // 8. Fail closed on missing wiring. Two distinct conditions, logged distinctly: without a gateway there is
+  // nowhere to send the call, and without a credential source there is nothing to send it with. Either one
+  // served anyway would be inference this plane cannot attribute or stop.
   if (!ctx.runner) {
     return errorResponse(
       ctx.requestId,
@@ -107,56 +138,74 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
       "No AI Gateway is configured on this deployment, so inference is closed. Requests are refused rather than routed off-gateway.",
     );
   }
+  if (!ctx.credentials) {
+    return errorResponse(
+      ctx.requestId,
+      "unavailable",
+      "This deployment has no upstream credential configured, so inference is closed rather than attempted unauthenticated.",
+    );
+  }
 
-  // 8. The allowance gate. See quota.ts for why this can be exceeded by exactly one request, and why
+  // 9. The prepaid gate. See balance.ts for why this can be exceeded by exactly one request, and why
   // `indeterminate` answers 503 rather than 402.
-  const bounds = periodBounds(ctx.now);
-  const periodRow = await ctx.store.getPeriod(account.id, bounds.key);
-  const usedBefore = periodRow?.micro_usd ?? 0;
-  const allowance = decideAllowance({
-    usedMicroUsd: usedBefore,
-    includedMicroUsd: plan.includedMicroUsd,
+  const balance = decideBalance({
+    creditMicroUsd: account.credit_micro_usd,
+    spentMicroUsd: account.spent_micro_usd,
   });
-  if (allowance.outcome === "exhausted") {
+  if (balance.outcome === "exhausted") {
     return errorResponse(
       ctx.requestId,
       "quota_exhausted",
-      `The included allowance for ${bounds.key} is spent (${allowance.usedMicroUsd} of ${allowance.includedMicroUsd} micro-USD).`,
-      { period: bounds.key, resets_at: bounds.end },
+      `This account's prepaid credit is spent (${balance.spentMicroUsd} of ${balance.creditMicroUsd} micro-USD). ` +
+        "There is no overage on this plane: top up to continue.",
+      { credit_micro_usd: balance.creditMicroUsd, spent_micro_usd: balance.spentMicroUsd },
     );
   }
-  if (allowance.outcome === "indeterminate") {
-    console.error("allowance is indeterminate", {
+  if (balance.outcome === "indeterminate") {
+    console.error("balance is indeterminate", {
       requestId: ctx.requestId,
       accountId: account.id,
-      reason: allowance.reason,
+      reason: balance.reason,
     });
     return errorResponse(
       ctx.requestId,
       "unavailable",
-      "This account's usage position could not be established, so the request was refused rather than spent against an unknown balance.",
+      "This account's credit position could not be established, so the request was refused rather than spent against an unknown balance.",
+    );
+  }
+
+  // 10. The credential to reach the model with: the deployment's shared token, or this user's own minted one
+  // in per-user mode. THIS ROUTE DOES NOT KNOW WHICH, and must not: the gates above and the ledger below are
+  // identical either way, which is the property that makes the mode safe to change. The value never leaves
+  // this Worker; see token-minter.ts for why handing it to a device would delete the meter.
+  const credential = await ctx.credentials.forAccount(account.id);
+  if (credential.outcome === "unavailable") {
+    // The reason is OPERATOR information (a Cloudflare permissions code, a KEK problem, an exhausted token
+    // budget). It goes to the log and not to the phone, which gets a code it can act on.
+    console.error("no upstream credential for account", {
+      requestId: ctx.requestId,
+      accountId: account.id,
+      mode: ctx.credentials.mode,
+      reason: credential.reason,
+    });
+    return errorResponse(
+      ctx.requestId,
+      "unavailable",
+      "An upstream credential for this request could not be obtained, so it was refused rather than run unmetered.",
+    );
+  }
+  // Only meaningful in per-user mode; in shared mode there is no per-account row to stamp and the write is a
+  // harmless no-op. Best-effort either way: a bookkeeping stamp must never fail a paid request.
+  if (ctx.credentials.mode === "per-user") {
+    ctx.waitUntil(
+      ctx.store
+        .touchUserToken(account.id, Math.floor(ctx.now.getTime() / 1000))
+        .catch(() => undefined),
     );
   }
 
   const maxTokens = effectiveMaxTokens(req.maxTokens, plan.maxOutputTokens, model.maxOutputTokens);
-
-  // 9. Spend.
-  const result = await ctx.runner.run({
-    upstreamModel: model.upstream,
-    messages: req.messages,
-    maxTokens,
-    temperature: req.temperature,
-    topP: req.topP,
-    // Attribution for the gateway log, WHEN logging is on. Ids only: an account id and a client id are
-    // opaque handles, not personal data, and nothing here can carry prompt content.
-    metadata: {
-      account_id: account.id,
-      client_id: client.id,
-      plan_id: plan.id,
-      request_id: ctx.requestId,
-    },
-  });
-
+  const bounds = periodBounds(ctx.now);
   const baseEvent = {
     account_id: account.id,
     client_id: client.id,
@@ -165,11 +214,40 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
     request_id: ctx.requestId,
   };
 
+  // 11. Spend.
+  const result = await ctx.runner.run({
+    upstreamModel: model.upstream,
+    messages: req.messages,
+    maxTokens,
+    temperature: req.temperature,
+    topP: req.topP,
+    stream: req.stream === true,
+    auth: { tokenId: credential.credential.tokenId, value: credential.credential.value },
+    // Attribution for the gateway log. IDS ONLY: an account id, a client id and a Cloudflare token id are
+    // opaque handles, not personal data, and nothing here can carry content.
+    //
+    // This is also how per-user attribution works at Cloudflare regardless of credential mode -- gateway logs
+    // do not break spend down by which token presented it, and `cf-aig-metadata` is what User Insights reads
+    // to tell one user's spend from another's.
+    //
+    // EXACTLY FIVE ENTRIES, WHICH IS THE CAP. Cloudflare keeps the first five and silently drops the rest, so
+    // a sixth field added here would not fail, it would quietly delete whichever one sorted last. Anything
+    // new has to replace something.
+    // https://developers.cloudflare.com/ai-gateway/observability/custom-metadata/
+    metadata: {
+      account_id: account.id,
+      client_id: client.id,
+      plan_id: plan.id,
+      request_id: ctx.requestId,
+      cf_token_id: credential.credential.tokenId,
+    },
+  });
+
   if (result.outcome === "timeout") {
-    // AN UNMETERED ROW, NOT NOTHING. The wait was abandoned but the model was never cancelled (the AI
-    // binding takes no abort signal), so this is very likely spend we cannot price. Writing the gap down
-    // is the only way it is ever visible; dropping it would make an abandoned request indistinguishable
-    // from a request that never happened.
+    // AN UNMETERED ROW, NOT NOTHING. The fetch was aborted, but the upstream may have generated tokens
+    // before the abort landed and may still bill us for them. Writing the gap down is the only way it is
+    // ever visible; dropping it would make an abandoned request indistinguishable from one that never
+    // happened.
     await recordQuietly(ctx, {
       ...baseEvent,
       id: newId("use"),
@@ -177,7 +255,7 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
       output_tokens: null,
       micro_usd: 0,
       metered: false,
-      unmetered_reason: `upstream did not answer within ${result.waitedMs}ms; the model may have run and may still be billed to us`,
+      unmetered_reason: `upstream did not answer within ${result.waitedMs}ms; tokens may have been generated and billed to us before the abort landed`,
       upstream_status: null,
       gateway_log_id: null,
     });
@@ -189,14 +267,14 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
   }
 
   if (result.outcome === "upstream_error") {
-    // NO LEDGER ROW HERE, and the asymmetry with the timeout above is deliberate. An upstream error is
-    // the provider telling us it did not serve the request (capacity, refusal, bad gateway config), so
-    // there is normally nothing to price. Writing an unmetered row for every provider 429 would flood
+    // NO LEDGER ROW HERE, and the asymmetry with the timeout above is deliberate. An upstream error is the
+    // provider telling us it did not serve the request (capacity, refusal, bad gateway config), so there is
+    // normally nothing to price. Writing an unmetered row for every provider 429 would flood
     // `unmetered_requests` with noise and destroy the one signal that column exists to carry.
     //
-    // The residual gap, stated rather than hidden: a provider that fails AFTER generating tokens would
-    // be billed to us and recorded nowhere here. That case is visible in Cloudflare's own gateway
-    // billing, and reconciling our ledger against gateway logs is the follow-on that closes it.
+    // The residual gap, stated rather than hidden: a provider that fails AFTER generating tokens would be
+    // billed to us and recorded nowhere here. That case is visible in Cloudflare's own billing, and
+    // reconciling our ledger against it is the follow-on that closes it.
     console.error("upstream error", {
       requestId: ctx.requestId,
       model: model.id,
@@ -209,6 +287,80 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
       "The model or gateway failed to serve this request.",
       result.status === null ? {} : { upstream_status: result.status },
     );
+  }
+
+  // The money position, on every served response, so a client can render a balance without a second call to
+  // /v1/usage. Named for CREDIT rather than quota throughout: there is no periodic allowance on this plane,
+  // only a prepaid balance, and a header called `quota-remaining` would invite a client to implement a
+  // monthly reset that does not exist.
+  const creditHeaders = (spentAfter: number): Record<string, string> => ({
+    "prism-period": bounds.key,
+    "prism-credit-micro-usd": String(account.credit_micro_usd),
+    "prism-spent-micro-usd": String(spentAfter),
+    "prism-credit-remaining-micro-usd": String(
+      remainingMicroUsd({ creditMicroUsd: account.credit_micro_usd, spentMicroUsd: spentAfter }),
+    ),
+  });
+
+  if (result.outcome === "stream") {
+    // ---- STREAMING ----
+    //
+    // A streamed request CANNOT carry its price in a header: the token counts arrive in the last SSE frame,
+    // after these headers have already gone to the client. So the money facts on a stream are pre-flight
+    // only, `prism-metered` is deliberately absent rather than guessed, and the ledger row is written when
+    // the stream settles.
+    //
+    // The relay does not touch the bytes -- an OpenAI-compatible SDK sees Cloudflare's own frames, including
+    // the trailing usage frame it asked for. If the usage never arrives the request lands in the ledger
+    // UNMETERED with a reason, which is the honest outcome and not a zero charge.
+    const stream = meteredRelay(result.stream, (settlement) => {
+      const metered =
+        settlement.usage === null ? null : meterUsageObject(settlement.usage, price);
+      const event: UsageEvent =
+        metered && metered.outcome === "metered"
+          ? {
+              ...baseEvent,
+              id: newId("use"),
+              input_tokens: metered.usage.inputTokens,
+              output_tokens: metered.usage.outputTokens,
+              micro_usd: metered.microUsd,
+              metered: true,
+              unmetered_reason: null,
+              upstream_status: 200,
+              gateway_log_id: result.gatewayLogId,
+            }
+          : {
+              ...baseEvent,
+              id: newId("use"),
+              input_tokens: null,
+              output_tokens: null,
+              micro_usd: 0,
+              metered: false,
+              unmetered_reason: streamUnmeteredReason(settlement, metered?.reason),
+              upstream_status: 200,
+              gateway_log_id: result.gatewayLogId,
+            };
+      // waitUntil, because the response has already been streamed by the time this runs. This is the one
+      // place in the plane where the ledger write is NOT awaited before answering, and it is not a choice:
+      // the price does not exist until the last byte. The write is still awaited by the runtime, and a
+      // failure is logged at error level by recordQuietly.
+      ctx.waitUntil(recordQuietly(ctx, event));
+    });
+
+    return new Response(stream, {
+      status: 200,
+      headers: {
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-store",
+        connection: "keep-alive",
+        "prism-api-version": "1",
+        "prism-request-id": ctx.requestId,
+        "prism-model": model.id,
+        "prism-max-tokens-applied": String(maxTokens),
+        "prism-stream": "true",
+        ...creditHeaders(account.spent_micro_usd),
+      },
+    });
   }
 
   const text = extractText(result.body);
@@ -226,8 +378,8 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
     );
   }
 
-  // 10. Meter, then record, THEN answer.
-  const metered = meterResponse(result.body, model.price);
+  // 12. Meter, then record, THEN answer.
+  const metered = meterResponse(result.body, price);
   const event: UsageEvent =
     metered.outcome === "metered"
       ? {
@@ -253,26 +405,22 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
           gateway_log_id: result.gatewayLogId,
         };
 
-  // AWAITED, not deferred to waitUntil. A metering plane must not answer with a charge it has not tried
-  // to record; a deferred write that fails leaves usage the account was never billed for and nothing
-  // anywhere says so. The cost is one D1 write of latency on the response.
+  // AWAITED, not deferred to waitUntil. A metering plane must not answer with a charge it has not tried to
+  // record; a deferred write that fails leaves usage the account was never billed for and nothing anywhere
+  // says so. The cost is one D1 write of latency on the response.
   const recorded = await recordQuietly(ctx, event);
 
-  const usedAfter = usedBefore + (metered.outcome === "metered" && recorded ? metered.microUsd : 0);
+  const spentAfter =
+    account.spent_micro_usd + (metered.outcome === "metered" && recorded ? metered.microUsd : 0);
   const headers: Record<string, string> = {
     "prism-model": model.id,
     "prism-max-tokens-applied": String(maxTokens),
     "prism-usage-micro-usd": String(metered.outcome === "metered" ? metered.microUsd : 0),
     "prism-metered": metered.outcome === "metered" ? "true" : "false",
-    // Whether the ledger write landed. False means the completion below was served and NOT charged; it
-    // is surfaced rather than swallowed so a client-side or operator-side reader can see the gap.
+    // Whether the ledger write landed. False means the completion below was served and NOT charged; it is
+    // surfaced rather than swallowed so a client-side or operator-side reader can see the gap.
     "prism-usage-recorded": recorded ? "true" : "false",
-    "prism-quota-period": bounds.key,
-    "prism-quota-used-micro-usd": String(usedAfter),
-    "prism-quota-included-micro-usd": String(plan.includedMicroUsd),
-    "prism-quota-remaining-micro-usd": String(
-      remainingMicroUsd({ usedMicroUsd: usedAfter, includedMicroUsd: plan.includedMicroUsd }),
-    ),
+    ...creditHeaders(spentAfter),
   };
 
   return jsonResponse(
@@ -288,8 +436,8 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
         {
           index: 0,
           message: { role: "assistant", content: text },
-          // The upstream's own reason where it gave one. Never invented: "stop" asserted over a
-          // truncated answer would tell a client the model finished when it was cut off.
+          // The upstream's own reason where it gave one. Never invented: "stop" asserted over a truncated
+          // answer would tell a client the model finished when it was cut off.
           finish_reason: extractFinishReason(result.body),
         },
       ],
@@ -305,6 +453,27 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
     },
     { headers },
   );
+}
+
+/**
+ * Why a streamed request could not be priced, in the words an operator needs.
+ *
+ * THREE DIFFERENT CAUSES, kept apart because they demand different actions: a client that hung up (nothing
+ * to do), a provider that ignored `stream_options.include_usage` (a per-model finding worth chasing), and a
+ * usage object that arrived but did not price (a shape or rate problem on our side).
+ */
+function streamUnmeteredReason(
+  settlement: { usage: unknown; sawFrames: boolean; aborted: boolean },
+  meterReason: string | undefined,
+): string {
+  if (meterReason) return `streamed usage arrived but could not be priced: ${meterReason}`;
+  if (settlement.aborted) {
+    return "the stream ended early (client disconnect or upstream error) before a usage frame arrived; tokens generated up to that point are billed to us and cannot be priced here";
+  }
+  if (!settlement.sawFrames) {
+    return "the streamed response carried no recognizable SSE data frames, so no usage could be read";
+  }
+  return "the streamed response ended without a usage frame despite stream_options.include_usage being requested";
 }
 
 /**

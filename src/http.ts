@@ -20,6 +20,8 @@ export type ErrorCode =
   | "forbidden"
   | "model_not_entitled"
   | "model_not_found"
+  | "model_unpriced"
+  | "model_unsupported"
   | "not_found"
   | "payload_too_large"
   | "rate_limited"
@@ -43,6 +45,17 @@ export type ErrorCode =
  *   client_revoked -> 401 with its own code. The status is right (the credential is no good) but a
  *   client must distinguish it from a malformed header: one means retry with a correct bearer, the
  *   other means this key is dead forever and the stored copy should be deleted.
+ *
+ *   model_unpriced -> 409, and NOT 404 or 403. The model is real and the plan entitles it; what is
+ *   missing is a rate on OUR side, so it is a conflict with the server's state rather than a fact about
+ *   the client's request or entitlements. 404 would tell a client to drop the model from its picker,
+ *   which is wrong: the model comes back the moment a price is set. GET /v1/models publishes
+ *   `spendable: false` for exactly these, so a well-behaved client never reaches this code.
+ *
+ *   model_unsupported -> 501. The catalog lists every model prism offers, including image, video, audio
+ *   and music. Those have no door here yet because their prices are per tile, per step and per audio
+ *   minute, and no meter for those units exists. Listing them and refusing with a named reason is more
+ *   useful than hiding them: a client can see the catalog it will eventually get.
  */
 const STATUS_BY_CODE: Record<ErrorCode, number> = {
   invalid_request: 400,
@@ -51,6 +64,8 @@ const STATUS_BY_CODE: Record<ErrorCode, number> = {
   forbidden: 403,
   model_not_entitled: 403,
   model_not_found: 404,
+  model_unpriced: 409,
+  model_unsupported: 501,
   not_found: 404,
   payload_too_large: 413,
   rate_limited: 429,

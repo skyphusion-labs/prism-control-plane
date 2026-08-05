@@ -7,19 +7,25 @@ import type {
   AccountRow,
   ClientRow,
   ControlPlaneStore,
+  ModelPriceRow,
   NewClient,
   PeriodRow,
   PlanRow,
   RateBucket,
   UsageEvent,
+  UserTokenRow,
 } from "./store";
+
+const ACCOUNT_COLUMNS =
+  "id, plan_id, label, created_at, suspended_at, credit_micro_usd, spent_micro_usd";
 
 export function d1Store(db: D1Database): ControlPlaneStore {
   return {
     async getPlan(id) {
       return await db
         .prepare(
-          `SELECT id, name, included_micro_usd, requests_per_minute, max_output_tokens, allowed_tiers
+          `SELECT id, name, signup_credit_micro_usd, requests_per_minute, max_output_tokens,
+                  allowed_tiers
              FROM plans WHERE id = ?`,
         )
         .bind(id)
@@ -28,22 +34,68 @@ export function d1Store(db: D1Database): ControlPlaneStore {
 
     async getAccount(id) {
       return await db
-        .prepare(`SELECT id, plan_id, label, created_at, suspended_at FROM accounts WHERE id = ?`)
+        .prepare(`SELECT ${ACCOUNT_COLUMNS} FROM accounts WHERE id = ?`)
         .bind(id)
         .first<AccountRow>();
     },
 
+    /**
+     * Create the account WITH its opening grant, and write the grant row in the same batch.
+     *
+     * D1's batch is atomic, which is what makes "an account always has a grant row explaining its
+     * credit" a schema-level truth rather than a habit. Splitting them would eventually produce an
+     * account whose credit no grant accounts for, and reconciliation of a money column against nothing
+     * is not reconciliation.
+     */
     async createAccount(args) {
-      await db
-        .prepare(`INSERT INTO accounts (id, plan_id, label) VALUES (?, ?, ?)`)
-        .bind(args.id, args.plan_id, args.label)
-        .run();
+      await db.batch([
+        db
+          .prepare(`INSERT INTO accounts (id, plan_id, label, credit_micro_usd) VALUES (?, ?, ?, ?)`)
+          .bind(args.id, args.plan_id, args.label, args.credit_micro_usd),
+        db
+          .prepare(
+            `INSERT INTO credit_grants (id, account_id, micro_usd, idempotency_key, note)
+             VALUES (?, ?, ?, ?, 'opening grant from plan signup credit')`,
+          )
+          .bind(args.grant_id, args.id, args.credit_micro_usd, args.grant_idempotency_key),
+      ]);
       const row = await db
-        .prepare(`SELECT id, plan_id, label, created_at, suspended_at FROM accounts WHERE id = ?`)
+        .prepare(`SELECT ${ACCOUNT_COLUMNS} FROM accounts WHERE id = ?`)
         .bind(args.id)
         .first<AccountRow>();
       if (!row) throw new Error(`account ${args.id} was inserted but could not be read back`);
       return row;
+    },
+
+    /**
+     * Add credit, idempotent on the operator's key.
+     *
+     * INSERT OR IGNORE, then advance the account only when the insert landed. Same pattern as
+     * recordUsage and for the same reason: a retried top-up must not grant the money twice, and the
+     * database is the only place that can decide "have I seen this key" without a race.
+     */
+    async grantCredit(args) {
+      const insert = await db
+        .prepare(
+          `INSERT OR IGNORE INTO credit_grants (id, account_id, micro_usd, idempotency_key, note)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .bind(args.id, args.account_id, args.micro_usd, args.idempotency_key, args.note)
+        .run();
+      if (insert.meta.changes) {
+        await db
+          .prepare(`UPDATE accounts SET credit_micro_usd = credit_micro_usd + ? WHERE id = ?`)
+          .bind(args.micro_usd, args.account_id)
+          .run();
+      }
+      const row = await db
+        .prepare(`SELECT credit_micro_usd FROM accounts WHERE id = ?`)
+        .bind(args.account_id)
+        .first<{ credit_micro_usd: number }>();
+      return {
+        applied: Boolean(insert.meta.changes),
+        creditMicroUsd: row?.credit_micro_usd ?? 0,
+      };
     },
 
     async getClientByKeyId(keyId) {
@@ -213,6 +265,119 @@ export function d1Store(db: D1Database): ControlPlaneStore {
           event.metered ? 0 : 1,
         )
         .run();
+
+      // THE MONEY GATE READS THIS COLUMN, not usage_periods. It is advanced last because it is the one
+      // increment that can deny the user their next request: if the process dies between the two writes,
+      // the account has been under-charged (recoverable, re-summable from usage_events) rather than
+      // locked out over a write that only half happened.
+      if (event.metered && event.micro_usd > 0) {
+        await db
+          .prepare(`UPDATE accounts SET spent_micro_usd = spent_micro_usd + ? WHERE id = ?`)
+          .bind(event.micro_usd, event.account_id)
+          .run();
+      }
+    },
+
+    async getUserToken(accountId) {
+      return await db
+        .prepare(
+          `SELECT account_id, cf_token_id, token_enc, minted_at, revoked_at, last_used_at
+             FROM user_tokens WHERE account_id = ?`,
+        )
+        .bind(accountId)
+        .first<UserTokenRow>();
+    },
+
+    /**
+     * INSERT OR REPLACE, deliberately.
+     *
+     * A re-mint after a revocation must overwrite the dead row rather than fail on the primary key. The
+     * old ciphertext is not kept: the credential it decrypts to is already revoked at Cloudflare, so
+     * retaining it would preserve nothing but an attack surface.
+     */
+    async putUserToken(row: UserTokenRow) {
+      await db
+        .prepare(
+          `INSERT OR REPLACE INTO user_tokens
+             (account_id, cf_token_id, token_enc, minted_at, revoked_at, last_used_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          row.account_id,
+          row.cf_token_id,
+          row.token_enc,
+          row.minted_at,
+          row.revoked_at,
+          row.last_used_at,
+        )
+        .run();
+    },
+
+    async countLiveUserTokens() {
+      const row = await db
+        .prepare(`SELECT COUNT(*) AS n FROM user_tokens WHERE revoked_at IS NULL`)
+        .first<{ n: number }>();
+      // A count that cannot be read is treated as "budget spent", not "budget free". Guessing zero here
+      // would turn a transient D1 error into permission to mint past the account quota.
+      if (!row || typeof row.n !== "number") throw new Error("live user token count unavailable");
+      return row.n;
+    },
+
+    async markUserTokenRevoked(accountId, at) {
+      await db
+        .prepare(`UPDATE user_tokens SET revoked_at = ? WHERE account_id = ? AND revoked_at IS NULL`)
+        .bind(at, accountId)
+        .run();
+    },
+
+    async touchUserToken(accountId, at) {
+      await db
+        .prepare(`UPDATE user_tokens SET last_used_at = ? WHERE account_id = ?`)
+        .bind(at, accountId)
+        .run();
+    },
+
+    async getModelPrice(modelId) {
+      return await db
+        .prepare(
+          `SELECT model_id, input_micro_usd_per_mtok, output_micro_usd_per_mtok, priced_at, note
+             FROM model_prices WHERE model_id = ?`,
+        )
+        .bind(modelId)
+        .first<ModelPriceRow>();
+    },
+
+    async listModelPrices() {
+      const result = await db
+        .prepare(
+          `SELECT model_id, input_micro_usd_per_mtok, output_micro_usd_per_mtok, priced_at, note
+             FROM model_prices ORDER BY model_id`,
+        )
+        .all<ModelPriceRow>();
+      return result.results ?? [];
+    },
+
+    async putModelPrice(row: ModelPriceRow) {
+      await db
+        .prepare(
+          `INSERT INTO model_prices
+             (model_id, input_micro_usd_per_mtok, output_micro_usd_per_mtok, priced_at, note)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(model_id) DO UPDATE SET
+             input_micro_usd_per_mtok  = excluded.input_micro_usd_per_mtok,
+             output_micro_usd_per_mtok = excluded.output_micro_usd_per_mtok,
+             priced_at                 = excluded.priced_at,
+             note                      = excluded.note,
+             updated_at                = datetime('now')`,
+        )
+        .bind(
+          row.model_id,
+          row.input_micro_usd_per_mtok,
+          row.output_micro_usd_per_mtok,
+          row.priced_at,
+          row.note,
+        )
+        .run();
     },
 
     async readRateBucket(key) {
@@ -261,6 +426,12 @@ export function d1Store(db: D1Database): ControlPlaneStore {
       await db.prepare(`SELECT COUNT(*) AS n FROM plans`).first<{ n: number }>();
       await db.prepare(`SELECT COUNT(*) AS n FROM usage_periods`).first<{ n: number }>();
       await db.prepare(`SELECT COUNT(*) AS n FROM clients`).first<{ n: number }>();
+      // Migration 0002's tables. Named explicitly rather than assumed present: a database that got 0001
+      // and not 0002 is exactly the half-migrated state a deploy can leave behind, and it would fail on
+      // the first mint instead of at the health check.
+      await db.prepare(`SELECT COUNT(*) AS n FROM user_tokens`).first<{ n: number }>();
+      await db.prepare(`SELECT COUNT(*) AS n FROM credit_grants`).first<{ n: number }>();
+      await db.prepare(`SELECT COUNT(*) AS n FROM model_prices`).first<{ n: number }>();
     },
   };
 }

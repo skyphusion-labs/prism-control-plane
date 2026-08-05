@@ -4,9 +4,10 @@ import { modelsForTiers, publicModel } from "../catalog";
 import { errorResponse, jsonResponse } from "../http";
 import { periodBounds } from "../period";
 import { planFromRow, publicPlan, type Plan } from "../plans";
-import { remainingMicroUsd } from "../quota";
+import { remainingMicroUsd } from "../balance";
+import { resolvePrice } from "../meter";
 import type { Caller } from "../auth";
-import type { ControlPlaneStore } from "../store";
+import type { AccountRow, ControlPlaneStore } from "../store";
 import { requireCaller, type Ctx } from "./shared";
 
 /**
@@ -32,31 +33,40 @@ function resolvePlan(requestId: string, caller: Caller): { ok: true; plan: Plan 
   return { ok: true, plan: parsed.plan };
 }
 
-/** The usage projection. Shared by /v1/me and /v1/usage so the two cannot drift. */
+/**
+ * The usage projection. Shared by /v1/me and /v1/usage so the two cannot drift.
+ *
+ * TWO DIFFERENT TIME SHAPES, on purpose. The prepaid position (credit, spend, remaining) is LIFETIME: that
+ * is what the money gate reads and it does not reset. The month is a reporting window on top, so a client
+ * can show "this month" without the numbers implying a monthly allowance that does not exist.
+ */
 export async function usageBody(
   store: ControlPlaneStore,
-  accountId: string,
-  plan: Plan,
+  account: AccountRow,
   now: Date,
 ): Promise<Record<string, unknown>> {
   const bounds = periodBounds(now);
-  const period = await store.getPeriod(accountId, bounds.key);
+  const period = await store.getPeriod(account.id, bounds.key);
   // An ABSENT period row means no usage yet, which is genuinely zero: the row is created by the first
   // recorded request. That is the one place in this codebase where absent may be read as zero, and it
   // is safe because the row's existence is entirely under our control.
-  const used = period?.micro_usd ?? 0;
   return {
+    credit_micro_usd: account.credit_micro_usd,
+    spent_micro_usd: account.spent_micro_usd,
+    remaining_micro_usd: remainingMicroUsd({
+      creditMicroUsd: account.credit_micro_usd,
+      spentMicroUsd: account.spent_micro_usd,
+    }),
+    // No overage exists on this plane. Published as a fact rather than left to be inferred from the
+    // absence of an overage field, because "what happens when I run out" is the first question a client
+    // implementer has and the answer is: 402, until someone tops up.
+    overage: false,
     period: bounds.key,
     period_start: bounds.start,
     period_end: bounds.end,
-    included_micro_usd: plan.includedMicroUsd,
-    used_micro_usd: used,
-    remaining_micro_usd: remainingMicroUsd({
-      usedMicroUsd: used,
-      includedMicroUsd: plan.includedMicroUsd,
-    }),
-    requests: period?.requests ?? 0,
-    unmetered_requests: period?.unmetered_requests ?? 0,
+    period_micro_usd: period?.micro_usd ?? 0,
+    period_requests: period?.requests ?? 0,
+    period_unmetered_requests: period?.unmetered_requests ?? 0,
   };
 }
 
@@ -80,16 +90,21 @@ export async function handleMe(ctx: Ctx, request: Request): Promise<Response> {
       status: account.suspended_at ? "suspended" : "active",
     },
     plan: publicPlan(planResult.plan),
-    usage: await usageBody(ctx.store, account.id, planResult.plan, ctx.now),
+    usage: await usageBody(ctx.store, account, ctx.now),
   });
 }
 
 /**
  * The entitled model list.
  *
- * FILTERED, not annotated. A model the plan does not allow is absent from the response, so an app's
- * picker cannot offer an option that will come back 403. Listing everything with a `usable: false` flag
- * would push that judgement into every client, and one of them would get it wrong.
+ * FILTERED BY ENTITLEMENT, ANNOTATED BY SPENDABILITY, and the split is deliberate. A model the plan does not
+ * allow is ABSENT: an app's picker cannot offer an option that will come back 403. A model the plan allows
+ * but that has no rate yet is PRESENT with `spendable: false`, because it is coming back the moment an
+ * operator prices it, and a client that dropped it from its picker would never notice.
+ *
+ * Price overrides are read here too, so the rate a client is shown is the rate it will actually be charged.
+ * A list that published the compiled-in price while the meter used an override would be a lie in the most
+ * sensitive field on the response.
  */
 export async function handleModels(ctx: Ctx, request: Request): Promise<Response> {
   const authed = await requireCaller(ctx, request);
@@ -97,9 +112,12 @@ export async function handleModels(ctx: Ctx, request: Request): Promise<Response
   const planResult = resolvePlan(ctx.requestId, authed.caller);
   if (!planResult.ok) return planResult.response;
 
+  const overrides = new Map((await ctx.store.listModelPrices()).map((row) => [row.model_id, row]));
   return jsonResponse(ctx.requestId, {
     object: "list",
-    data: modelsForTiers(planResult.plan.allowedTiers).map(publicModel),
+    data: modelsForTiers(planResult.plan.allowedTiers).map((entry) =>
+      publicModel(entry, resolvePrice(entry, overrides.get(entry.id) ?? null)),
+    ),
   });
 }
 
@@ -109,8 +127,5 @@ export async function handleUsage(ctx: Ctx, request: Request): Promise<Response>
   const planResult = resolvePlan(ctx.requestId, authed.caller);
   if (!planResult.ok) return planResult.response;
 
-  return jsonResponse(
-    ctx.requestId,
-    await usageBody(ctx.store, authed.caller.account.id, planResult.plan, ctx.now),
-  );
+  return jsonResponse(ctx.requestId, await usageBody(ctx.store, authed.caller.account, ctx.now));
 }
