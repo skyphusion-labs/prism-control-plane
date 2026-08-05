@@ -341,8 +341,11 @@ export function buildVideoParams(modelId: string, prompt: string, imageUrl?: str
   // text-to-video: per-model. Wrong duration type or extra fields => CF 7003 User Input Error
   // (schemas are additionalProperties:false on most UB video models).
   if (modelId.startsWith("xai/grok-imagine-video")) {
-    // developers.cloudflare.com/ai/models/xai/grok-imagine-video -- duration integer 1-15
+    // developers.cloudflare.com/ai/models/xai/grok-imagine-video -- duration integer 1-15.
+    // Match the documented env.AI.run example exactly (no generate_audio, no size).
+    // `_operation: generate` is the creative-mode default for generate/edit/extend.
     return {
+      _operation: "generate",
       prompt,
       duration: 5,
       aspect_ratio: "16:9",

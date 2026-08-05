@@ -5,6 +5,7 @@ describe("buildVideoParams t2v", () => {
   it("uses integer duration for xAI Grok video (not Veo string 8s)", () => {
     const p = buildVideoParams("xai/grok-imagine-video", "a dog runs");
     expect(p).toEqual({
+      _operation: "generate",
       prompt: "a dog runs",
       duration: 5,
       aspect_ratio: "16:9",

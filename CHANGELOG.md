@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.4.10] - 2026-08-05
+
+### Fixed
+
+- **Video:** xAI Grok t2v sets `_operation: "generate"`; non-chat doors use a **120s** default
+  upstream timeout (was 60s, which aborted Seedance after params were accepted). Configurable via
+  `NONCHAT_UPSTREAM_TIMEOUT_MS` (max 180s).
+
 ## [0.4.9] - 2026-08-05
 
 ### Fixed

@@ -17,7 +17,13 @@ import { errorResponse, newRequestId } from "./http";
 import { d1Store } from "./store-d1";
 import { gatewayLogSource, type GatewayLogSource } from "./aig-logs";
 import { SharedTokenSource, type UpstreamCredentialSource } from "./token-minter";
-import { gatewayConfig, perUserModeRequested, upstreamTimeoutMs, type Env } from "./env";
+import {
+  gatewayConfig,
+  nonChatUpstreamTimeoutMs,
+  perUserModeRequested,
+  upstreamTimeoutMs,
+  type Env,
+} from "./env";
 import type { ControlPlaneStore } from "./store";
 import {
   handleCreateAccount,
@@ -188,7 +194,8 @@ export default {
         return nonChatRunnerFor({
           accountId: gw.accountId,
           gatewayId: gw.id,
-          timeoutMs: upstreamTimeoutMs(env),
+          // Video/music need longer than chat first-token (default 120s).
+          timeoutMs: nonChatUpstreamTimeoutMs(env),
           collectLog: gw.collectLog,
           ai: env.AI,
         });

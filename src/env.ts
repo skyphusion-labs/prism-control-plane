@@ -92,6 +92,8 @@ export interface Env {
 
   /** Milliseconds to wait for a model before answering 504. Blank falls back to the default below. */
   UPSTREAM_TIMEOUT_MS?: string;
+  /** Optional longer timeout for image/video/music/STT doors (default 120s, max 180s). */
+  NONCHAT_UPSTREAM_TIMEOUT_MS?: string;
 
   /** Operator bearer. UNSET = no operator surface at all (every /admin/* route answers 503). */
   ADMIN_TOKEN?: string;
@@ -114,9 +116,12 @@ export interface Env {
  * a mobile client is not held open past the point a user has given up. */
 export const DEFAULT_UPSTREAM_TIMEOUT_MS = 60_000;
 
+/** Video/music unit doors need longer waits than chat first-token (Seedance etc.). */
+export const DEFAULT_NONCHAT_UPSTREAM_TIMEOUT_MS = 120_000;
+
 /** Hard ceiling on the configurable timeout. A misconfigured 10-minute wait would pin a Worker
  * invocation and a phone socket on a request nobody is still waiting for. */
-const MAX_UPSTREAM_TIMEOUT_MS = 120_000;
+const MAX_UPSTREAM_TIMEOUT_MS = 180_000;
 
 export function upstreamTimeoutMs(env: Env): number {
   const raw = (env.UPSTREAM_TIMEOUT_MS ?? "").trim();
@@ -125,6 +130,15 @@ export function upstreamTimeoutMs(env: Env): number {
   // A malformed value falls back to the default rather than to zero. Coercing junk to 0 would mean
   // "time out immediately", turning a typo into a total outage of the only paid route.
   if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_UPSTREAM_TIMEOUT_MS;
+  return Math.min(Math.floor(parsed), MAX_UPSTREAM_TIMEOUT_MS);
+}
+
+/** Timeout for image/video/music/STT doors (binding can run longer than chat). */
+export function nonChatUpstreamTimeoutMs(env: Env): number {
+  const raw = (env.NONCHAT_UPSTREAM_TIMEOUT_MS ?? env.UPSTREAM_TIMEOUT_MS ?? "").trim();
+  if (!raw) return DEFAULT_NONCHAT_UPSTREAM_TIMEOUT_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_NONCHAT_UPSTREAM_TIMEOUT_MS;
   return Math.min(Math.floor(parsed), MAX_UPSTREAM_TIMEOUT_MS);
 }
 
