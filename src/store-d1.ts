@@ -588,23 +588,54 @@ export function d1Store(db: D1Database): ControlPlaneStore {
         .run();
     },
 
-    async readRateBucket(key) {
-      return await db
-        .prepare(`SELECT count, window_start FROM rate_buckets WHERE bucket_key = ?`)
-        .bind(key)
-        .first<RateBucket>();
-    },
-
-    async writeRateBucket(key, count, windowStart) {
-      await db
+    async claimRateBucket(key, nowSec, windowSeconds) {
+      // One UPSERT: concurrent claims cannot all read the same count and all pass.
+      // Window roll: when now - window_start >= windowSeconds, reset to count=1 at now.
+      const row = await db
         .prepare(
           `INSERT INTO rate_buckets (bucket_key, count, window_start)
-           VALUES (?, ?, ?)
+           VALUES (?, 1, ?)
            ON CONFLICT(bucket_key) DO UPDATE SET
-             count = excluded.count,
-             window_start = excluded.window_start`,
+             count = CASE
+               WHEN (? - rate_buckets.window_start) >= ? THEN 1
+               ELSE rate_buckets.count + 1
+             END,
+             window_start = CASE
+               WHEN (? - rate_buckets.window_start) >= ? THEN ?
+               ELSE rate_buckets.window_start
+             END
+           RETURNING count, window_start`,
         )
-        .bind(key, count, windowStart)
+        .bind(key, nowSec, nowSec, windowSeconds, nowSec, windowSeconds, nowSec)
+        .first<RateBucket>();
+      if (!row) throw new Error(`rate_buckets claim for ${key} returned no row`);
+      return row;
+    },
+
+    async putPlan(row) {
+      await db
+        .prepare(
+          `INSERT INTO plans (
+             id, name, signup_credit_micro_usd, monthly_included_micro_usd,
+             requests_per_minute, max_output_tokens, allowed_tiers
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             name = excluded.name,
+             signup_credit_micro_usd = excluded.signup_credit_micro_usd,
+             monthly_included_micro_usd = excluded.monthly_included_micro_usd,
+             requests_per_minute = excluded.requests_per_minute,
+             max_output_tokens = excluded.max_output_tokens,
+             allowed_tiers = excluded.allowed_tiers`,
+        )
+        .bind(
+          row.id,
+          row.name,
+          row.signup_credit_micro_usd,
+          row.monthly_included_micro_usd,
+          row.requests_per_minute,
+          row.max_output_tokens,
+          row.allowed_tiers,
+        )
         .run();
     },
 

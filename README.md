@@ -128,9 +128,11 @@ store and a fake runner.
 
 **Deployed and live** at `play-proxy.skyphusion.org`. Built: the client contract, dual-pool metering
 (monthly allowance then prepaid credit), shared-token AI Gateway proxy with `cf-aig-metadata`
-attribution, priced catalog (44/45 chat models), SSE metering, and operator reconciliation
-(`POST /admin/reconcile`). **Not built:** auto catalog refresh from `compat/models`, store-receipt
-enrollment, reconcile cron. No overage billing, ever. No paid traffic yet.
+attribution, priced catalog (**45/45 chat**), SSE metering, operator reconciliation
+(`POST /admin/reconcile`), and operator plan upsert (`POST /admin/plans`). Provisional `dev` plan
+covers standard+premium chat. **Not built:** auto catalog refresh from `compat/models`, store-receipt
+enrollment, reconcile cron, non-chat meters, commercial plan pricing. No overage billing, ever. No
+paid traffic yet.
 
 Full production wiring, the mermaid flowchart, and the reconciliation design are in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Agent-facing guidance, non-negotiables, and deploy /

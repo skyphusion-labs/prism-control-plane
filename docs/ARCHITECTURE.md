@@ -172,6 +172,8 @@ billing, ever.** When the money runs out the plane refuses with `402`.
 | Pre-flight balance gate, `402` on exhaustion, never postpaid | **built** |
 | One-time signup grant (`plans.signup_credit_micro_usd`) | **built** |
 | **Monthly included allowance** | **built** (migration 0004 / issue #11). Plan field `monthly_included_micro_usd`; spent before prepaid credit; unused expires at period roll. Zero = pure prepaid. |
+| **Operator plan upsert** | **built** (`POST /admin/plans`). Create/replace plan rows without a migration. |
+| **Provisional `dev` plan tiers** | **standard+premium** (migration 0005) so all priced chat is callable under the only seeded plan. |
 
 Spend order: monthly allowance first, then prepaid credit, then `402`. The D1 ledger records the
 split (`from_allowance_micro_usd` / `from_credit_micro_usd`). Product plan numbers still need

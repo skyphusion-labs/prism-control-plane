@@ -23,6 +23,7 @@ import {
   handleGrantCredit,
   handleRevokeClient,
   handleSetModelPrice,
+  handleUpsertPlan,
 } from "./routes/admin";
 import { handleMe, handleModels, handleUsage } from "./routes/account";
 import { handleReconcile } from "./routes/reconcile";
@@ -103,6 +104,7 @@ export async function handleRequest(ctx: Ctx, request: Request): Promise<Respons
   if (method === "POST" && path === "/admin/enrollments") {
     return await handleCreateEnrollment(ctx, request);
   }
+  if (method === "POST" && path === "/admin/plans") return await handleUpsertPlan(ctx, request);
   if (method === "POST" && path === "/admin/model-prices") {
     return await handleSetModelPrice(ctx, request);
   }

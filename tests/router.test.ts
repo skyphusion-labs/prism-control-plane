@@ -1019,6 +1019,83 @@ describe("operator surface", () => {
     );
     expect(response.status).toBe(400);
   });
+
+  it("upserts a plan and allows accounts against it", async () => {
+    const h = await harness({ env: { ADMIN_TOKEN: "operator-secret" } });
+    const admin = (path: string, body: unknown) =>
+      new Request(`https://example.invalid${path}`, {
+        method: "POST",
+        headers: {
+          authorization: "Bearer operator-secret",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(body),
+      });
+
+    const created = await handleRequest(
+      h.ctx,
+      admin("/admin/plans", {
+        id: "ops",
+        name: "Ops (provisional)",
+        signup_credit_micro_usd: 500_000,
+        monthly_included_micro_usd: 0,
+        requests_per_minute: 30,
+        max_output_tokens: 2048,
+        allowed_tiers: ["standard", "premium"],
+      }),
+    );
+    expect(created.status).toBe(201);
+    expect(await created.json()).toMatchObject({
+      id: "ops",
+      allowed_tiers: ["standard", "premium"],
+      created: true,
+    });
+
+    const again = await handleRequest(
+      h.ctx,
+      admin("/admin/plans", {
+        id: "ops",
+        name: "Ops (provisional)",
+        signup_credit_micro_usd: 500_000,
+        monthly_included_micro_usd: 1_000_000,
+        requests_per_minute: 30,
+        max_output_tokens: 2048,
+        allowed_tiers: "standard,premium",
+      }),
+    );
+    expect(again.status).toBe(200);
+    expect(await again.json()).toMatchObject({
+      monthly_included_micro_usd: 1_000_000,
+      created: false,
+    });
+
+    const account = await handleRequest(h.ctx, admin("/admin/accounts", { plan_id: "ops" }));
+    expect(account.status).toBe(201);
+  });
+
+  it("refuses a plan with no known tiers", async () => {
+    const h = await harness({ env: { ADMIN_TOKEN: "operator-secret" } });
+    const response = await handleRequest(
+      h.ctx,
+      new Request("https://example.invalid/admin/plans", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer operator-secret",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          id: "bad",
+          name: "Bad",
+          signup_credit_micro_usd: 0,
+          monthly_included_micro_usd: 0,
+          requests_per_minute: 10,
+          max_output_tokens: 128,
+          allowed_tiers: ["nope"],
+        }),
+      }),
+    );
+    expect(response.status).toBe(400);
+  });
 });
 
 describe("POST /admin/reconcile", () => {

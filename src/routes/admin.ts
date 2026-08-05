@@ -16,7 +16,11 @@ import { constantTimeEqual, newId, randomSecret, sha256Hex } from "../crypto";
 import { bearerFromRequest } from "../auth";
 import { findModel } from "../catalog";
 import { errorResponse, jsonResponse, readJsonBody } from "../http";
+import { parseTiers, planFromRow, publicPlan } from "../plans";
 import type { Ctx } from "./shared";
+
+/** Plan ids are operator-chosen stable keys, not opaque random. Keep them boring. */
+const PLAN_ID_RE = /^[a-z][a-z0-9_-]{0,63}$/;
 
 /** Default enrollment-token lifetime. Short: a token is meant to be used on the device in front of you. */
 const DEFAULT_TTL_MINUTES = 60;
@@ -331,4 +335,106 @@ export async function handleRevokeClient(
   // 200 either way, with `revoked` reporting whether THIS call did it. A second call is not an error:
   // revocation is idempotent, and an operator retrying under pressure should not have to interpret a 404.
   return jsonResponse(ctx.requestId, { client_id: clientId, revoked });
+}
+
+/**
+ * POST /admin/plans -- create or replace a plan row.
+ *
+ * The only way product numbers enter the system without a migration. Idempotent on `id`: a second call
+ * with the same id overwrites the row. Accounts already on that plan see the new numbers on the next
+ * request (no versioning). That is deliberate for a pre-traffic plane; do not invent plan versioning
+ * here without a product rule for grandparenting live accounts.
+ *
+ * Signup credit applies only to NEW accounts created against this plan after the write; changing
+ * `signup_credit_micro_usd` does not retroactively grant or claw back existing accounts.
+ */
+export async function handleUpsertPlan(ctx: Ctx, request: Request): Promise<Response> {
+  const gate = await requireOperator(ctx, request);
+  if (!gate.ok) return gate.response;
+
+  const body = await readJsonBody(request);
+  if (!body.ok) return errorResponse(ctx.requestId, body.code, body.message);
+  const raw = (body.value ?? {}) as Record<string, unknown>;
+
+  if (typeof raw.id !== "string" || !PLAN_ID_RE.test(raw.id)) {
+    return errorResponse(
+      ctx.requestId,
+      "invalid_request",
+      '"id" must be a lowercase slug (letter first, then letters/digits/_/-, max 64).',
+    );
+  }
+  if (typeof raw.name !== "string" || !raw.name.trim()) {
+    return errorResponse(ctx.requestId, "invalid_request", '"name" is required.');
+  }
+
+  for (const field of [
+    "signup_credit_micro_usd",
+    "monthly_included_micro_usd",
+    "requests_per_minute",
+    "max_output_tokens",
+  ] as const) {
+    if (!Number.isInteger(raw[field])) {
+      return errorResponse(
+        ctx.requestId,
+        "invalid_request",
+        `"${field}" must be an integer micro-USD or count field.`,
+      );
+    }
+  }
+
+  let allowedTiersCsv: string;
+  if (Array.isArray(raw.allowed_tiers)) {
+    if (!raw.allowed_tiers.every((t) => typeof t === "string")) {
+      return errorResponse(
+        ctx.requestId,
+        "invalid_request",
+        '"allowed_tiers" must be an array of tier name strings (standard, premium).',
+      );
+    }
+    allowedTiersCsv = (raw.allowed_tiers as string[]).join(",");
+  } else if (typeof raw.allowed_tiers === "string") {
+    allowedTiersCsv = raw.allowed_tiers;
+  } else {
+    return errorResponse(
+      ctx.requestId,
+      "invalid_request",
+      '"allowed_tiers" is required (array or comma-separated string of standard, premium).',
+    );
+  }
+
+  const parsedTiers = parseTiers(allowedTiersCsv);
+  if (parsedTiers.length === 0) {
+    return errorResponse(
+      ctx.requestId,
+      "invalid_request",
+      '"allowed_tiers" must include at least one known tier (standard, premium).',
+    );
+  }
+
+  const row = {
+    id: raw.id,
+    name: raw.name.trim(),
+    signup_credit_micro_usd: raw.signup_credit_micro_usd as number,
+    monthly_included_micro_usd: raw.monthly_included_micro_usd as number,
+    requests_per_minute: raw.requests_per_minute as number,
+    max_output_tokens: raw.max_output_tokens as number,
+    // Normalise so storage is always the canonical "standard,premium" form from known tiers only.
+    allowed_tiers: parsedTiers.join(","),
+  };
+
+  // planFromRow is the same validator the request path uses. Refuse here rather than writing a row
+  // that will 503 every subsequent inference against it.
+  const validated = planFromRow(row);
+  if (!validated.ok) {
+    return errorResponse(ctx.requestId, "invalid_request", validated.reason);
+  }
+
+  const existed = (await ctx.store.getPlan(row.id)) !== null;
+  await ctx.store.putPlan(row);
+
+  return jsonResponse(
+    ctx.requestId,
+    { ...publicPlan(validated.plan), created: !existed },
+    { status: existed ? 200 : 201 },
+  );
 }
