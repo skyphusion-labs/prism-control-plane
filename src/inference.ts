@@ -5,6 +5,8 @@
 // teeing -- is testable in Node with no network and no workerd. Tests replace the whole runner. There is
 // no third code path and no "if (test)" anywhere in the chain.
 
+import type { Billing } from "./catalog";
+
 /** One turn. Content is a plain string: this plane does not carry multimodal parts. */
 export interface ChatTurn {
   role: "system" | "user" | "assistant";
@@ -22,6 +24,13 @@ export interface UpstreamAuth {
 export interface InferenceRequest {
   /** The UPSTREAM model id from the catalog entry, never the client's raw string. */
   upstreamModel: string;
+  /**
+   * Which billing surface this model sits on, carried FROM THE CATALOG rather than re-derived.
+   *
+   * It selects the gateway endpoint in upstream.ts. Sniffing an `@cf/` prefix at the call site would
+   * work today and would be a second, silently diverging copy of a fact the catalog already states.
+   */
+  billing: Billing;
   messages: ChatTurn[];
   maxTokens: number;
   temperature?: number;
@@ -54,7 +63,7 @@ export interface InferenceRunner {
 /**
  * Pull the assistant text out of whatever shape came back.
  *
- * THERE ARE GENUINELY TWO SHAPES. The AI REST API's `/ai/v1/chat/completions` answers the OpenAI shape
+ * THERE ARE GENUINELY TWO SHAPES. The gateway's `chat/completions` endpoints answer the OpenAI shape
  * (`{ choices: [{ message: { content } }], usage }`), but some Workers AI models still answer their
  * native `{ response, usage }` when reached through the same door. Both are handled by inspecting what
  * arrived rather than by a per-model flag in the catalog: a pinned flag is a recorded fact about someone
@@ -78,7 +87,7 @@ export function extractText(body: unknown): string | null {
     if (typeof first?.text === "string") return first.text;
   }
 
-  // The REST API wraps some model families in `{ result: ... }`. One level of unwrapping, not a recursive
+  // Some model families come back wrapped in `{ result: ... }`. One level of unwrapping, not a recursive
   // search: a deep hunt for any string field called `response` would eventually find something that is
   // not a completion and hand it to a user as one.
   const result = asRecord.result;

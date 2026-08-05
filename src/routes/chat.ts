@@ -217,6 +217,9 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
   // 11. Spend.
   const result = await ctx.runner.run({
     upstreamModel: model.upstream,
+    // Selects the gateway endpoint: Workers AI models take the provider-native path, third-party
+    // Unified Billing models take the OpenAI-compatible one. See src/upstream.ts.
+    billing: model.billing,
     messages: req.messages,
     maxTokens,
     temperature: req.temperature,

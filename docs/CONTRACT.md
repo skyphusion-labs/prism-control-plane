@@ -15,7 +15,7 @@ A metering and policy layer in front of Cloudflare AI Gateway / Workers AI. It o
 what, and how much**. It does not own model behavior, prompt construction, or conversation storage.
 
 ```
-mobile client --(bearer client key)--> prism-control-plane --(AI REST API)--> AI Gateway --> model
+mobile client --(bearer client key)--> prism-control-plane --(gateway.ai.cloudflare.com)--> AI Gateway --> model
                                               |
                                               +-- D1: entitlements, prepaid credit, usage ledger
 ```

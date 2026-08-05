@@ -23,13 +23,17 @@ operator-triggered, dry run by default). **Not built:** the flat plan's monthly 
 from `compat/models`, and a receipt-validated enrollment source. No paid traffic has been served through
 it yet. Aviation-grade `main` (PR + `ci` + `coverage` + CodeQL).
 
-**KNOWN BLOCKER on reconciliation in production.** Measured 2026-08-05: `src/upstream.ts` calls the AI
-REST API with a `cf-aig-gateway-id` header exactly as Cloudflare documents, and on this account that does
-**not** route through `prism-proxy` -- it answers `200` even with a deliberately invalid
-`cf-aig-authorization`, emits no `cf-aig-*` response headers, and writes no log row. So the gateway feed
-is empty and there is nothing to reconcile. The reconciliation code and its live read are verified; the
-traffic is not reaching the gateway. Evidence table and the working canonical URL form are in
-`docs/ARCHITECTURE.md`. Do not "fix" it by weakening a privacy or fail-closed path.
+**The spend path addresses the AI Gateway host, and that is load-bearing**
+([#15](https://github.com/skyphusion-labs/prism-control-plane/issues/15)). `src/upstream.ts` POSTs to
+`gateway.ai.cloudflare.com/v1/{account}/{gateway}/...`, never to the AI REST API on `api.cloudflare.com`.
+Measured 2026-08-05: the REST path does route and does log, but it returns **no `cf-aig-*` response
+headers** (no transit receipt, so `gateway_log_id` is always null) and it **ignores
+`cf-aig-authorization`** (a deliberately invalid gateway credential is still answered `200`, even though
+`prism-proxy` runs `authentication: true`). On the gateway host both hold structurally: the log id comes
+back on every served response including SSE, and a bad gateway credential is refused `401`. Full probe
+table in `docs/ARCHITECTURE.md`; the host and the keyless-credential posture are pinned by
+`tests/upstream.test.ts`. Do not move this back to a header-named gateway, and do not "fix" anything here
+by weakening a privacy or fail-closed path.
 
 **There is no overage billing and there never will be.** Prepaid only; the plane answers `402` when
 the money is gone.
@@ -85,7 +89,7 @@ before changing the spend path.
 | `src/auth.ts` | Client-key format, minting, and the one identity resolution path. |
 | `src/store.ts` / `src/store-d1.ts` | Persistence interface and its only D1 implementation. |
 | `src/inference.ts` | `InferenceRunner` interface. The seam a model is reached through. |
-| `src/upstream.ts` | The only place Cloudflare's AI REST API is called, and the only place the privacy headers are set. |
+| `src/upstream.ts` | The only place a model is called. Always the AI Gateway host, one endpoint per billing surface, and the only place the privacy headers are set. |
 | `src/aig-logs.ts` | The only place the gateway LOG API is read. `GatewayLogSource` is the seam. GET only, and it REFUSES the stored-payload endpoints by throwing. |
 | `src/reconcile.ts` | What one gateway row means for one ledger row. Pure: no clock, no I/O. |
 | `src/reconcile-run.ts` | One reconciliation run: paging, applying, the watermark, the reverse check, structured logs. |
