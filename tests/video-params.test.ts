@@ -47,3 +47,23 @@ describe("buildVideoParams i2v", () => {
     expect(p.duration).toBe(5);
   });
 });
+
+import { nonChatUpstreamTimeoutMs, DEFAULT_NONCHAT_UPSTREAM_TIMEOUT_MS } from "../src/env";
+
+describe("nonChatUpstreamTimeoutMs", () => {
+  it("does not inherit UPSTREAM_TIMEOUT_MS (chat 60s must not clamp video)", () => {
+    const env = {
+      UPSTREAM_TIMEOUT_MS: "60000",
+    } as import("../src/env").Env;
+    expect(nonChatUpstreamTimeoutMs(env)).toBe(DEFAULT_NONCHAT_UPSTREAM_TIMEOUT_MS);
+    expect(nonChatUpstreamTimeoutMs(env)).toBe(120_000);
+  });
+
+  it("honors NONCHAT_UPSTREAM_TIMEOUT_MS", () => {
+    const env = {
+      UPSTREAM_TIMEOUT_MS: "60000",
+      NONCHAT_UPSTREAM_TIMEOUT_MS: "150000",
+    } as import("../src/env").Env;
+    expect(nonChatUpstreamTimeoutMs(env)).toBe(150_000);
+  });
+});

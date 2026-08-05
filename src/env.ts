@@ -133,9 +133,15 @@ export function upstreamTimeoutMs(env: Env): number {
   return Math.min(Math.floor(parsed), MAX_UPSTREAM_TIMEOUT_MS);
 }
 
-/** Timeout for image/video/music/STT doors (binding can run longer than chat). */
+/**
+ * Timeout for image/video/music/STT doors (binding can run longer than chat).
+ *
+ * Intentionally does **not** fall back to UPSTREAM_TIMEOUT_MS: production often sets that to 60s
+ * for chat first-token, which is too short for Seedance/Veo and re-introduced 60s timeouts after
+ * v0.4.10. Only NONCHAT_UPSTREAM_TIMEOUT_MS (or the 120s default) applies here.
+ */
 export function nonChatUpstreamTimeoutMs(env: Env): number {
-  const raw = (env.NONCHAT_UPSTREAM_TIMEOUT_MS ?? env.UPSTREAM_TIMEOUT_MS ?? "").trim();
+  const raw = (env.NONCHAT_UPSTREAM_TIMEOUT_MS ?? "").trim();
   if (!raw) return DEFAULT_NONCHAT_UPSTREAM_TIMEOUT_MS;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_NONCHAT_UPSTREAM_TIMEOUT_MS;

@@ -2,13 +2,20 @@
 
 ## [Unreleased]
 
+## [0.4.11] - 2026-08-05
+
+### Fixed
+
+- **Video timeout:** non-chat doors no longer inherit `UPSTREAM_TIMEOUT_MS` (often 60s for chat).
+  Only `NONCHAT_UPSTREAM_TIMEOUT_MS` or the **120s** default applies, so Seedance is not cut off
+  after params succeed.
+
 ## [0.4.10] - 2026-08-05
 
 ### Fixed
 
-- **Video:** xAI Grok t2v sets `_operation: "generate"`; non-chat doors use a **120s** default
-  upstream timeout (was 60s, which aborted Seedance after params were accepted). Configurable via
-  `NONCHAT_UPSTREAM_TIMEOUT_MS` (max 180s).
+- **Video:** Hailuo prompt-only returns clear `invalid_request` (i2v requires image). Non-chat doors
+  use a **120s** default upstream timeout when `NONCHAT_UPSTREAM_TIMEOUT_MS` is unset (max 180s).
 
 ## [0.4.9] - 2026-08-05
 
