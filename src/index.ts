@@ -2,8 +2,9 @@
 //
 // Two exports, deliberately:
 //
-//   default { fetch }  the Worker. It does ONLY dependency wiring: build the store, build the runner,
-//                      mint a request id, hand off. No policy lives here.
+//   default { fetch, scheduled }
+//                      the Worker. fetch does dependency wiring only: store, runner, request id.
+//                      scheduled runs reconcile (dry-run default; see src/scheduled.ts).
 //   handleRequest      the router, taking its dependencies as an argument. This is what the tests drive,
 //                      which is why the entire request path is testable in plain Node vitest with an
 //                      in-memory store and a fake inference runner: no workerd, no Miniflare, no network.
@@ -45,6 +46,11 @@ import {
   isSttStreamUpgrade,
 } from "./routes/stt-stream";
 import type { Ctx } from "./routes/shared";
+import {
+  initialLookbackMs,
+  reconcileCronLive,
+  runScheduledTick,
+} from "./scheduled";
 
 export { SERVICE_NAME };
 // Durable Object class must be exported from the Worker entry (wrangler class_name).
@@ -210,4 +216,25 @@ export default {
       return errorResponse(requestId, "internal", "An unexpected error occurred.");
     }
   },
+
+  /**
+   * Cron: scheduled reconcile.
+   *
+   * Dry-run by default. Set RECONCILE_CRON_LIVE=true (plain var) only after dry reports look right.
+   * See src/scheduled.ts.
+   */
+  async scheduled(_controller: ScheduledController, env: Env, _executionCtx: ExecutionContext): Promise<void> {
+    const now = new Date();
+    const store = d1Store(env.DB);
+    await runScheduledTick({
+      store,
+      logs: gatewayLogs(env),
+      now,
+      dryRun: !reconcileCronLive(env),
+      lookbackMs: initialLookbackMs(env),
+    });
+  },
 };
+
+// Re-export for tests that drive the cron body without workerd.
+export { runScheduledTick, reconcileCronLive, initialLookbackMs } from "./scheduled";

@@ -24,8 +24,9 @@ DO; meters audio minutes, no transcript stored). Browser WS uses the ticket in
 `Sec-WebSocket-Protocol`, never the long-lived `pcp_` key. UB non-@cf non-chat uses the same AI
 binding through the gateway. **Catalog rate refresh:** `POST /admin/catalog/refresh` pulls chat
 token rates from AI Gateway `compat/models` into `model_prices` (dry-run default; does not rewrite
-`catalog.ts`). **Not built:** receipt enrollment, reconcile cron, commercial plan numbers.
-Aviation-grade `main`.
+`catalog.ts`). **Reconcile cron:** hourly `scheduled()` dry-run by default; set
+`RECONCILE_CRON_LIVE=true` only after dry reports look right. **Not built:** receipt enrollment,
+commercial plan numbers. Aviation-grade `main`.
 
 **The spend path addresses the AI Gateway host**
 ([#15](https://github.com/skyphusion-labs/prism-control-plane/issues/15)). `src/upstream.ts` POSTs to

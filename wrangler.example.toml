@@ -42,6 +42,11 @@ custom_domain = true
 [observability]
 enabled = true
 
+# Hourly reconcile dry-run (money writes stay off until RECONCILE_CRON_LIVE=true).
+# Removing this disables the cron silently; /admin/reconcile still works by hand.
+[triggers]
+crons = ["0 * * * *"]
+
 [vars]
 # The Cloudflare account inference runs on. A plain var: an account id is not a secret, and having it in
 # git is what lets a reviewer see which account this deploy spends against.
@@ -59,6 +64,12 @@ AI_GATEWAY_ID = "prism-proxy"
 # not a setting. This var only decides whether the row holding token counts, model, cost and duration
 # exists, and keeping it is what lets Cloudflare's own cost figure be reconciled against our ledger.
 # AI_GATEWAY_COLLECT_LOG = "true"
+
+# Cron reconcile: only the literal "true" lets the scheduled tick write money.
+# Absent = dry-run only (drift alerts still log). POST /admin/reconcile is independent.
+# RECONCILE_CRON_LIVE = "true"
+# First-run lookback days when no watermark (1..30, default 7):
+# RECONCILE_CRON_INITIAL_LOOKBACK_DAYS = "7"
 
 # Credential posture is SHARED ONLY. Do not set UPSTREAM_CREDENTIAL_MODE=per-user.
 #

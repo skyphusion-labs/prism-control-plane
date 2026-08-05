@@ -95,6 +95,19 @@ export interface Env {
 
   /** Operator bearer. UNSET = no operator surface at all (every /admin/* route answers 503). */
   ADMIN_TOKEN?: string;
+
+  /**
+   * Cron-only: set to the literal string "true" to allow scheduled reconcile to write money
+   * (advance watermark + usage_adjustments). Absent or any other value = dry-run only.
+   * POST /admin/reconcile is unaffected (still dry-run default, human can pass dry_run:false).
+   */
+  RECONCILE_CRON_LIVE?: string;
+
+  /**
+   * Cron-only: first-run lookback in whole days (1..30) when no watermark exists yet.
+   * Default 7. Dry runs use this every tick until a live run establishes a watermark.
+   */
+  RECONCILE_CRON_INITIAL_LOOKBACK_DAYS?: string;
 }
 
 /** Documented default for UPSTREAM_TIMEOUT_MS: long enough for a slow first token, short enough that
