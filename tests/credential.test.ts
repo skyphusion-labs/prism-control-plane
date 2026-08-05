@@ -25,7 +25,7 @@ import {
   SharedTokenSource,
   userTokenName,
 } from "../src/token-minter";
-import { kekRing } from "../src/token-crypto";
+import { decryptToken, kekRing } from "../src/token-crypto";
 import { FakeStore } from "./fake-store";
 
 /** A 32-byte AES key, base64. Test-only, and it never leaves this file. */
@@ -157,6 +157,16 @@ describe("SharedTokenSource", () => {
 });
 
 describe("CfUserTokenProvider budget", () => {
+  /**
+   * The fake credential value Cloudflare "returns" from a mint.
+   *
+   * LONG AND DISTINCTIVE ON PURPOSE. An earlier version of this file used the single character "v", and the
+   * "ciphertext does not contain the plaintext" assertion below then passed or failed on whether a random IV
+   * happened to base64-encode a "v" -- green locally, red in CI, and testing nothing either way. A plaintext
+   * that base64 cannot produce by chance is what makes that assertion mean something.
+   */
+  const TOKEN_VALUE = "cf-user-token-plaintext-must-not-be-stored";
+
   /** A CfApi whose fetch records calls and answers a successful mint. */
   function mintingApi(): { api: CfApi; minted: string[] } {
     const minted: string[] = [];
@@ -166,7 +176,10 @@ describe("CfUserTokenProvider budget", () => {
         const body = JSON.parse(String(init.body)) as { name: string };
         minted.push(body.name);
         return new Response(
-          JSON.stringify({ success: true, result: { id: `cftok_${minted.length}`, value: "v" } }),
+          JSON.stringify({
+            success: true,
+            result: { id: `cftok_${minted.length}`, value: TOKEN_VALUE },
+          }),
           { headers: { "content-type": "application/json" } },
         );
       }
@@ -188,17 +201,22 @@ describe("CfUserTokenProvider budget", () => {
     );
   }
 
-  it("mints within budget and stores the credential encrypted", async () => {
+  it("mints within budget, hands back the live value, and stores only ciphertext", async () => {
     const store = new FakeStore();
     const result = await provider(store, 2).forAccount("acct_1");
     expect(result).toMatchObject({ outcome: "ok", minted: true });
+    // The CALLER gets the usable value; only the STORE is ciphertext. Both halves matter: a provider that
+    // encrypted correctly but returned the ciphertext would fail every inference call with a 401.
+    if (result.outcome === "ok") expect(result.credential.value).toBe(TOKEN_VALUE);
 
     const row = await store.getUserToken("acct_1");
     expect(row?.cf_token_id).toBe("cftok_1");
     // THE CIPHERTEXT MUST NOT BE THE PLAINTEXT. A stored credential readable from a database dump is the
     // breach this envelope encryption exists to prevent.
-    expect(row?.token_enc).not.toContain("v");
-    expect(row?.token_enc.length).toBeGreaterThan(10);
+    expect(row?.token_enc).not.toContain(TOKEN_VALUE);
+    // AND IT MUST STILL BE THE SAME CREDENTIAL. "Unreadable" is trivially satisfiable by storing garbage;
+    // the property worth asserting is that it round-trips under the installed key.
+    expect(await decryptToken(kekRing(KEK), row!.token_enc)).toBe(TOKEN_VALUE);
   });
 
   it("refuses the mint that would exceed the budget, and mints nothing", async () => {
