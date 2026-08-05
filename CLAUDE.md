@@ -14,12 +14,22 @@ multimodal surface stay in **[prism](https://github.com/skyphusion-labs/prism)**
 
 **Status: deployed and live at `play-proxy.skyphusion.org`.** Built: the client contract, the Worker
 and its route table, the D1 schema, client-key auth with one-time enrollment, entitlement and rate
-gates, the prepaid balance gate, the priced usage ledger, and SSE streaming with trailing-usage
-capture. **Not built:** the flat plan's monthly included-token allowance (only the prepaid balance half
-exists, [#11](https://github.com/skyphusion-labs/prism-control-plane/issues/11)), the AI Gateway cost
-reconciliation job ([#12](https://github.com/skyphusion-labs/prism-control-plane/issues/12)), and a
-receipt-validated enrollment source. No paid traffic has been served through it yet. Aviation-grade `main`
-(PR + `ci` + `coverage` + CodeQL).
+gates, the prepaid balance gate, the priced usage ledger, SSE streaming with trailing-usage capture, and
+the AI Gateway cost reconciliation job
+([#12](https://github.com/skyphusion-labs/prism-control-plane/issues/12): `POST /admin/reconcile`,
+operator-triggered, dry run by default). **Not built:** the flat plan's monthly included-token allowance
+(only the prepaid balance half exists,
+[#11](https://github.com/skyphusion-labs/prism-control-plane/issues/11)), a refresh of `src/catalog.ts`
+from `compat/models`, and a receipt-validated enrollment source. No paid traffic has been served through
+it yet. Aviation-grade `main` (PR + `ci` + `coverage` + CodeQL).
+
+**KNOWN BLOCKER on reconciliation in production.** Measured 2026-08-05: `src/upstream.ts` calls the AI
+REST API with a `cf-aig-gateway-id` header exactly as Cloudflare documents, and on this account that does
+**not** route through `prism-proxy` -- it answers `200` even with a deliberately invalid
+`cf-aig-authorization`, emits no `cf-aig-*` response headers, and writes no log row. So the gateway feed
+is empty and there is nothing to reconcile. The reconciliation code and its live read are verified; the
+traffic is not reaching the gateway. Evidence table and the working canonical URL form are in
+`docs/ARCHITECTURE.md`. Do not "fix" it by weakening a privacy or fail-closed path.
 
 **There is no overage billing and there never will be.** Prepaid only; the plane answers `402` when
 the money is gone.
@@ -76,6 +86,9 @@ before changing the spend path.
 | `src/store.ts` / `src/store-d1.ts` | Persistence interface and its only D1 implementation. |
 | `src/inference.ts` | `InferenceRunner` interface. The seam a model is reached through. |
 | `src/upstream.ts` | The only place Cloudflare's AI REST API is called, and the only place the privacy headers are set. |
+| `src/aig-logs.ts` | The only place the gateway LOG API is read. `GatewayLogSource` is the seam. GET only, and it REFUSES the stored-payload endpoints by throwing. |
+| `src/reconcile.ts` | What one gateway row means for one ledger row. Pure: no clock, no I/O. |
+| `src/reconcile-run.ts` | One reconciliation run: paging, applying, the watermark, the reverse check, structured logs. |
 | `src/token-minter.ts` | `UpstreamCredentialSource`: `SharedTokenSource` (default) and the opt-in `CfUserTokenProvider`. |
 | `src/stream.ts` | Byte-for-byte SSE relay plus trailing-usage capture. |
 | `src/routes/*.ts` | Handlers. `chat.ts` is the metered door and documents its gate order. |
@@ -125,8 +138,10 @@ Live: Worker **`prism-control-plane`** at **`play-proxy.skyphusion.org`** (custo
 DNS), AI Gateway **`prism-proxy`**, D1 **`prism-control-plane`**, prod account
 `fabcb25d9c7eb087110ec474a03e50d2`. No `workers.dev`. Only binding is `DB`; no KV, R2, or Queues.
 
-**Credential posture: `shared`.** One account-scoped `CF_AIG_TOKEN` (AI Gateway Run + Workers AI Read)
-reaches models; per-user attribution rides on `cf-aig-metadata` plus the D1 ledger. Per-user token
+**Credential posture: `shared`.** One account-scoped `CF_AIG_TOKEN` (AI Gateway Run + Workers AI Read +
+**AI Gateway Read**, widened 2026-08-05 for reconciliation) reaches models; per-user attribution rides on
+`cf-aig-metadata` plus the D1 ledger. Editing a Cloudflare token's policies does not change its value, so
+that widening required no re-escrow of the ciphertext and no `wrangler secret put`. Per-user token
 minting is implemented, bounded, and **off**; do not turn it on without reading the 500-token ceiling
 note in `docs/ARCHITECTURE.md`.
 

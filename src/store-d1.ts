@@ -12,12 +12,19 @@ import type {
   PeriodRow,
   PlanRow,
   RateBucket,
+  ReconcileStateRow,
+  UsageAdjustmentRow,
   UsageEvent,
+  UsageEventKey,
   UserTokenRow,
 } from "./store";
 
 const ACCOUNT_COLUMNS =
   "id, plan_id, label, created_at, suspended_at, credit_micro_usd, spent_micro_usd";
+
+const USAGE_EVENT_COLUMNS =
+  "id, request_id, account_id, client_id, model_id, period_key, input_tokens, output_tokens, " +
+  "micro_usd, metered, unmetered_reason, upstream_status, gateway_log_id";
 
 export function d1Store(db: D1Database): ControlPlaneStore {
   return {
@@ -198,7 +205,8 @@ export function d1Store(db: D1Database): ControlPlaneStore {
     async getPeriod(accountId, periodKey) {
       return await db
         .prepare(
-          `SELECT account_id, period_key, micro_usd, requests, unmetered_requests
+          `SELECT account_id, period_key, micro_usd, requests, unmetered_requests,
+                  adjust_spend_micro_usd, adjust_credit_micro_usd
              FROM usage_periods WHERE account_id = ? AND period_key = ?`,
         )
         .bind(accountId, periodKey)
@@ -276,6 +284,199 @@ export function d1Store(db: D1Database): ControlPlaneStore {
           .bind(event.micro_usd, event.account_id)
           .run();
       }
+    },
+
+    /**
+     * Read one ledger row by correlation id.
+     *
+     * `metered` IS MAPPED, NOT CAST. SQLite has no boolean, so the column is an INTEGER and a bare
+     * `first<UsageEvent>()` would hand back `metered: 1`, which is truthy and therefore works right up
+     * until something compares it to `true` or serialises it. The reconciliation decision branches on
+     * this field, so the mapping happens here rather than at each reader.
+     */
+    async getUsageEventByRequestId(requestId) {
+      const row = await db
+        .prepare(`SELECT ${USAGE_EVENT_COLUMNS} FROM usage_events WHERE request_id = ? LIMIT 1`)
+        .bind(requestId)
+        .first<Record<string, unknown>>();
+      if (!row) return null;
+      return { ...row, metered: Boolean(row.metered) } as UsageEvent;
+    },
+
+    /**
+     * One true-up: the audit row, then the money.
+     *
+     * THE ORDER IS DELIBERATE AND THE WINDOW BETWEEN THEM IS AN ACCEPTED COST, the same trade store
+     * `recordUsage` makes two functions up. The audit insert is the idempotency gate, so it has to come
+     * first: writing the money first and dying before the audit row would let a re-run apply it a second
+     * time, and a double charge or a double credit is the one outcome that is not recoverable by reading
+     * the tables afterwards.
+     *
+     * So a failure between the two leaves an adjustment row whose money never moved. That direction is
+     * recoverable and detectable: sum `usage_adjustments` by direction and compare it to the account's
+     * columns. It under-applies rather than over-applies, which is the right way for a robot with write
+     * access to a money column to break.
+     *
+     * The money statements are ONE D1 BATCH, so a partial money move cannot happen: an account whose
+     * balance moved but whose period rollup did not would make the monthly view disagree with the
+     * balance for no recorded reason.
+     */
+    async applyUsageAdjustment(row: UsageAdjustmentRow) {
+      const insert = await db
+        .prepare(
+          `INSERT OR IGNORE INTO usage_adjustments
+             (id, account_id, usage_event_id, request_id, gateway_log_id, period_key, model_id,
+              estimate_micro_usd, gateway_micro_usd, delta_micro_usd, direction, applied_micro_usd,
+              idempotency_key, note)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          row.id,
+          row.account_id,
+          row.usage_event_id,
+          row.request_id,
+          row.gateway_log_id,
+          row.period_key,
+          row.model_id,
+          row.estimate_micro_usd,
+          row.gateway_micro_usd,
+          row.delta_micro_usd,
+          row.direction,
+          row.applied_micro_usd,
+          row.idempotency_key,
+          row.note,
+        )
+        .run();
+      if (!insert.meta.changes) return { applied: false };
+
+      // The period rollup gets its own monotonic counter per direction. Adding the drift into
+      // `micro_usd` instead would destroy the estimate-versus-actual comparison the ledger exists for.
+      const periodUpsert = db
+        .prepare(
+          `INSERT INTO usage_periods
+             (account_id, period_key, micro_usd, requests, unmetered_requests,
+              adjust_spend_micro_usd, adjust_credit_micro_usd)
+           VALUES (?, ?, 0, 0, 0, ?, ?)
+           ON CONFLICT(account_id, period_key) DO UPDATE SET
+             adjust_spend_micro_usd  = adjust_spend_micro_usd + excluded.adjust_spend_micro_usd,
+             adjust_credit_micro_usd = adjust_credit_micro_usd + excluded.adjust_credit_micro_usd,
+             updated_at              = datetime('now')`,
+        )
+        .bind(
+          row.account_id,
+          row.period_key,
+          row.direction === "spend" ? row.applied_micro_usd : 0,
+          row.direction === "credit" ? row.applied_micro_usd : 0,
+        );
+
+      if (row.direction === "spend") {
+        await db.batch([
+          db
+            .prepare(`UPDATE accounts SET spent_micro_usd = spent_micro_usd + ? WHERE id = ?`)
+            .bind(row.applied_micro_usd, row.account_id),
+          periodUpsert,
+        ]);
+        return { applied: true };
+      }
+
+      // A DOWNWARD TRUE-UP IS A GRANT, with its own row in the same audit table every other top-up
+      // lands in. It shares the adjustment's idempotency key, which is namespaced (`aig:`) so it cannot
+      // collide with an operator's invoice reference or with the `signup:` opening grant.
+      await db.batch([
+        db
+          .prepare(
+            `INSERT OR IGNORE INTO credit_grants (id, account_id, micro_usd, idempotency_key, note)
+             VALUES (?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            row.id,
+            row.account_id,
+            row.applied_micro_usd,
+            row.idempotency_key,
+            row.note ?? `reconciliation credit for gateway log ${row.gateway_log_id}`,
+          ),
+        db
+          .prepare(`UPDATE accounts SET credit_micro_usd = credit_micro_usd + ? WHERE id = ?`)
+          .bind(row.applied_micro_usd, row.account_id),
+        periodUpsert,
+      ]);
+      return { applied: true };
+    },
+
+    async getReconcileState(gatewayId) {
+      return await db
+        .prepare(
+          `SELECT gateway_id, watermark, last_log_id, last_run_at, runs, rows_seen, rows_adjusted
+             FROM reconcile_state WHERE gateway_id = ?`,
+        )
+        .bind(gatewayId)
+        .first<ReconcileStateRow>();
+    },
+
+    /**
+     * Record a run.
+     *
+     * `COALESCE(?, watermark)` is what makes a null advance mean "leave it alone". Writing the null
+     * through would reset the gateway to the beginning of its history, and the next run would page every
+     * log row Cloudflare still holds.
+     */
+    async advanceReconcileState(args) {
+      await db
+        .prepare(
+          `INSERT INTO reconcile_state
+             (gateway_id, watermark, last_log_id, last_run_at, runs, rows_seen, rows_adjusted)
+           VALUES (?, ?, ?, ?, 1, ?, ?)
+           ON CONFLICT(gateway_id) DO UPDATE SET
+             watermark     = COALESCE(excluded.watermark, reconcile_state.watermark),
+             last_log_id   = COALESCE(excluded.last_log_id, reconcile_state.last_log_id),
+             last_run_at   = excluded.last_run_at,
+             runs          = reconcile_state.runs + 1,
+             rows_seen     = reconcile_state.rows_seen + excluded.rows_seen,
+             rows_adjusted = reconcile_state.rows_adjusted + excluded.rows_adjusted,
+             updated_at    = datetime('now')`,
+        )
+        .bind(
+          args.gateway_id,
+          args.watermark,
+          args.last_log_id,
+          args.at,
+          args.rows_seen,
+          args.rows_adjusted,
+        )
+        .run();
+    },
+
+    /**
+     * Ledger rows inside a window.
+     *
+     * COMPARED WITH `datetime()` ON BOTH SIDES, not as strings. `usage_events.created_at` is written by
+     * SQLite's `datetime('now')`, which produces `YYYY-MM-DD HH:MM:SS`; the watermark is ISO 8601 with a
+     * `T` and a `Z`. Those two shapes do not compare lexically, and the failure would be silent -- an
+     * empty result set reads exactly like "nothing unmatched", which is the answer this query exists to
+     * distrust.
+     */
+    async listUsageEventsBetween(args) {
+      const result = await db
+        .prepare(
+          `SELECT id, request_id, micro_usd, metered, created_at
+             FROM usage_events
+            WHERE datetime(created_at) > datetime(?)
+              AND datetime(created_at) <= datetime(?)
+            ORDER BY created_at
+            LIMIT ?`,
+        )
+        .bind(args.fromIso, args.toIso, Math.max(0, Math.trunc(args.limit)))
+        .all<Record<string, unknown>>();
+      return (result.results ?? []).map(
+        (row) =>
+          ({
+            id: String(row.id),
+            request_id: String(row.request_id),
+            micro_usd: Number(row.micro_usd),
+            metered: Boolean(row.metered),
+            created_at: String(row.created_at),
+          }) satisfies UsageEventKey,
+      );
     },
 
     async getUserToken(accountId) {

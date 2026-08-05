@@ -262,7 +262,10 @@ reason rather than as free.
   "period_end": "2026-09-01T00:00:00.000Z",
   "period_micro_usd": 21437,
   "period_requests": 42,
-  "period_unmetered_requests": 0
+  "period_unmetered_requests": 0,
+  "period_adjust_spend_micro_usd": 118,
+  "period_adjust_credit_micro_usd": 6,
+  "period_reconciled_micro_usd": 21549
 }
 ```
 
@@ -277,6 +280,37 @@ allowance will be wrong about when service resumes, which is never, until a top-
 `period_unmetered_requests` is deliberately visible. It is the count of calls this plane could not
 price. It should be zero; a non-zero value means the client got service that was not charged, and it is
 exposed rather than hidden so the gap is observable from both ends.
+
+### The month is published twice, and the difference is the point
+
+`period_micro_usd` is what this plane's **own meter estimated** from token counts against its rate
+table. That estimate can be wrong through no fault of the code: Cloudflare reprices models intraday,
+and reasoning models under-report the output tokens they actually bill for. So the plane reconciles
+each request against AI Gateway's authoritative per-request cost and records the difference as an
+auditable adjustment.
+
+| Field | Means |
+| --- | --- |
+| `period_micro_usd` | The estimate. **Never rewritten**, so estimate-versus-billed stays readable. |
+| `period_adjust_spend_micro_usd` | Extra charged after the biller came back higher. Monotonic. |
+| `period_adjust_credit_micro_usd` | Credit granted back after the biller came back lower. Monotonic. |
+| `period_reconciled_micro_usd` | Estimate + spend adjustments - credit adjustments. |
+
+**A client that shows one number should show `period_reconciled_micro_usd`.** The other three are
+published so the difference can always be accounted for instead of looking like an error, and all four
+are present even when they are zero: a field that only appeared once there had been drift is a field no
+client would have written code for.
+
+A downward correction arrives as a **credit grant**, not as a reduction of `spent_micro_usd`. Both money
+columns only ever rise, which is what lets each one be re-summed against its own audit trail; the
+balance reaches the same place either way. So a month with a downward true-up shows a larger
+`credit_micro_usd` rather than a smaller `spent_micro_usd`.
+
+Adjustments land in the period the **request** belongs to, not the period the reconciliation ran in. A
+true-up for a request made on the 31st corrects that month, not the next one.
+
+Reconciliation is also how an **unmetered** call stops being a free ride: it was recorded with a reason
+and a zero charge, and the true-up gives it its real cost.
 
 ## Errors
 

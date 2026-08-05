@@ -8,10 +8,12 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { handleRequest } from "../src/index";
 import { mintClientKey } from "../src/auth";
 import { sha256Hex } from "../src/crypto";
+import type { GatewayLogSource } from "../src/aig-logs";
 import type { Env } from "../src/env";
 import type { InferenceRequest, InferenceResult, InferenceRunner } from "../src/inference";
 import type { CredentialOutcome, UpstreamCredentialSource } from "../src/token-minter";
 import type { Ctx } from "../src/routes/shared";
+import { FakeLogSource, logRow } from "./fake-gateway-logs";
 import { FakeStore, testPlan } from "./fake-store";
 
 const NOW = new Date("2026-08-04T12:00:00.000Z");
@@ -111,6 +113,8 @@ async function harness(
     credential?: CredentialOutcome;
     credentialMode?: "shared" | "per-user";
     credit?: number;
+    /** The gateway log feed. Null is the deployment that cannot read its own bill. */
+    logs?: GatewayLogSource | null;
   } = {},
 ): Promise<Harness> {
   const store = new FakeStore({ nowSeconds: Math.floor(NOW.getTime() / 1000) });
@@ -152,6 +156,7 @@ async function harness(
     store,
     runner,
     credentials,
+    logs: options.logs === undefined ? new FakeLogSource() : options.logs,
     requestId: "req_test0000000000000000",
     now: NOW,
     waitUntil: (promise) => {
@@ -734,6 +739,63 @@ describe("GET /v1/usage", () => {
       period_micro_usd: 385_900,
       period_requests: 1,
       period_unmetered_requests: 0,
+      // Both true-up counters and the reconciled total are present at zero. An exhaustive assertion is
+      // the point: a field that appeared only once drift existed is a field no client would handle.
+      period_adjust_spend_micro_usd: 0,
+      period_adjust_credit_micro_usd: 0,
+      period_reconciled_micro_usd: 385_900,
+    });
+  });
+
+  it("publishes a true-up in both directions without touching the estimate", async () => {
+    const h = await harness();
+    await handleRequest(h.ctx, chat(h.key, ASK));
+    // Applied through the store the way reconciliation does, so the response is asserted against the same
+    // columns a real run moves rather than against a hand-set field.
+    await h.store.applyUsageAdjustment({
+      id: "adj_up",
+      account_id: "acct_1",
+      usage_event_id: h.store.events[0].id,
+      request_id: h.store.events[0].request_id,
+      gateway_log_id: "log_up",
+      period_key: "2026-08",
+      model_id: MODEL,
+      estimate_micro_usd: 385_900,
+      gateway_micro_usd: 386_400,
+      delta_micro_usd: 500,
+      direction: "spend",
+      applied_micro_usd: 500,
+      idempotency_key: "aig:log_up",
+      note: null,
+    });
+    await h.store.applyUsageAdjustment({
+      id: "adj_down",
+      account_id: "acct_1",
+      usage_event_id: h.store.events[0].id,
+      request_id: h.store.events[0].request_id,
+      gateway_log_id: "log_down",
+      period_key: "2026-08",
+      model_id: MODEL,
+      estimate_micro_usd: 385_900,
+      gateway_micro_usd: 385_800,
+      delta_micro_usd: -100,
+      direction: "credit",
+      applied_micro_usd: 100,
+      idempotency_key: "aig:log_down",
+      note: null,
+    });
+
+    const response = await handleRequest(h.ctx, get("/v1/usage", h.key));
+    expect(await response.json()).toMatchObject({
+      // THE ESTIMATE IS UNCHANGED. That is the property the two separate counters exist to preserve.
+      period_micro_usd: 385_900,
+      period_adjust_spend_micro_usd: 500,
+      period_adjust_credit_micro_usd: 100,
+      period_reconciled_micro_usd: 386_300,
+      // A downward true-up is a credit grant, not a decrement of spend: both columns only ever rise.
+      spent_micro_usd: 386_400,
+      credit_micro_usd: 1_000_100,
+      remaining_micro_usd: 613_700,
     });
   });
 
@@ -926,5 +988,161 @@ describe("operator surface", () => {
       }),
     );
     expect(response.status).toBe(400);
+  });
+});
+
+describe("POST /admin/reconcile", () => {
+  const OPERATOR = { ADMIN_TOKEN: "operator-secret" };
+
+  function reconcile(body: unknown, options: { bearer?: string | null; raw?: string } = {}): Request {
+    const bearer = options.bearer === undefined ? "operator-secret" : options.bearer;
+    return new Request("https://example.invalid/admin/reconcile", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(bearer ? { authorization: `Bearer ${bearer}` } : {}),
+      },
+      body: options.raw ?? JSON.stringify(body),
+    });
+  }
+
+  /** A settled row (older than SETTLE_MS) whose cost is above what the ledger charged. */
+  function driftRow() {
+    return logRow({
+      id: "log_1",
+      createdAt: "2026-08-04T10:00:00.000Z",
+      requestId: "req_seed",
+      costMicroUsd: 1500,
+    });
+  }
+
+  async function seedLedger(h: Awaited<ReturnType<typeof harness>>): Promise<void> {
+    await h.store.recordUsage({
+      id: "ue_seed",
+      request_id: "req_seed",
+      account_id: "acct_1",
+      client_id: h.clientId,
+      model_id: MODEL,
+      period_key: "2026-08",
+      input_tokens: 10,
+      output_tokens: 20,
+      micro_usd: 1000,
+      metered: true,
+      unmetered_reason: null,
+      upstream_status: 200,
+      gateway_log_id: null,
+    });
+    h.store.eventCreatedAt.set("ue_seed", "2026-08-04T10:00:00.000Z");
+  }
+
+  it("is gated by the operator bearer like every other admin route", async () => {
+    const unset = await harness();
+    expect((await handleRequest(unset.ctx, reconcile({}))).status).toBe(503);
+
+    const h = await harness({ env: OPERATOR });
+    expect((await handleRequest(h.ctx, reconcile({}, { bearer: "wrong" }))).status).toBe(401);
+    expect((await handleRequest(h.ctx, reconcile({}, { bearer: null }))).status).toBe(401);
+  });
+
+  it("503s when the deployment cannot read its own bill", async () => {
+    // No gateway coordinates or no token with AI Gateway Read. A reconciliation job that quietly did
+    // nothing would look exactly like a healthy one that found no drift, so it refuses and says which
+    // pieces are missing.
+    const h = await harness({ env: OPERATOR, logs: null });
+    const response = await handleRequest(h.ctx, reconcile({ dry_run: true }));
+    expect(response.status).toBe(503);
+    const body = (await response.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("unavailable");
+    expect(body.error.message).toContain("AI Gateway Read");
+  });
+
+  it("previews by default and writes nothing", async () => {
+    // OMITTED MEANS DRY RUN. The default has to be the safe one on a route whose live mode moves money.
+    const h = await harness({ env: OPERATOR, logs: new FakeLogSource({ rows: [driftRow()] }) });
+    await seedLedger(h);
+    const before = h.store.accounts.get("acct_1")?.spent_micro_usd;
+
+    const response = await handleRequest(h.ctx, reconcile({ since: "2026-08-01T00:00:00.000Z" }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      dry_run: true,
+      applied: 0,
+      watermark_after: null,
+      totals: { rows: 1, adjusted_spend: 1, spend_micro_usd: 500 },
+    });
+    expect(h.store.accounts.get("acct_1")?.spent_micro_usd).toBe(before);
+    expect(h.store.adjustments).toHaveLength(0);
+  });
+
+  it("writes only on a literal false", async () => {
+    const h = await harness({ env: OPERATOR, logs: new FakeLogSource({ rows: [driftRow()] }) });
+    await seedLedger(h);
+    const response = await handleRequest(
+      h.ctx,
+      reconcile({ dry_run: false, since: "2026-08-01T00:00:00.000Z" }),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ dry_run: false, applied: 1 });
+    expect(h.store.accounts.get("acct_1")?.spent_micro_usd).toBe(1500);
+  });
+
+  it("refuses a dry_run that is not a boolean rather than reading it as truthy or falsy", async () => {
+    // A truthiness check would make `"dry_run": "no"` a LIVE run, and that mistake fails in the direction
+    // of a real charge against a real user's prepaid balance.
+    const h = await harness({ env: OPERATOR });
+    for (const value of ["no", 0, null]) {
+      const response = await handleRequest(h.ctx, reconcile({ dry_run: value }));
+      expect(response.status).toBe(400);
+    }
+  });
+
+  it("refuses a bare POST with no body", async () => {
+    // Kept rather than worked around: it means no run can start without somebody typing a body for it.
+    const h = await harness({ env: OPERATOR });
+    const response = await handleRequest(h.ctx, reconcile(null, { raw: "" }));
+    expect(response.status).toBe(400);
+  });
+
+  it("refuses a malformed since or max_rows", async () => {
+    const h = await harness({ env: OPERATOR });
+    expect((await handleRequest(h.ctx, reconcile({ since: "last tuesday" }))).status).toBe(400);
+    expect((await handleRequest(h.ctx, reconcile({ max_rows: 0 }))).status).toBe(400);
+    expect((await handleRequest(h.ctx, reconcile({ max_rows: 1.5 }))).status).toBe(400);
+  });
+
+  it("400s a first run with no floor instead of paging the whole gateway history", async () => {
+    const h = await harness({ env: OPERATOR });
+    const response = await handleRequest(h.ctx, reconcile({}));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: "invalid_request" } });
+  });
+
+  it("502s when the log feed cannot be read, rather than reporting an empty run", async () => {
+    const h = await harness({
+      env: OPERATOR,
+      logs: new FakeLogSource({ fail: "ai-gateway logs: HTTP 403 (9109 Unauthorized)" }),
+    });
+    const response = await handleRequest(
+      h.ctx,
+      reconcile({ dry_run: false, since: "2026-08-01T00:00:00.000Z" }),
+    );
+    expect(response.status).toBe(502);
+    const body = (await response.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("upstream_error");
+    // Cloudflare's own code reaches the operator: 9109 and a 400 need different fixes.
+    expect(body.error.message).toContain("9109");
+    expect(h.store.reconcileState.size).toBe(0);
+  });
+
+  it("is not reachable with a client key", async () => {
+    const h = await harness({ env: OPERATOR });
+    const response = await handleRequest(h.ctx, reconcile({}, { bearer: h.key }));
+    expect(response.status).toBe(401);
+  });
+
+  it("answers 404 on a GET, like every other method mismatch", async () => {
+    const h = await harness({ env: OPERATOR });
+    const response = await handleRequest(h.ctx, get("/admin/reconcile"));
+    expect(response.status).toBe(404);
   });
 });

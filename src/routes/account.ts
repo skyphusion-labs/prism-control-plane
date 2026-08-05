@@ -39,6 +39,14 @@ function resolvePlan(requestId: string, caller: Caller): { ok: true; plan: Plan 
  * TWO DIFFERENT TIME SHAPES, on purpose. The prepaid position (credit, spend, remaining) is LIFETIME: that
  * is what the money gate reads and it does not reset. The month is a reporting window on top, so a client
  * can show "this month" without the numbers implying a monthly allowance that does not exist.
+ *
+ * THE TRUE-UP FIELDS ARE PUBLISHED, not hidden as an internal detail, because without them the month does
+ * not add up. `period_micro_usd` is the sum of what this plane's own meter estimated; reconciliation
+ * (issue #12) later compares each request against AI Gateway's authoritative cost and moves the
+ * difference. Publishing only the estimate would leave a client showing a monthly figure that disagrees
+ * with the balance for no visible reason, and a support conversation with no way to explain the gap.
+ * Publishing the estimate and both corrections separately means the client can show either number and
+ * account for the difference.
  */
 export async function usageBody(
   store: ControlPlaneStore,
@@ -67,6 +75,18 @@ export async function usageBody(
     period_micro_usd: period?.micro_usd ?? 0,
     period_requests: period?.requests ?? 0,
     period_unmetered_requests: period?.unmetered_requests ?? 0,
+    // Both directions, both monotonic, and BOTH SHOWN EVEN WHEN ZERO. A field that appears only once
+    // there has been drift is a field no client implementer writes code for, and it would first show up
+    // in production on the day the numbers stopped matching.
+    period_adjust_spend_micro_usd: period?.adjust_spend_micro_usd ?? 0,
+    period_adjust_credit_micro_usd: period?.adjust_credit_micro_usd ?? 0,
+    // The month's charge after reconciliation: what a client should show as "spent this month" if it
+    // shows one number. Computed here rather than left to the client so every client agrees, and stated
+    // as its own field rather than folded into period_micro_usd so the estimate stays readable.
+    period_reconciled_micro_usd:
+      (period?.micro_usd ?? 0) +
+      (period?.adjust_spend_micro_usd ?? 0) -
+      (period?.adjust_credit_micro_usd ?? 0),
   };
 }
 
