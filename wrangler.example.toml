@@ -21,9 +21,10 @@ binding = "AI"
 name = "STT_SESSION"
 class_name = "SttSession"
 
+# SQLite-backed DO (SttSession uses ctx.storage.sql). new_classes (KV) is rejected on this account.
 [[migrations]]
 tag = "v1_stt_session"
-new_classes = ["SttSession"]
+new_sqlite_classes = ["SttSession"]
 
 [[d1_databases]]
 binding = "DB"
