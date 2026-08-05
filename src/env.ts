@@ -13,13 +13,19 @@ export interface Env {
   DB: D1Database;
 
   /**
-   * Optional Workers AI binding. Used ONLY for Unified Billing non-@cf non-chat models
-   * (image/video/music providers that have no REST `/ai/run/{id}` route). Chat and @cf models
-   * still go through HTTP with CF_AIG_TOKEN so the credential stays an argument.
-   *
-   * ABSENT: @cf non-chat still works (REST); unified-billing non-chat answers 503 unavailable.
+   * Workers AI binding. Required for:
+   *   - Deepgram Flux live STT (`{ websocket: true }`)
+   *   - Unified Billing non-@cf non-chat (image/video/music via env.AI.run + gateway)
+   * Chat and most @cf HTTP models still use CF_AIG_TOKEN over REST.
+   * ABSENT: Flux and UB non-chat answer 503; @cf REST doors still work.
    */
   AI?: Ai;
+
+  /**
+   * Durable Object namespace for live voice STT sessions (Flux bridge).
+   * ABSENT: GET /v1/stt/stream answers 503.
+   */
+  STT_SESSION?: DurableObjectNamespace;
 
   /** The Cloudflare account inference runs on. A plain var: an account id is not a secret. */
   CF_ACCOUNT_ID?: string;

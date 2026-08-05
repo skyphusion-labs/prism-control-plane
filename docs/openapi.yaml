@@ -190,6 +190,28 @@ paths:
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
+  /v1/stt/stream:
+    get:
+      tags: [inference]
+      summary: Live voice STT (Deepgram Flux WebSocket)
+      description: >-
+        WebSocket upgrade only. Auth via Authorization Bearer or access_token query.
+        Bridges to @cf/deepgram/flux; meters audio minutes on close. Requires AI + STT_SESSION bindings.
+      parameters:
+        - name: access_token
+          in: query
+          required: false
+          schema: { type: string }
+          description: Client key when Authorization cannot be set on the upgrade.
+      responses:
+        "101":
+          description: Switching Protocols (WebSocket)
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "402": { $ref: "#/components/responses/QuotaExhausted" }
+        "409": { $ref: "#/components/responses/ModelUnpriced" }
+        "503":
+          description: AI binding or STT_SESSION Durable Object not configured
+
   /v1/images/generations:
     post:
       tags: [inference]

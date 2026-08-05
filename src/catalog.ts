@@ -27,7 +27,7 @@
 /** Which door a model belongs to. `voice` is websocket-only and has no HTTP door yet. */
 export type Modality = "chat" | "image" | "tts" | "stt" | "voice" | "music" | "video";
 
-/** Modalities with an HTTP door on this plane. Voice is excluded (live WebSocket). */
+/** Modalities with a door on this plane (HTTP or WebSocket). */
 export const DOOR_MODALITIES: ReadonlySet<Modality> = new Set([
   "chat",
   "image",
@@ -35,6 +35,7 @@ export const DOOR_MODALITIES: ReadonlySet<Modality> = new Set([
   "stt",
   "music",
   "video",
+  "voice",
 ]);
 
 /**
@@ -1575,7 +1576,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
-    unitPrice: null,
+    // Published $0.0077 per audio minute (websocket). Live door: GET/WS /v1/stt/stream.
+    unitPrice: { microUsdPerUnit: 7700, unit: "audio_minute", pricedAt: PRICED_AT },
     publishedRates: [{ unit: "per audio minute (websocket)", usdPerUnit: 0.0077 }],
   },
 

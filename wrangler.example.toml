@@ -11,11 +11,19 @@ compatibility_date = "2026-05-01"
 # workers.dev hostname would be a second, un-DNS'd door to the same metered routes.
 workers_dev = false
 
-# Optional Workers AI binding for Unified Billing non-@cf non-chat (image/video/music).
-# Chat and @cf models use HTTP + CF_AIG_TOKEN. Without this binding those @cf doors still work;
-# google/openai/xai image and all video/music answer 503 until it is added.
-# [ai]
-# binding = "AI"
+# Workers AI binding: required for Deepgram Flux (websocket) and Unified Billing
+# non-@cf non-chat (image/video/music). Chat and most @cf HTTP models use CF_AIG_TOKEN.
+[ai]
+binding = "AI"
+
+# Live voice STT (Deepgram Flux) session bridge.
+[[durable_objects.bindings]]
+name = "STT_SESSION"
+class_name = "SttSession"
+
+[[migrations]]
+tag = "v1_stt_session"
+new_classes = ["SttSession"]
 
 [[d1_databases]]
 binding = "DB"

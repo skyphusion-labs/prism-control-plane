@@ -99,7 +99,9 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
               ? "POST /v1/videos/generations"
               : model.modality === "music"
                 ? "POST /v1/music/generations"
-                : "no HTTP door (voice is WebSocket-only)";
+                : model.modality === "voice"
+                  ? "GET/WS /v1/stt/stream (Deepgram Flux live mic)"
+                  : "no door for this modality";
     return errorResponse(
       ctx.requestId,
       "model_unsupported",

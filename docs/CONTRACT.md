@@ -116,6 +116,7 @@ All paths are relative to the deployment origin. All request and response bodies
 | POST | `/v1/audio/transcriptions` | client key | Metered speech-to-text (unit-priced). |
 | POST | `/v1/videos/generations` | client key | Metered video generation (unit-priced). |
 | POST | `/v1/music/generations` | client key | Metered music generation (unit-priced). |
+| GET/WS | `/v1/stt/stream` | client key | Live voice STT (Deepgram Flux). WebSocket upgrade. |
 
 ### `GET /v1/models`
 
@@ -152,12 +153,23 @@ including ones this plane will currently refuse, and `spendable: false` is how i
 picker should grey those out rather than discover the refusal at the error. Things that make an entry
 unspendable:
 
-- **No door:** `voice` is WebSocket-only and has no HTTP door (`501 model_unsupported`).
-- **No rate:** chat needs `price` (token micro-USD per MTok); non-chat needs `unit_price` (micro-USD
-  per request / audio minute / k-characters). Missing either is `409 model_unpriced` until an
-  operator sets one via `POST /admin/model-prices`.
+- **No rate:** chat needs `price` (token micro-USD per MTok); non-chat / voice need `unit_price`
+  (micro-USD per request / audio minute / k-characters). Missing either is `409 model_unpriced`
+  until an operator sets one via `POST /admin/model-prices`.
 - Calling a non-chat model on `/v1/chat/completions` returns `501 model_unsupported` and names the
-  correct modality door.
+  correct modality door (voice → `GET/WS /v1/stt/stream`).
+
+### `GET /v1/stt/stream` (WebSocket)
+
+Live mic STT via **Deepgram Flux** (`@cf/deepgram/flux`). Not a one-shot HTTP body.
+
+1. Upgrade with `Upgrade: websocket`.
+2. Authenticate: `Authorization: Bearer pcp_...` **or** query `?access_token=pcp_...`.
+3. Send binary linear16 PCM at 16 kHz; receive Deepgram JSON events (including EndOfTurn).
+4. On close, the plane meters **ceil(duration/60)** audio minutes at the model unit rate (no transcript
+   is stored -- privacy invariant).
+
+Requires Worker bindings: `AI` and Durable Object `STT_SESSION`.
 
 `unit_price` is the non-chat meter. `published_rates` remains disclosure of CF's native units.
 
@@ -454,7 +466,7 @@ does not get to invent:
 4. **Non-chat unit rates for Unified Billing.** Workers AI non-chat models with published rates are
    unit-priced in the catalog. Unified Billing image/video/music often have no published unit rate
    yet -- they need operator `unit_micro_usd` (and the Worker AI binding) before `spendable: true`.
-   Voice remains WebSocket-only.
+   Live voice uses `GET/WS /v1/stt/stream` (Flux); also requires AI + STT_SESSION bindings.
 5. **Upstream credential.** Settled: one shared account-scoped Cloudflare token (`CF_AIG_TOKEN`) for
    every Prism account. Per-account attribution is gateway metadata plus this plane's ledger. One
    Cloudflare API token per user is **not product** (account ceiling is

@@ -38,9 +38,13 @@ import {
 } from "./routes/nonchat";
 import { handleEnroll } from "./routes/clients";
 import { handleDeepHealth, handleHealth, SERVICE_NAME } from "./routes/health";
+import { handleSttStreamUpgrade, isSttStreamUpgrade } from "./routes/stt-stream";
 import type { Ctx } from "./routes/shared";
 
 export { SERVICE_NAME };
+// Durable Object class must be exported from the Worker entry (wrangler class_name).
+// Lazy re-export: tests import handleRequest without loading cloudflare:workers.
+export { SttSession } from "./stt-session";
 
 const REVOKE_CLIENT_PATH = /^\/admin\/clients\/([A-Za-z0-9_-]{1,64})\/revoke$/;
 const CREDIT_PATH = /^\/admin\/accounts\/([A-Za-z0-9_-]{1,64})\/credits$/;
@@ -96,6 +100,11 @@ export async function handleRequest(ctx: Ctx, request: Request): Promise<Respons
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, "") || "/";
   const method = request.method.toUpperCase();
+
+  // Live voice STT (Flux): WebSocket upgrade, not a POST body door.
+  if (path === "/v1/stt/stream" && isSttStreamUpgrade(request, path)) {
+    return await handleSttStreamUpgrade(ctx, request);
+  }
 
   if (method === "GET" && path === "/health") return handleHealth(ctx);
   if (method === "GET" && path === "/health/deep") return await handleDeepHealth(ctx);

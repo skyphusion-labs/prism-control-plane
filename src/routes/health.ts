@@ -52,7 +52,7 @@ export async function handleDeepHealth(ctx: Ctx): Promise<Response> {
   // individually (model_unpriced), which is where that gate belongs.
   const chat = CATALOG.filter((entry) => entry.modality === "chat");
   const unpricedChat = chat.filter((entry) => entry.price === null);
-  const nonChat = CATALOG.filter((entry) => entry.modality !== "chat" && entry.modality !== "voice");
+  const nonChat = CATALOG.filter((entry) => entry.modality !== "chat");
   const unitPriced = nonChat.filter((entry) => entry.unitPrice !== null);
   checks.push({
     name: "catalog_pricing",
