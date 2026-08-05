@@ -12,23 +12,12 @@ machinery on their own Cloudflare account.
 This plane owns **who may call what and how much**. Inference routing, catalog breadth, and the
 multimodal surface stay in **[prism](https://github.com/skyphusion-labs/prism)**.
 
-**Status: deployed and live at `play-proxy.skyphusion.org`.** Built: the client contract, the Worker
-and its route table, the D1 schema, client-key auth with one-time enrollment, entitlement and rate
-gates, dual-pool spend (monthly allowance then prepaid credit, issue #11), the priced usage ledger
-(**45/45 chat** token-priced; non-chat **unit-priced doors** for image/tts/stt/video/music), SSE
-streaming, shared `CF_AIG_TOKEN`, `POST /admin/reconcile`, adversarial audit CI, `POST /admin/plans`.
-Non-chat doors: `/v1/images/generations`, `/v1/audio/speech`, `/v1/audio/transcriptions`,
-`/v1/videos/generations`, `/v1/music/generations`. Live voice: `POST /v1/stt/sessions` (mint
-short-lived `stt_` ticket) + `GET/WS /v1/stt/stream` (Deepgram Flux via AI binding + `STT_SESSION`
-DO; meters audio minutes, no transcript stored). Browser WS uses the ticket in
-`Sec-WebSocket-Protocol`, never the long-lived `pcp_` key. UB non-@cf non-chat uses the same AI
-binding through the gateway. **Catalog rate refresh:** `POST /admin/catalog/refresh` pulls chat
-token rates from AI Gateway `compat/models` into `model_prices` (dry-run default; does not rewrite
-`catalog.ts`). **Reconcile cron:** hourly `scheduled()` dry-run by default; set
-`RECONCILE_CRON_LIVE=true` only after dry reports look right. **Deferred (Conrad 2026-08-05):**
-receipt/store enrollment, commercial plan numbers, bulk UB non-chat unit pricing -- park until
-further development is done; do not build them unprompted. **Settled:** host stays
-`play-proxy.skyphusion.org` (not collapsed onto play). Aviation-grade `main`.
+**Status: live at `play-proxy.skyphusion.org` (tag train; see CHANGELOG).** Built: client contract,
+Worker + route table, D1, client-key auth + enrollment, dual-pool spend, priced catalog (45/45 chat;
+non-chat unit doors), Flux STT + session tickets, catalog rate refresh, reconcile (admin + hourly
+cron dry-run), adversarial audit CI, plans upsert. **Deferred (2026-08-05):** receipt enrollment,
+commercial plan numbers, bulk UB non-chat unit pricing. **Settled host:** `play-proxy.skyphusion.org`.
+Aviation-grade `main`. Release: annotated `v*` tag on main → deploy.yml.
 
 **The spend path addresses the AI Gateway host**
 ([#15](https://github.com/skyphusion-labs/prism-control-plane/issues/15)). `src/upstream.ts` POSTs to
