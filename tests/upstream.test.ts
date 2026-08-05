@@ -12,6 +12,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   GATEWAY_HOST,
+  bindingChatBody,
   endpointFor,
   runnerFor,
   upstreamBody,
@@ -154,8 +155,9 @@ describe("upstreamBody", () => {
     expect(body).toMatchObject({ model: "@cf/meta/llama-3.2-1b-instruct", max_tokens: 16 });
   });
 
-  it("uses max_completion_tokens for openai/* and xai/* models", () => {
+  it("uses max_completion_tokens for openai/* , xai/* , and grok/* models", () => {
     // Issue #10: 5.6 family and o4-mini reject max_tokens; Grok expects max_completion_tokens.
+    // Compat upstream for Grok is grok/* (provider slug); xai/* remains for binding ids.
     expect(
       upstreamBody(request({ upstreamModel: "openai/gpt-5.6-terra", billing: "unified-billing" })),
     ).toMatchObject({ max_completion_tokens: 16 });
@@ -164,6 +166,9 @@ describe("upstreamBody", () => {
     ).not.toHaveProperty("max_tokens");
     expect(
       upstreamBody(request({ upstreamModel: "xai/grok-4.3", billing: "unified-billing" })),
+    ).toMatchObject({ max_completion_tokens: 16 });
+    expect(
+      upstreamBody(request({ upstreamModel: "grok/grok-4.3", billing: "unified-billing" })),
     ).toMatchObject({ max_completion_tokens: 16 });
     expect(
       upstreamBody(request({ upstreamModel: "anthropic/claude-haiku-4-5", billing: "unified-billing" })),
@@ -177,6 +182,91 @@ describe("upstreamBody", () => {
     });
   });
 });
+
+describe("bindingChatBody", () => {
+  it("builds Anthropic Messages shape for anthropic/* binding models", () => {
+    const body = bindingChatBody(
+      request({
+        bindingModel: "anthropic/claude-fable-5",
+        messages: [
+          { role: "system", content: "be brief" },
+          { role: "user", content: "hi" },
+        ],
+        maxTokens: 64,
+      }),
+    );
+    expect(body).toMatchObject({
+      max_tokens: 64,
+      system: "be brief",
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+    });
+    expect(body).not.toHaveProperty("max_completion_tokens");
+  });
+
+  it("builds Chat Completions shape for xai/* binding models", () => {
+    const body = bindingChatBody(
+      request({
+        bindingModel: "xai/grok-4.5",
+        messages: [{ role: "user", content: "hi" }],
+        maxTokens: 32,
+        stream: true,
+      }),
+    );
+    expect(body).toMatchObject({
+      max_completion_tokens: 32,
+      stream: true,
+      stream_options: { include_usage: true },
+      messages: [{ role: "user", content: "hi" }],
+    });
+  });
+});
+
+describe("runnerFor binding path", () => {
+  it("uses env.AI.run with gateway id and does not fetch HTTP when bindingModel is set", async () => {
+    const run = vi.fn(async () => ({
+      choices: [{ message: { content: "bound" } }],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    }));
+    const { impl, calls } = fakeFetch(new Response("should-not-fetch"));
+    const result = await runnerFor({
+      ...DEPS,
+      fetchImpl: impl,
+      ai: { run } as unknown as Ai,
+    }).run(
+      request({
+        bindingModel: "xai/grok-4.5",
+        upstreamModel: "grok/grok-4.5",
+        billing: "unified-billing",
+      }),
+    );
+    expect(result.outcome).toBe("ok");
+    if (result.outcome === "ok") {
+      expect(extractOkText(result.body)).toBe("bound");
+    }
+    expect(calls).toHaveLength(0);
+    expect(run).toHaveBeenCalledWith(
+      "xai/grok-4.5",
+      expect.objectContaining({ max_completion_tokens: 16 }),
+      { gateway: { id: "prism-proxy" } },
+    );
+  });
+
+  it("fails closed when bindingModel is set but AI binding is missing", async () => {
+    const result = await runnerFor({ ...DEPS, fetchImpl: fakeFetch(new Response("{}")).impl }).run(
+      request({ bindingModel: "anthropic/claude-fable-5" }),
+    );
+    expect(result.outcome).toBe("upstream_error");
+    if (result.outcome === "upstream_error") {
+      expect(result.detail).toMatch(/AI binding/i);
+    }
+  });
+});
+
+function extractOkText(body: unknown): string {
+  const c = (body as { choices?: Array<{ message?: { content?: string } }> })?.choices?.[0]
+    ?.message?.content;
+  return typeof c === "string" ? c : "";
+}
 
 describe("runnerFor", () => {
   it("reads the transit receipt off the response", () => {
