@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.4.9] - 2026-08-05
+
+### Fixed
+
+- **Video t2v params (7003):** do not send Veo-only shape (`duration: "8s"`, `generate_audio`) to every model.
+  CF schemas are `additionalProperties: false` and types differ: xAI Grok wants **integer** duration (1-15) and
+  no `generate_audio`; Seedance/Hailuo/Runway/Alibaba get their own t2v fields. Veo keeps the string-duration
+  shape. iOS clients posting only `{model,prompt}` were fine; the plane was rewriting the body wrong.
+
 ## [0.4.8] - 2026-08-05
 
 ### Fixed

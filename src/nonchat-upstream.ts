@@ -325,9 +325,72 @@ export function buildVideoParams(modelId: string, prompt: string, imageUrl?: str
       if (prompt) params.prompt = prompt;
       return params;
     }
+    // xAI Grok video i2v: image as { url } object (CF docs); duration integer.
+    if (modelId.startsWith("xai/grok-imagine-video")) {
+      return {
+        prompt,
+        duration: 5,
+        aspect_ratio: "16:9",
+        resolution: "720p",
+        image: { url: image },
+      };
+    }
     return { image, prompt };
   }
-  // text-to-video: prism longrun-params shape (duration is a STRING; generate_audio required on many schemas)
+
+  // text-to-video: per-model. Wrong duration type or extra fields => CF 7003 User Input Error
+  // (schemas are additionalProperties:false on most UB video models).
+  if (modelId.startsWith("xai/grok-imagine-video")) {
+    // developers.cloudflare.com/ai/models/xai/grok-imagine-video -- duration integer 1-15
+    return {
+      prompt,
+      duration: 5,
+      aspect_ratio: "16:9",
+      resolution: "720p",
+    };
+  }
+  if (modelId.startsWith("bytedance/seedance")) {
+    // integer duration; no generate_audio on t2v for seedance family
+    return {
+      prompt,
+      aspect_ratio: "16:9",
+      duration: 5,
+      resolution: "720p",
+      fps: 24,
+      camera_fixed: false,
+      watermark: false,
+      generate_audio: false,
+    };
+  }
+  if (modelId.startsWith("minimax/hailuo")) {
+    // Hailuo t2v uses integer duration + resolution enum (no first_frame required for t2v)
+    return {
+      prompt,
+      duration: 6,
+      resolution: "768P",
+      prompt_optimizer: true,
+    };
+  }
+  if (modelId.startsWith("runwayml/")) {
+    return {
+      prompt,
+      duration: 5,
+      ratio: "1280:720",
+      content_moderation: { public_figure_threshold: "low" },
+    };
+  }
+  if (
+    modelId === "alibaba/hh1-t2v" ||
+    modelId === "alibaba/hh1.1-t2v" ||
+    modelId.startsWith("alibaba/")
+  ) {
+    return {
+      prompt,
+      resolution: "720P",
+      duration: 5,
+    };
+  }
+  // Google Veo and other long-run UB: duration STRING + generate_audio (prism longrun default)
   return {
     prompt,
     duration: "8s",
