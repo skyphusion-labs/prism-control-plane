@@ -14,9 +14,9 @@ multimodal surface stay in **[prism](https://github.com/skyphusion-labs/prism)**
 
 **Status: live at `play-proxy.skyphusion.org` (tag train; see CHANGELOG).** Built: client contract,
 Worker + route table, D1, client-key auth + enrollment, dual-pool spend, priced catalog (44 chat;
-non-chat unit doors), Flux STT + session tickets, catalog rate refresh, reconcile (admin + hourly
-cron dry-run), adversarial audit CI, plans upsert. **Deferred (2026-08-05):** receipt enrollment,
-commercial plan numbers, bulk UB non-chat unit pricing. **Settled host:** `play-proxy.skyphusion.org`.
+non-chat unit doors incl. UB image/video/music), Flux STT + session tickets, catalog rate refresh,
+reconcile (admin + hourly cron dry-run), adversarial audit CI, plans upsert. **Deferred (2026-08-05):**
+receipt enrollment, commercial plan numbers. **Settled host:** `play-proxy.skyphusion.org`.
 Aviation-grade `main`. Release: annotated `v*` tag on main → deploy.yml.
 
 **The spend path addresses the AI Gateway host**

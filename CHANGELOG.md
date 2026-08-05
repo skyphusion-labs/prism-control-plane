@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- **UB non-chat unit rates (unpark):** operator `unitPrice` for all catalog Unified Billing
+  **image** (13), **video** (19), and **music** (1) models so `GET /v1/models` marks them
+  `spendable: true` and `/v1/images|videos|music/generations` can meter. Per-request unit;
+  video meters the door's default clip length (5s / 6s Hailuo). xAI image/video and several
+  Google/OpenAI image rates track vendor docs; others are conservative operator estimates
+  (refine via `POST /admin/model-prices` when gateway cost rows land). CONTRACT open decision 4
+  updated.
+
 ### Removed
 
 - **LLaVA 1.5** (`@cf/llava-hf/llava-1.5-7b-hf`): retired. Upstream hangs; vision covered by modern multimodal chat. Chat-door `image` field refused.

@@ -498,9 +498,12 @@ does not get to invent. Status updated 2026-08-05.
    rate (CF table or operator measured $0 for LLaVA). Unpriced remains the refusal for any future
    model that lands without a number. Runtime refresh: `POST /admin/catalog/refresh`. Non-token
    rates for other modalities are separate (item 4).
-4. **Non-chat unit rates for Unified Billing.** **DEFERRED** (ruling 2026-08-05). Doors and
-   Workers AI published unit rates exist; operator `unit_micro_usd` for the rest of UB image/video
-   music can wait. Unpriced non-chat stays `spendable: false` / `model_unpriced` until un-parked.
+4. **Non-chat unit rates for Unified Billing.** **UNPARKED 2026-08-05.** Operator unit rates are
+   in `src/catalog.ts` for all catalog image / video / music UB models (per-request meter; video
+   uses the default clip duration the non-chat door sends). xAI image/video and several Google /
+   OpenAI image rates track vendor docs; remaining rates are conservative operator estimates until
+   gateway cost rows refine them via `POST /admin/model-prices`. Unpriced remains a valid refusal
+   for any future model that lands without a number.
 5. **Upstream credential.** Settled: one shared account-scoped Cloudflare token (`CF_AIG_TOKEN`) for
    every Prism account. Per-account attribution is gateway metadata plus this plane's ledger. One
    Cloudflare API token per user is **not product** (account ceiling is
