@@ -12,11 +12,17 @@ machinery on their own Cloudflare account.
 This plane owns **who may call what and how much**. Inference routing, catalog breadth, and the
 multimodal surface stay in **[prism](https://github.com/skyphusion-labs/prism)**.
 
-**Status: foundation built, not deployed.** Built: the client contract, the Worker and its route table,
-the D1 schema, client-key auth with one-time enrollment, entitlement and rate gates, the pre-flight
-allowance gate, and the priced usage ledger. Not built: streaming (`stream: true` answers `501`),
-overage billing, a receipt-validated enrollment source, and any deployment. Aviation-grade `main`
+**Status: deployed and live at `play-proxy.skyphusion.org`.** Built: the client contract, the Worker
+and its route table, the D1 schema, client-key auth with one-time enrollment, entitlement and rate
+gates, the prepaid balance gate, the priced usage ledger, and SSE streaming with trailing-usage
+capture. **Not built:** the flat plan's monthly included-token allowance (only the prepaid balance half
+exists, [#11](https://github.com/skyphusion-labs/prism-control-plane/issues/11)), the AI Gateway cost
+reconciliation job ([#12](https://github.com/skyphusion-labs/prism-control-plane/issues/12)), and a
+receipt-validated enrollment source. No paid traffic has been served through it yet. Aviation-grade `main`
 (PR + `ci` + `coverage` + CodeQL).
+
+**There is no overage billing and there never will be.** Prepaid only; the plane answers `402` when
+the money is gone.
 
 ## The contract is the authority
 
@@ -34,7 +40,10 @@ built against them.
 
 1. **Privacy invariant.** No prompt or completion text is ever persisted. No such column may be added
    to `migrations/`; `tests/schema-privacy.test.ts` enforces it, including a positive control that the
-   scanner still catches a planted violation. AI Gateway logging defaults off.
+   scanner still catches a planted violation. `cf-aig-collect-log-payload: false` is hard-wired in
+   `src/upstream.ts` with **no env override**: an invariant that config can switch off is a default.
+   The separate `cf-aig-collect-log` (metadata only: tokens, model, cost, duration) defaults **on**,
+   which is what makes the biller's cost figure available to check our ledger against.
 2. **Money is integer micro-USD.** No floats in the money path. The unit belongs in the name of every
    field that carries it.
 3. **Unmetered is a first-class outcome**, distinct from a zero charge. See `src/meter.ts`. Do not
@@ -42,24 +51,33 @@ built against them.
 4. **Fail closed.** No gateway means the inference route answers 503, not a direct model call. An unset
    `ADMIN_TOKEN` means there is no operator surface. A malformed plan refuses rather than getting a
    default. An unusable usage counter answers 503, never 402.
-5. **No passthrough.** The catalog in `src/catalog.ts` is a closed allowlist and every entry carries a
-   price. A model that cannot be priced cannot be called.
+5. **No passthrough.** The catalog in `src/catalog.ts` is a closed allowlist. A model that cannot be
+   priced cannot be called (`model_unpriced`), but unpriced is the **expected** state for much of the
+   catalog: Cloudflare publishes no public per-token rate for third-party Unified Billing models. So
+   the refusal is per-model at the door, not a readiness failure. Rates: `docs/ARCHITECTURE.md` and
+   [#10](https://github.com/skyphusion-labs/prism-control-plane/issues/10).
 
 ## Architecture
+
+**Full picture, with the production wiring and a mermaid flowchart: `docs/ARCHITECTURE.md`.** Read it
+before changing the spend path.
 
 | File | Role |
 | --- | --- |
 | `src/index.ts` | Worker entry plus the whole route table. `handleRequest` takes its dependencies, which is what makes the tests hermetic. |
 | `src/env.ts` | Hand-authored `Env`, mirroring `wrangler.example.toml`. Never commit a generated `worker-configuration.d.ts`. |
 | `src/http.ts` | Error codes, the code-to-status table, JSON helpers, body cap. |
-| `src/catalog.ts` | Model allowlist and price list, in one table on purpose. |
-| `src/plans.ts` | Plan validation, tier entitlement, output-token clamping. |
-| `src/quota.ts` | The pre-flight allowance decision. Pure. |
+| `src/catalog.ts` | Model allowlist and rate table, in one table on purpose. |
+| `src/plans.ts` | Plan validation, tier entitlement, output-token clamping. Pure. |
+| `src/balance.ts` | The pre-flight prepaid decision. Pure. |
 | `src/meter.ts` | Pricing one request, or declining to. Pure. |
-| `src/period.ts` | UTC calendar-month period keys and bounds. Pure. |
+| `src/period.ts` | UTC calendar-month period keys and bounds. Pure. Counts usage; grants nothing. |
 | `src/auth.ts` | Client-key format, minting, and the one identity resolution path. |
 | `src/store.ts` / `src/store-d1.ts` | Persistence interface and its only D1 implementation. |
-| `src/inference.ts` | `InferenceRunner` interface and the AI-binding implementation. The only place a model is reached. |
+| `src/inference.ts` | `InferenceRunner` interface. The seam a model is reached through. |
+| `src/upstream.ts` | The only place Cloudflare's AI REST API is called, and the only place the privacy headers are set. |
+| `src/token-minter.ts` | `UpstreamCredentialSource`: `SharedTokenSource` (default) and the opt-in `CfUserTokenProvider`. |
+| `src/stream.ts` | Byte-for-byte SSE relay plus trailing-usage capture. |
 | `src/routes/*.ts` | Handlers. `chat.ts` is the metered door and documents its gate order. |
 
 Pure decision modules plus two injected seams (`ControlPlaneStore`, `InferenceRunner`) mean the entire
@@ -91,11 +109,87 @@ npm run dev
 `README.md` has the end-to-end local walkthrough (create account, mint enrollment token, enroll, call).
 Only the final inference call spends anything.
 
+## Docs index
+
+| Doc | What it is for |
+| --- | --- |
+| `docs/CONTRACT.md` | **Normative** client surface. The mobile build target. |
+| `docs/openapi.yaml` | The same contract, machine-readable. Changes in the same commit as the prose. |
+| `docs/ARCHITECTURE.md` | Production wiring, mermaid flowchart, credential model, money model and its gap, pricing findings. |
+| `README.md` | End-to-end local walkthrough. |
+| [#10](https://github.com/skyphusion-labs/prism-control-plane/issues/10) | Measured model rates and pricing methodology. |
+
+## Deployment and secrets
+
+Live: Worker **`prism-control-plane`** at **`play-proxy.skyphusion.org`** (custom domain, wrangler-owned
+DNS), AI Gateway **`prism-proxy`**, D1 **`prism-control-plane`**, prod account
+`fabcb25d9c7eb087110ec474a03e50d2`. No `workers.dev`. Only binding is `DB`; no KV, R2, or Queues.
+
+**Credential posture: `shared`.** One account-scoped `CF_AIG_TOKEN` (AI Gateway Run + Workers AI Read)
+reaches models; per-user attribution rides on `cf-aig-metadata` plus the D1 ledger. Per-user token
+minting is implemented, bounded, and **off**; do not turn it on without reading the 500-token ceiling
+note in `docs/ARCHITECTURE.md`.
+
+### Where the config and credentials live
+
+The committed `wrangler.example.toml` is a **template** with a placeholder database id. The live config
+is the repo secret `PRISM_CONTROL_PLANE_WRANGLER`, and because a GitHub Actions secret cannot be read
+back, the canonical copy is escrowed. **Change one, change all three** (working copy, escrow, repo
+secret).
+
+| Escrow (`skyphusion-labs/crew-secrets`, `swarm-secrets/`) | Holds |
+| --- | --- |
+| `prism-control-plane-wrangler/wrangler.toml.age` | The live wrangler config. Resource ids and routes, **never a Worker secret**. |
+| `prism-control-plane-aig/env.age` | `CF_AIG_TOKEN` (runtime shared credential). |
+| `prism-control-plane-deploy/env.age` | `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` (CI deploy). |
+| `prism-control-plane-worker-secrets/env.age` | `ADMIN_TOKEN`. |
+
+All four are armored age to exactly three recipients: mackaye, strummer, conrad.
+
+**Never put a bearer in the wrangler config.** CI writes that config to disk on a runner, so a secret
+placed there is materialized in the clear, and it would not take effect anyway: Worker secrets are read
+from the secret store, not the deploy config. `wrangler secret put` takes effect immediately and
+persists across deploys; `vars` only change on a full `wrangler deploy`.
+
+```bash
+# Materialize the working copy (gitignored).
+age -d -i ~/.config/chezmoi/key.txt \
+  ~/Documents/GitHub/crew-secrets/swarm-secrets/prism-control-plane-wrangler/wrangler.toml.age \
+  > wrangler.toml
+```
+
+### Deploying
+
+Prod ships from a **tag that is already on `main`** via `.github/workflows/deploy.yml`. A
+`workflow_dispatch` runs the gate and stops; it can never quietly become a deploy path that skipped
+review. The workflow writes the config secret to `wrangler.ci.toml`, refuses a config still holding a
+placeholder, applies D1 migrations, deploys, then smoke tests readiness.
+
+`GET /health/deep` is the readiness probe and the **only** smoke test that spends nothing: it reads
+D1 and reports whether the gateway and upstream credential are wired, without calling a model. It
+answers `503` when it cannot serve, so a monitor watching status codes can see it fail.
+
 ## CI
 
 - `.github/workflows/ci.yml` -- push/PR to `main`: typecheck + tests on GitHub-hosted `ubuntu-latest`
   (public, fork-safe; never fleet self-hosted)
+- `.github/workflows/deploy.yml` -- tag `v*` only, gated on typecheck + tests and on the tag being an
+  ancestor of `origin/main`
 - Coverage + CodeQL workflows present
+
+## Hands off
+
+- **Never self-merge.** Open the PR and wait for review. A prior grant on another PR does not carry.
+- **Do not spend to verify.** `/health/deep` and `/v1/models` cost nothing; a chat completion costs
+  real money against a prepaid balance. Never fire inference "just to confirm" a deploy.
+- **Do not weaken a fail-closed path** into a fallback. No gateway, no credential, or an unusable plan
+  must keep answering `503`/refusal, never a direct model call or a guessed default.
+- **Do not add a prompt or completion column** to `migrations/`, and do not silence
+  `tests/schema-privacy.test.ts` or `tests/contract.test.ts`.
+- **Do not change the live Worker via the Cloudflare dashboard or the settings API.** IaC only: edit
+  the config, re-escrow, re-set the repo secret, deploy. A settings PATCH can desync `GET /settings`
+  from the runtime deployment.
+- Inference breadth and the multimodal surface belong to `prism`, not here.
 
 ## Conventions
 
