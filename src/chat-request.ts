@@ -18,6 +18,8 @@ const ALLOWED_FIELDS = new Set([
   "temperature",
   "top_p",
   "stream",
+  // Single-shot vision (LLaVA): a data-URL image rides next to messages, not as multiparty content.
+  "image",
 ]);
 
 const ALLOWED_ROLES = new Set(["system", "user", "assistant"]);
@@ -25,6 +27,8 @@ const ALLOWED_ROLES = new Set(["system", "user", "assistant"]);
 /** Contract limits. Mirrored in docs/openapi.yaml. */
 export const MAX_MESSAGES = 200;
 export const MAX_CONTENT_CHARS = 200_000;
+/** Max raw image payload once base64-decoded (4 MiB). Vision models are single-shot. */
+export const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 
 export interface ChatTurnInput {
   role: "system" | "user" | "assistant";
@@ -38,6 +42,13 @@ export interface ValidChatRequest {
   temperature?: number;
   topP?: number;
   stream: boolean;
+  /**
+   * Optional data-URL image for single-shot vision models (`data:image/...;base64,...`).
+   * Required by `@cf/llava-hf/llava-1.5-7b-hf`; refused on other models.
+   */
+  imageDataUrl?: string;
+  /** Raw image bytes decoded from imageDataUrl, when present. */
+  imageBytes?: Uint8Array;
 }
 
 export type ChatRequestResult =
@@ -58,7 +69,7 @@ export function parseChatRequest(body: unknown): ChatRequestResult {
     if (!ALLOWED_FIELDS.has(key)) {
       return bad(
         `Unknown field "${key}". This plane forwards only model, messages, max_tokens, ` +
-          "temperature, top_p, and stream; unknown fields are refused rather than dropped so a " +
+          "temperature, top_p, stream, and image; unknown fields are refused rather than dropped so a " +
           "client never believes it sent a parameter that was ignored.",
       );
     }
@@ -144,5 +155,69 @@ export function parseChatRequest(body: unknown): ChatRequestResult {
     stream = raw.stream;
   }
 
-  return { ok: true, value: { model: raw.model.trim(), messages, maxTokens, temperature, topP, stream } };
+  let imageDataUrl: string | undefined;
+  let imageBytes: Uint8Array | undefined;
+  if (raw.image !== undefined) {
+    if (typeof raw.image !== "string" || !raw.image.trim()) {
+      return bad('"image" must be a non-empty data URL string when present.');
+    }
+    const parsed = parseImageDataUrl(raw.image.trim());
+    if (!parsed.ok) return bad(parsed.message);
+    imageDataUrl = raw.image.trim();
+    imageBytes = parsed.bytes;
+  }
+
+  return {
+    ok: true,
+    value: {
+      model: raw.model.trim(),
+      messages,
+      maxTokens,
+      temperature,
+      topP,
+      stream,
+      imageDataUrl,
+      imageBytes,
+    },
+  };
 }
+
+/**
+ * Decode a `data:image/...;base64,...` URL into raw bytes.
+ * Refuses anything that is not a data URL or is over MAX_IMAGE_BYTES once decoded.
+ */
+export function parseImageDataUrl(
+  dataUrl: string,
+): { ok: true; bytes: Uint8Array; mime: string } | { ok: false; message: string } {
+  const match = /^data:(image\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)$/i.exec(dataUrl);
+  if (!match) {
+    return {
+      ok: false,
+      message:
+        '"image" must be a data URL of the form data:image/<type>;base64,... (https URLs and bare base64 are refused).',
+    };
+  }
+  const mime = match[1].toLowerCase();
+  const b64 = match[2].replace(/\s+/g, "");
+  let bytes: Uint8Array;
+  try {
+    const bin = atob(b64);
+    bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  } catch {
+    return { ok: false, message: '"image" base64 payload could not be decoded.' };
+  }
+  if (bytes.byteLength === 0) {
+    return { ok: false, message: '"image" decoded to zero bytes.' };
+  }
+  if (bytes.byteLength > MAX_IMAGE_BYTES) {
+    return {
+      ok: false,
+      message: `"image" is ${bytes.byteLength} bytes decoded; the cap is ${MAX_IMAGE_BYTES}.`,
+    };
+  }
+  return { ok: true, bytes, mime };
+}
+
+/** Catalog id of the single-shot vision model that needs the native image wire format. */
+export const LLAVA_MODEL_ID = "@cf/llava-hf/llava-1.5-7b-hf";

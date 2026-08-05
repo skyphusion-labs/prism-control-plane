@@ -19,8 +19,9 @@ import { FakeStore, testPlan } from "./fake-store";
 const NOW = new Date("2026-08-04T12:00:00.000Z");
 const MODEL = "@cf/meta/llama-3.2-3b-instruct";
 /** A catalog model Cloudflare publishes no per-token rate for. Unpriced until an operator says otherwise. */
-// Still unpriced: absent from the gateway catalog (issue #10). Unified Billing chat is now priced.
-const UNPRICED_MODEL = "@cf/llava-hf/llava-1.5-7b-hf";
+// Every chat model is priced as of v0.2.x; LLaVA has a measured $0 baseline.
+// Operator override tests still need a catalog id — use LLaVA and raise its rate.
+const VISION_MODEL = "@cf/llava-hf/llava-1.5-7b-hf";
 /** A catalog model that is not chat, so it has no door here. */
 const IMAGE_MODEL = "@cf/black-forest-labs/flux-1-schnell";
 
@@ -253,17 +254,16 @@ describe("health", () => {
     expect(perUserCred?.detail).toMatch(/per-user|retired|500-token/i);
   });
 
-  it("does not fail readiness over models Cloudflare publishes no rate for", async () => {
-    // Unpriced is the EXPECTED state for third-party Unified Billing models, so failing readiness over it
-    // would make the plane permanently unhealthy for a reason nobody can fix from here. The per-request
-    // model_unpriced refusal is where that gate belongs.
+  it("reports catalog pricing without failing readiness", async () => {
+    // Non-chat modalities remain unpriced by design; chat is fully priced (including LLaVA at $0).
+    // Readiness stays green either way — per-model gates own spendability.
     const h = await harness();
     const response = await handleRequest(h.ctx, get("/health/deep"));
     expect(response.status).toBe(200);
     const body = (await response.json()) as { checks: { name: string; ok: boolean; detail: string }[] };
     const pricing = body.checks.find((check) => check.name === "catalog_pricing");
     expect(pricing?.ok).toBe(true);
-    expect(pricing?.detail).toContain("awaiting an operator rate");
+    expect(pricing?.detail).toMatch(/chat/);
   });
 
   it("answers readiness 200 when everything is wired", async () => {
@@ -656,29 +656,50 @@ describe("POST /v1/chat/completions", () => {
     expect(h.store.accounts.get("acct_1")?.spent_micro_usd).toBe(385_900);
   });
 
-  it("409s a chat model Cloudflare publishes no rate for", async () => {
-    // The model is real and the plan may well entitle it. What is missing is a rate on OUR side, so this is a
-    // conflict with server state (409) and not a fact about the request. Serving it would be unmeterable
-    // spend, which is the one thing this plane exists to prevent.
-    const h = await harness({ plan: testPlan({ allowed_tiers: "standard,premium" }) });
-    const response = await handleRequest(h.ctx, chat(h.key, { ...ASK, model: UNPRICED_MODEL }));
-    expect(response.status).toBe(409);
-    expect(await response.json()).toMatchObject({ error: { code: "model_unpriced" } });
-    expect(h.runner?.calls).toHaveLength(0);
+  it("400s LLaVA without an image and serves it with one", async () => {
+    // LLaVA is native image-to-text. Measured CF cost is $0; the catalog rate is zero but spendable.
+    const tinyPng =
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    const h = await harness({
+      plan: testPlan({ allowed_tiers: "standard" }),
+      result: {
+        outcome: "ok",
+        body: { description: "A red pixel." },
+        gatewayLogId: "log_llava",
+      },
+    });
+    const missing = await handleRequest(h.ctx, chat(h.key, { ...ASK, model: VISION_MODEL }));
+    expect(missing.status).toBe(400);
+    expect(await missing.json()).toMatchObject({ error: { code: "invalid_request" } });
+
+    const ok = await handleRequest(
+      h.ctx,
+      chat(h.key, {
+        model: VISION_MODEL,
+        messages: [{ role: "user", content: "What color?" }],
+        max_tokens: 32,
+        image: tinyPng,
+      }),
+    );
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("prism-metered")).toBe("true");
+    // Zero catalog rate → zero charge; still a metered row.
+    expect(ok.headers.get("prism-usage-micro-usd")).toBe("0");
+    expect(h.runner?.calls[0]?.imageBytes?.byteLength).toBeGreaterThan(0);
+    expect(h.store.events[0]).toMatchObject({ metered: true, micro_usd: 0, model_id: VISION_MODEL });
   });
 
-  it("serves an unpriced model once an operator sets a rate", async () => {
-    // The override is what makes the catalog's unpriced half reachable, and it must flow all the way through
-    // to the meter -- not just to the listing. If it did not, the 409 above would be permanent.
-    const h = await harness({ plan: testPlan({ allowed_tiers: "standard,premium" }) });
+  it("applies an operator override rate end to end", async () => {
+    const h = await harness({ plan: testPlan({ allowed_tiers: "standard" }) });
     await h.store.putModelPrice({
-      model_id: UNPRICED_MODEL,
+      model_id: MODEL,
       input_micro_usd_per_mtok: 3_000_000,
       output_micro_usd_per_mtok: 15_000_000,
       priced_at: "2026-08-04",
       note: null,
     });
-    const response = await handleRequest(h.ctx, chat(h.key, { ...ASK, model: UNPRICED_MODEL }));
+    // Fake runner returns 1M/1M tokens; at 3+15 USD/Mtok that is 18 USD = 18_000_000 micro.
+    const response = await handleRequest(h.ctx, chat(h.key, ASK));
     expect(response.status).toBe(200);
     expect(response.headers.get("prism-usage-micro-usd")).toBe("18000000");
     expect(h.store.events[0]).toMatchObject({ metered: true, micro_usd: 18_000_000 });
@@ -697,27 +718,23 @@ describe("POST /v1/chat/completions", () => {
 });
 
 describe("GET /v1/models", () => {
-  it("publishes spendable=false for a model it would refuse", async () => {
-    // The contract's promise: a well-behaved client never has to discover the 409 or the 501, because this
-    // list already told it which models are actually usable.
+  it("publishes spendable=false for non-chat and spendable=true for LLaVA", async () => {
+    // Chat is fully priced (LLaVA included at measured $0). Non-chat stays unspendable until a unit meter.
     const h = await harness({ plan: testPlan({ allowed_tiers: "standard,premium" }) });
     const response = await handleRequest(h.ctx, get("/v1/models", h.key));
     const body = (await response.json()) as {
       data: { id: string; spendable: boolean; price: unknown }[];
     };
-    const unpriced = body.data.find((model) => model.id === UNPRICED_MODEL);
-    expect(unpriced).toMatchObject({ spendable: false, price: null });
+    expect(body.data.find((model) => model.id === VISION_MODEL)).toMatchObject({ spendable: true });
     const image = body.data.find((model) => model.id === IMAGE_MODEL);
     expect(image?.spendable).toBe(false);
     expect(body.data.find((model) => model.id === MODEL)?.spendable).toBe(true);
   });
 
   it("publishes an operator override as the price that will be charged", async () => {
-    // Publishing the catalog's null while metering against an override would make the published price a lie
-    // in the direction of a surprise bill.
-    const h = await harness({ plan: testPlan({ allowed_tiers: "standard,premium" }) });
+    const h = await harness({ plan: testPlan({ allowed_tiers: "standard" }) });
     await h.store.putModelPrice({
-      model_id: UNPRICED_MODEL,
+      model_id: MODEL,
       input_micro_usd_per_mtok: 3_000_000,
       output_micro_usd_per_mtok: 15_000_000,
       priced_at: "2026-08-04",
@@ -725,11 +742,12 @@ describe("GET /v1/models", () => {
     });
     const response = await handleRequest(h.ctx, get("/v1/models", h.key));
     const body = (await response.json()) as {
-      data: { id: string; spendable: boolean; price: { source: string } | null }[];
+      data: { id: string; spendable: boolean; price: { source: string; input_micro_usd_per_mtok: number } | null }[];
     };
-    const overridden = body.data.find((model) => model.id === UNPRICED_MODEL);
+    const overridden = body.data.find((model) => model.id === MODEL);
     expect(overridden?.spendable).toBe(true);
     expect(overridden?.price?.source).toBe("operator");
+    expect(overridden?.price?.input_micro_usd_per_mtok).toBe(3_000_000);
   });
 });
 
