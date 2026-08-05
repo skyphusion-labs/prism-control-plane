@@ -25,8 +25,10 @@ DO; meters audio minutes, no transcript stored). Browser WS uses the ticket in
 binding through the gateway. **Catalog rate refresh:** `POST /admin/catalog/refresh` pulls chat
 token rates from AI Gateway `compat/models` into `model_prices` (dry-run default; does not rewrite
 `catalog.ts`). **Reconcile cron:** hourly `scheduled()` dry-run by default; set
-`RECONCILE_CRON_LIVE=true` only after dry reports look right. **Not built:** receipt enrollment,
-commercial plan numbers. Aviation-grade `main`.
+`RECONCILE_CRON_LIVE=true` only after dry reports look right. **Deferred (Conrad 2026-08-05):**
+receipt/store enrollment, commercial plan numbers, bulk UB non-chat unit pricing -- park until
+further development is done; do not build them unprompted. **Settled:** host stays
+`play-proxy.skyphusion.org` (not collapsed onto play). Aviation-grade `main`.
 
 **The spend path addresses the AI Gateway host**
 ([#15](https://github.com/skyphusion-labs/prism-control-plane/issues/15)). `src/upstream.ts` POSTs to
