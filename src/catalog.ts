@@ -341,11 +341,12 @@ export const CATALOG: readonly CatalogEntry[] = [
     publishedRates: [],
   },
   {
-    // Multi-agent is refused on chat/completions ("Multi Agent requests are not allowed").
-    // Binding path still uses the public xai/* id.
+    // Multi-agent refuses chat/completions. xAI docs: use Responses API
+    // (https://docs.x.ai/developers/model-capabilities/text/multi-agent). Gateway path is
+    // /grok/v1/responses with unprefixed model id.
     id: "xai/grok-4.20-multi-agent-0309",
     upstream: "grok/grok-4.20-multi-agent-0309",
-    binding: true,
+    api: "responses",
     displayName: "Grok 4.20 Multi-Agent (xAI)",
     modality: "chat",
     billing: "unified-billing",
