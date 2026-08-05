@@ -17,8 +17,8 @@
 // Workers AI (`@cf/`) rates come from Cloudflare's models API (2026-08-04). Unified Billing rates were
 // filled from CF `compat/models` + live billing verification (issue #10, 2026-08-05). Rates move
 // intraday; operator overrides + POST /admin/reconcile true them up. All 45 chat models are priced.
-// LLaVA is image-to-text (native wire, not chat/completions); measured 2026-08-05 gateway cost and
-// neurons are $0 / 0 on successful runs, so its catalog rate is zero (still spendable).
+// LLaVA 1.5 (`@cf/llava-hf/llava-1.5-7b-hf`) retired 2026-08-05: hanging upstream; vision chat
+// covered by modern multimodal models.
 //
 // `publishedRates` carries the non-token rates CF publishes (per tile, per step, per audio minute).
 // Floats in USD, disclosure-shaped. The meter uses integer `unitPrice` (micro-USD per request /
@@ -942,27 +942,6 @@ export const CATALOG: readonly CatalogEntry[] = [
       outputMicroUsdPerMTok: 112_000,
       cachedInputMicroUsdPerMTok: null,
       pricedAt: PRICED_AT,
-    },
-    unitPrice: null,
-    publishedRates: [],
-  },
-  {
-    id: "@cf/llava-hf/llava-1.5-7b-hf",
-    upstream: "@cf/llava-hf/llava-1.5-7b-hf",
-    displayName: "LLaVA 1.5 7B (image Q&A, single-shot)",
-    modality: "chat",
-    billing: "workers-ai",
-    tier: "standard",
-    streaming: false,
-    maxOutputTokens: null,
-    // Measured 2026-08-05 via REST ai/run + prism-proxy logs: five successful probes
-    // (cost=0, tokens_in=0, tokens_out=0, neurons=0). CF publishes no unit price (beta).
-    // Zero rate is the honest baseline; the plane still records a metered row.
-    price: {
-      inputMicroUsdPerMTok: 0,
-      outputMicroUsdPerMTok: 0,
-      cachedInputMicroUsdPerMTok: null,
-      pricedAt: PRICED_AT_UB,
     },
     unitPrice: null,
     publishedRates: [],

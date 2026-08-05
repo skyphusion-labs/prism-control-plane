@@ -43,8 +43,8 @@ export interface ValidChatRequest {
   topP?: number;
   stream: boolean;
   /**
-   * Optional data-URL image for single-shot vision models (`data:image/...;base64,...`).
-   * Required by `@cf/llava-hf/llava-1.5-7b-hf`; refused on other models.
+   * Optional data-URL image (legacy LLaVA field). Retired with LLaVA 2026-08-05;
+   * chat route refuses any image payload.
    */
   imageDataUrl?: string;
   /** Raw image bytes decoded from imageDataUrl, when present. */
@@ -219,5 +219,3 @@ export function parseImageDataUrl(
   return { ok: true, bytes, mime };
 }
 
-/** Catalog id of the single-shot vision model that needs the native image wire format. */
-export const LLAVA_MODEL_ID = "@cf/llava-hf/llava-1.5-7b-hf";

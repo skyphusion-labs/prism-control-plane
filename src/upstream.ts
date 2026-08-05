@@ -79,7 +79,6 @@
 // https://developers.cloudflare.com/ai-gateway/observability/logging/
 
 import { findModel, type Billing } from "./catalog";
-import { LLAVA_MODEL_ID } from "./chat-request";
 import { gatewayConfig, upstreamTimeoutMs, type Env } from "./env";
 import type { InferenceRequest, InferenceResult, InferenceRunner } from "./inference";
 
@@ -411,49 +410,6 @@ export function gatewayRunner(env: Env): InferenceRunner | null {
   });
 }
 
-/**
- * LLaVA native image-to-text body.
- *
- * Measured 2026-08-05: chat/completions rejects this model (requires `image`); the native Workers AI
- * shape is `{ image: number[] (raw bytes), prompt, max_tokens }` and returns `{ description }`.
- */
-export function llavaBody(request: InferenceRequest): Record<string, unknown> {
-  if (!request.imageBytes || request.imageBytes.byteLength === 0) {
-    throw new Error("LLaVA requires imageBytes");
-  }
-  const prompt =
-    [...request.messages].reverse().find((m) => m.role === "user")?.content?.trim() ||
-    "Describe this image.";
-  return {
-    image: Array.from(request.imageBytes),
-    prompt,
-    max_tokens: request.maxTokens,
-  };
-}
-
-/**
- * URL for the LLaVA native path.
- *
- * REST `ai/run` with `cf-aig-gateway-id` (not the gateway host). Measured 2026-08-05: the gateway host
- * `workers-ai/@cf/llava...` answers 401 with our token; REST with Authorization + gateway id answers 200
- * and still writes a row on `prism-proxy` (cost/tokens/neurons all 0 for this beta model).
- */
-export function llavaUrl(deps: GatewayRunnerDeps): string {
-  return `${CF_API_HOST}/client/v4/accounts/${deps.accountId}/ai/run/${LLAVA_MODEL_ID}`;
-}
-
-export function llavaHeaders(request: InferenceRequest, deps: GatewayRunnerDeps): Record<string, string> {
-  return {
-    authorization: `Bearer ${request.auth.value}`,
-    "cf-aig-gateway-id": deps.gatewayId,
-    "cf-aig-collect-log-payload": "false",
-    "cf-aig-collect-log": deps.collectLog ? "true" : "false",
-    "cf-aig-metadata": JSON.stringify(request.metadata),
-    "content-type": "application/json",
-    accept: "application/json",
-  };
-}
-
 /** The runner over explicit deps, so tests can drive it with a fake fetch. */
 export function runnerFor(deps: GatewayRunnerDeps): InferenceRunner {
   const doFetch = deps.fetchImpl ?? fetch;
@@ -464,12 +420,7 @@ export function runnerFor(deps: GatewayRunnerDeps): InferenceRunner {
     headers: Record<string, string>,
     body: Record<string, unknown>,
   ): Promise<InferenceResult> {
-    // LLaVA native REST is routinely slower than chat; use the env ceiling (120s) rather than the
-    // default 60s so vision does not 504 on a healthy cold path (measured 2026-08-05).
-    const timeoutMs =
-      request.upstreamModel === LLAVA_MODEL_ID
-        ? Math.max(deps.timeoutMs, 120_000)
-        : deps.timeoutMs;
+    const timeoutMs = deps.timeoutMs;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     let res: Response;
@@ -503,7 +454,7 @@ export function runnerFor(deps: GatewayRunnerDeps): InferenceRunner {
       return { outcome: "upstream_error", status: res.status, detail };
     }
 
-    if (deps.collectLog && !gatewayLogId && request.upstreamModel !== LLAVA_MODEL_ID) {
+    if (deps.collectLog && !gatewayLogId) {
       console.error("ai gateway served a request with no cf-aig-log-id", {
         gatewayId: deps.gatewayId,
         url,
@@ -524,12 +475,7 @@ export function runnerFor(deps: GatewayRunnerDeps): InferenceRunner {
 
     try {
       const parsed = await res.json();
-      const isLlava = request.upstreamModel === LLAVA_MODEL_ID;
-      const unwrapped =
-        isLlava && parsed && typeof parsed === "object" && "result" in (parsed as object)
-          ? (parsed as { result: unknown }).result
-          : parsed;
-      return { outcome: "ok", body: unwrapped, gatewayLogId };
+      return { outcome: "ok", body: parsed, gatewayLogId };
     } catch (err) {
       return {
         outcome: "upstream_error",
@@ -548,34 +494,12 @@ export function runnerFor(deps: GatewayRunnerDeps): InferenceRunner {
         return runViaBinding(deps, request);
       }
 
-      const isLlava = request.upstreamModel === LLAVA_MODEL_ID;
-      if (isLlava && !request.imageBytes?.byteLength) {
-        return {
-          outcome: "upstream_error",
-          status: null,
-          detail: "LLaVA requires an image; the request reached the runner without imageBytes",
-        };
-      }
-      if (isLlava && request.stream) {
-        return {
-          outcome: "upstream_error",
-          status: null,
-          detail: "LLaVA does not stream",
-        };
-      }
-
       const useResponses = request.api === "responses";
-      const url = isLlava
-        ? llavaUrl(deps)
-        : useResponses
-          ? responsesUrl(deps, request)
-          : upstreamUrl(deps, request.billing);
-      const headers = isLlava ? llavaHeaders(request, deps) : upstreamHeaders(request, deps);
-      const body = isLlava
-        ? llavaBody(request)
-        : useResponses
-          ? responsesBody(request)
-          : upstreamBody(request);
+      const url = useResponses
+        ? responsesUrl(deps, request)
+        : upstreamUrl(deps, request.billing);
+      const headers = upstreamHeaders(request, deps);
+      const body = useResponses ? responsesBody(request) : upstreamBody(request);
 
       let result = await fetchOnce(request, url, headers, body);
 
