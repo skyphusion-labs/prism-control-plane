@@ -347,16 +347,69 @@ export function extractAudioBase64(body: unknown): string | null {
 export function extractTranscript(body: unknown): string | null {
   if (typeof body !== "object" || body === null) return null;
   const r = body as Record<string, unknown>;
-  if (typeof r.text === "string") return r.text;
-  if (typeof r.transcript === "string") return r.transcript;
+  if (typeof r.text === "string" && r.text.length > 0) return r.text;
+  if (typeof r.transcript === "string" && r.transcript.length > 0) return r.transcript;
   if (typeof r.result === "object" && r.result !== null) {
     return extractTranscript(r.result);
   }
-  // whisper sometimes returns { text, word_count, ... } at top after unwrap
-  if (typeof r.vtt === "string" && typeof r.text !== "string") {
-    // some shapes
+  return typeof r.response === "string" && r.response.length > 0 ? r.response : null;
+}
+
+/**
+ * Reject provider envelopes that look like failures before we meter.
+ * Unified Billing long-run shapes use `state: "Completed" | "Failed" | ...`.
+ */
+export function providerStateFailed(body: unknown): string | null {
+  if (typeof body !== "object" || body === null) return null;
+  const r = body as Record<string, unknown>;
+  if (typeof r.error === "string" && r.error.length > 0) return r.error.slice(0, 200);
+  if (typeof r.state === "string" && r.state !== "Completed" && r.state !== "succeeded") {
+    return `provider state "${r.state}"`;
   }
-  return typeof r.response === "string" ? r.response : null;
+  if (typeof r.success === "boolean" && r.success === false) {
+    return "provider success=false";
+  }
+  return null;
+}
+
+/**
+ * Video URL or inline payload. Mirrors prism LongRunWorkflow:
+ *   { state, result: { video: "https://..." } }
+ */
+export function extractVideoAsset(body: unknown): string | null {
+  const fail = providerStateFailed(body);
+  if (fail) return null;
+  if (typeof body !== "object" || body === null) return null;
+  const r = body as Record<string, unknown>;
+  if (typeof r.video === "string" && r.video.length > 0) return r.video;
+  const result = r.result;
+  if (typeof result === "object" && result !== null) {
+    const inner = result as Record<string, unknown>;
+    if (typeof inner.video === "string" && inner.video.length > 0) return inner.video;
+    if (typeof inner.url === "string" && inner.url.length > 0) return inner.url;
+  }
+  if (typeof r.url === "string" && r.url.length > 0) return r.url;
+  return null;
+}
+
+/**
+ * Music/audio URL or base64. Mirrors prism:
+ *   { state, result: { audio } } or flat { audio }
+ */
+export function extractMusicAsset(body: unknown): string | null {
+  const fail = providerStateFailed(body);
+  if (fail) return null;
+  if (typeof body !== "object" || body === null) return null;
+  const r = body as Record<string, unknown>;
+  if (typeof r.audio === "string" && r.audio.length > 0) return r.audio;
+  const result = r.result;
+  if (typeof result === "object" && result !== null) {
+    const inner = result as Record<string, unknown>;
+    if (typeof inner.audio === "string" && inner.audio.length > 0) return inner.audio;
+    if (typeof inner.url === "string" && inner.url.length > 0) return inner.url;
+  }
+  if (typeof r.url === "string" && r.url.length > 0) return r.url;
+  return null;
 }
 
 // Silence unused import warning for GATEWAY_HOST if not used

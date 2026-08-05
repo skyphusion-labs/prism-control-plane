@@ -22,7 +22,10 @@ import {
   buildVideoParams,
   extractAudioBase64,
   extractImageBase64,
+  extractMusicAsset,
   extractTranscript,
+  extractVideoAsset,
+  providerStateFailed,
 } from "../nonchat-upstream";
 import { periodBounds } from "../period";
 import { entitlesTier, planFromRow, type Plan } from "../plans";
@@ -461,6 +464,11 @@ export async function handleImageGenerations(ctx: Ctx, request: Request): Promis
   const params = buildImageParams(gate.model.id, prompt);
   const up = await runUpstream(ctx, gate, params);
   if (!up.ok) return up.response;
+  const fail = providerStateFailed(up.body);
+  if (fail) {
+    await recordUnmetered(ctx, gate, "provider_failed", 200);
+    return errorResponse(ctx.requestId, "upstream_error", fail);
+  }
   const b64 = extractImageBase64(up.body);
   if (!b64) {
     await recordUnmetered(ctx, gate, "no_image_payload", 200);
@@ -495,6 +503,11 @@ export async function handleAudioSpeech(ctx: Ctx, request: Request): Promise<Res
   const params = buildTtsParams(gate.model.id, input);
   const up = await runUpstream(ctx, gate, params);
   if (!up.ok) return up.response;
+  const fail = providerStateFailed(up.body);
+  if (fail) {
+    await recordUnmetered(ctx, gate, "provider_failed", 200);
+    return errorResponse(ctx.requestId, "upstream_error", fail);
+  }
   const audio = extractAudioBase64(up.body);
   if (!audio) {
     await recordUnmetered(ctx, gate, "no_audio_payload", 200);
@@ -532,6 +545,11 @@ export async function handleAudioTranscriptions(ctx: Ctx, request: Request): Pro
   const params = buildSttParams(audio);
   const up = await runUpstream(ctx, gate, params);
   if (!up.ok) return up.response;
+  const fail = providerStateFailed(up.body);
+  if (fail) {
+    await recordUnmetered(ctx, gate, "provider_failed", 200);
+    return errorResponse(ctx.requestId, "upstream_error", fail);
+  }
   const text = extractTranscript(up.body);
   if (text === null) {
     await recordUnmetered(ctx, gate, "no_transcript", 200);
@@ -564,11 +582,25 @@ export async function handleVideoGenerations(ctx: Ctx, request: Request): Promis
   const params = buildVideoParams(gate.model.id, prompt, imageUrl);
   const up = await runUpstream(ctx, gate, params);
   if (!up.ok) return up.response;
+  const fail = providerStateFailed(up.body);
+  if (fail) {
+    await recordUnmetered(ctx, gate, "provider_failed", 200);
+    return errorResponse(ctx.requestId, "upstream_error", fail);
+  }
+  const asset = extractVideoAsset(up.body);
+  if (!asset) {
+    await recordUnmetered(ctx, gate, "no_video_payload", 200);
+    return errorResponse(
+      ctx.requestId,
+      "upstream_error",
+      "Video generation returned no video payload.",
+    );
+  }
   return meterAndRespond(
     ctx,
     gate,
     1,
-    { model: gate.model.id, result: up.body },
+    { model: gate.model.id, video: asset, result: up.body },
     200,
     up.gatewayLogId,
   );
@@ -586,11 +618,25 @@ export async function handleMusicGenerations(ctx: Ctx, request: Request): Promis
   const params = buildMusicParams(prompt, lyrics);
   const up = await runUpstream(ctx, gate, params);
   if (!up.ok) return up.response;
+  const fail = providerStateFailed(up.body);
+  if (fail) {
+    await recordUnmetered(ctx, gate, "provider_failed", 200);
+    return errorResponse(ctx.requestId, "upstream_error", fail);
+  }
+  const asset = extractMusicAsset(up.body);
+  if (!asset) {
+    await recordUnmetered(ctx, gate, "no_music_payload", 200);
+    return errorResponse(
+      ctx.requestId,
+      "upstream_error",
+      "Music generation returned no audio payload.",
+    );
+  }
   return meterAndRespond(
     ctx,
     gate,
     1,
-    { model: gate.model.id, result: up.body },
+    { model: gate.model.id, audio: asset, result: up.body },
     200,
     up.gatewayLogId,
   );
