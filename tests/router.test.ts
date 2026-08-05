@@ -18,10 +18,6 @@ import { FakeStore, testPlan } from "./fake-store";
 
 const NOW = new Date("2026-08-04T12:00:00.000Z");
 const MODEL = "@cf/meta/llama-3.2-3b-instruct";
-/** A catalog model Cloudflare publishes no per-token rate for. Unpriced until an operator says otherwise. */
-// Every chat model is priced as of v0.2.x; LLaVA has a measured $0 baseline.
-// Operator override tests still need a catalog id — use LLaVA and raise its rate.
-const VISION_MODEL = "@cf/llava-hf/llava-1.5-7b-hf";
 /** A catalog model that is not chat, so it has no door here. */
 const IMAGE_MODEL = "@cf/black-forest-labs/flux-1-schnell";
 
@@ -257,7 +253,7 @@ describe("health", () => {
   });
 
   it("reports catalog pricing without failing readiness", async () => {
-    // Non-chat modalities remain unpriced by design; chat is fully priced (including LLaVA at $0).
+    // Non-chat modalities remain unpriced by design; chat is fully priced.
     // Readiness stays green either way — per-model gates own spendability.
     const h = await harness();
     const response = await handleRequest(h.ctx, get("/health/deep"));
@@ -658,37 +654,22 @@ describe("POST /v1/chat/completions", () => {
     expect(h.store.accounts.get("acct_1")?.spent_micro_usd).toBe(385_900);
   });
 
-  it("400s LLaVA without an image and serves it with one", async () => {
-    // LLaVA is native image-to-text. Measured CF cost is $0; the catalog rate is zero but spendable.
+  it("400s the retired chat-door image field", async () => {
     const tinyPng =
       "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
-    const h = await harness({
-      plan: testPlan({ allowed_tiers: "standard" }),
-      result: {
-        outcome: "ok",
-        body: { description: "A red pixel." },
-        gatewayLogId: "log_llava",
-      },
-    });
-    const missing = await handleRequest(h.ctx, chat(h.key, { ...ASK, model: VISION_MODEL }));
-    expect(missing.status).toBe(400);
-    expect(await missing.json()).toMatchObject({ error: { code: "invalid_request" } });
-
-    const ok = await handleRequest(
+    const h = await harness({ plan: testPlan({ allowed_tiers: "standard" }) });
+    const res = await handleRequest(
       h.ctx,
       chat(h.key, {
-        model: VISION_MODEL,
-        messages: [{ role: "user", content: "What color?" }],
+        model: MODEL,
+        messages: [{ role: "user", content: "hi" }],
         max_tokens: 32,
         image: tinyPng,
       }),
     );
-    expect(ok.status).toBe(200);
-    expect(ok.headers.get("prism-metered")).toBe("true");
-    // Zero catalog rate → zero charge; still a metered row.
-    expect(ok.headers.get("prism-usage-micro-usd")).toBe("0");
-    expect(h.runner?.calls[0]?.imageBytes?.byteLength).toBeGreaterThan(0);
-    expect(h.store.events[0]).toMatchObject({ metered: true, micro_usd: 0, model_id: VISION_MODEL });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: { code: "invalid_request" } });
+    expect(h.runner?.calls).toHaveLength(0);
   });
 
   it("applies an operator override rate end to end", async () => {
@@ -726,7 +707,7 @@ describe("GET /v1/models", () => {
     const body = (await response.json()) as {
       data: { id: string; spendable: boolean; price: unknown; unit_price: unknown }[];
     };
-    expect(body.data.find((model) => model.id === VISION_MODEL)).toMatchObject({ spendable: true });
+    expect(body.data.find((model) => model.id === "@cf/llava-hf/llava-1.5-7b-hf")).toBeUndefined();
     // FLUX-1 schnell has a derived unit price from published rates.
     const flux = body.data.find((model) => model.id === IMAGE_MODEL);
     expect(flux?.spendable).toBe(true);

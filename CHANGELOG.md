@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Removed
+
+- **LLaVA 1.5** (`@cf/llava-hf/llava-1.5-7b-hf`): retired. Upstream hangs; vision covered by modern multimodal chat. Chat-door `image` field refused.
+
 ### Fixed
 
 - **LLaVA:** use 120s upstream timeout (default 60s was cold-path 504).

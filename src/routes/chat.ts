@@ -21,9 +21,9 @@
 
 import { errorResponse, jsonResponse } from "../http";
 import { findModel } from "../catalog";
-import { LLAVA_MODEL_ID, parseChatRequest } from "../chat-request";
+import { parseChatRequest } from "../chat-request";
 import { extractFinishReason, extractText } from "../inference";
-import { meterResponse, meterUsageObject, priceUsage, resolvePrice } from "../meter";
+import { meterResponse, meterUsageObject, resolvePrice } from "../meter";
 import { periodBounds } from "../period";
 import { effectiveMaxTokens, entitlesTier, planFromRow } from "../plans";
 import { allocateCharge, decideBalance, remainingAllowanceMicroUsd, remainingMicroUsd } from "../balance";
@@ -124,21 +124,13 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
     );
   }
 
-  // LLaVA is single-shot image-to-text. It needs a data-URL image and rejects stream (already gated).
-  // Other models refuse an image field so a client never thinks multimodal was accepted.
-  if (model.id === LLAVA_MODEL_ID) {
-    if (!req.imageBytes?.byteLength) {
-      return errorResponse(
-        ctx.requestId,
-        "invalid_request",
-        'Model "@cf/llava-hf/llava-1.5-7b-hf" requires an "image" data URL (data:image/...;base64,...).',
-      );
-    }
-  } else if (req.imageBytes?.byteLength) {
+  // LLaVA (and the chat-door `image` data-URL field) retired 2026-08-05. Vision goes through
+  // multimodal chat models on the normal messages path, not a side image field.
+  if (req.imageBytes?.byteLength) {
     return errorResponse(
       ctx.requestId,
       "invalid_request",
-      `Model "${model.id}" does not accept an image field. Only ${LLAVA_MODEL_ID} does.`,
+      `Model "${model.id}" does not accept an image field. LLaVA has been removed; use a vision-capable chat model.`,
     );
   }
 
@@ -467,13 +459,7 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
   }
 
   // 12. Meter, then record, THEN answer.
-  // LLaVA returns `{ description }` with no token usage (measured 2026-08-05: CF cost/tokens/neurons
-  // all zero). Synthesize token counts from prompt + description length so the row is metered at the
-  // catalog rate (currently $0) rather than unmetered.
-  const metered =
-    model.id === LLAVA_MODEL_ID
-      ? meterLlava(result.body, req.messages, price)
-      : meterResponse(result.body, price);
+  const metered = meterResponse(result.body, price);
   const event = await buildEvent(
     metered.outcome === "metered"
       ? {
@@ -550,26 +536,6 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
     },
     { headers },
   );
-}
-
-/**
- * Meter a LLaVA image-to-text response.
- *
- * CF does not return token counts for this beta model. Use a cheap character estimate so the ledger
- * still gets a metered row at the catalog rate (measured baseline: $0.00).
- */
-function meterLlava(
-  body: unknown,
-  messages: { role: string; content: string }[],
-  price: NonNullable<ReturnType<typeof resolvePrice>>,
-): ReturnType<typeof meterResponse> {
-  const text = extractText(body) ?? "";
-  const prompt =
-    [...messages].reverse().find((m) => m.role === "user")?.content ?? "";
-  // ~4 chars/token is a coarse estimate; with zero rates the dollars stay zero either way.
-  const inputTokens = Math.max(1, Math.ceil(prompt.length / 4));
-  const outputTokens = Math.max(1, Math.ceil(text.length / 4));
-  return priceUsage({ inputTokens, outputTokens }, price);
 }
 
 /**

@@ -227,9 +227,8 @@ plane does not charge against. Never use it to compute a cost.
 Request: an OpenAI `chat/completions` **subset**. Unknown fields are rejected rather than ignored,
 so a client cannot believe it sent a parameter that was silently dropped.
 
-Optional request field **`image`** (data URL only: `data:image/<type>;base64,...`): required for
-`@cf/llava-hf/llava-1.5-7b-hf` (single-shot image-to-text). Refused on every other model. Cap 4 MiB
-decoded. Measured Cloudflare cost for LLaVA is **$0.00** (beta; no published unit rate).
+Optional request field **`image`** is **retired** (was LLaVA-only). Any `image` payload is refused
+with `invalid_request`. Use a vision-capable chat model for image understanding.
 
 ```json
 {
