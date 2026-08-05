@@ -1658,20 +1658,22 @@ export function spendable(
 /**
  * Client picker hints (not entitlement).
  *
- * - `text-to-image` / pure t2i: works from prompt alone
- * - `image-input`: accepts optional (or required) reference image for i2i / edit
- * - `image-input-required`: must pass image (none today on image modality; Hailuo is video)
+ * Image:
+ * - `text-to-image`: works from prompt alone (pure t2i or dual)
+ * - `image-input`: accepts a reference image for i2i / edit / multi-ref
+ *   A large share of the catalog is dual-mode (t2i + refs). Flux 2 multi-ref,
+ *   nano-banana, gpt-image, and Grok Imagine Image are the main i2i paths;
+ *   pure t2i (Flux-1 schnell, SDXL, Seedream, Recraft, Imagen, Leonardo) omit this.
+ * - `image-input-required`: must pass image (none on image modality today)
+ *
+ * Video:
+ * - `text-to-video`, `image-input`, `image-input-required` (Hailuo is i2v-only)
  */
 export function capabilitiesFor(entry: CatalogEntry): string[] {
   if (entry.modality === "image") {
     const caps = ["text-to-image"];
-    // Models that also accept reference images (i2i / edit). Prompt-only still works for these.
-    if (
-      entry.id.includes("flux-2") ||
-      entry.id.startsWith("xai/grok-imagine-image") ||
-      entry.id.startsWith("google/nano-banana") ||
-      entry.id.startsWith("openai/gpt-image")
-    ) {
+    // Dual / i2i-capable: prompt alone still works, but product value is often the ref path.
+    if (imageAcceptsReference(entry.id)) {
       caps.push("image-input");
     }
     return caps;
@@ -1695,6 +1697,19 @@ export function capabilitiesFor(entry: CatalogEntry): string[] {
     return caps;
   }
   return [];
+}
+
+/** True when the CF / UB schema accepts a reference image for i2i / edit. */
+export function imageAcceptsReference(modelId: string): boolean {
+  // Flux 2 family: multi-reference (input_image_0..3). Label says multi-ref on -dev.
+  if (modelId.includes("flux-2")) return true;
+  // Google nano-banana*: image_input[] for identity / edit (heavily used with refs).
+  if (modelId.startsWith("google/nano-banana")) return true;
+  // OpenAI gpt-image*: images[] for edit alongside prompt generation.
+  if (modelId.startsWith("openai/gpt-image")) return true;
+  // xAI Grok Imagine Image: optional image object for edit / i2i.
+  if (modelId.startsWith("xai/grok-imagine-image")) return true;
+  return false;
 }
 
 /**

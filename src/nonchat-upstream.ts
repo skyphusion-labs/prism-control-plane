@@ -233,6 +233,16 @@ function clipPrompt(prompt: string): string {
 }
 
 /**
+ * Flux 2 input_image_* fields want raw base64 (or binary via multipart).
+ * Accept data: URLs from clients and strip the prefix; leave https URLs as-is
+ * (some CF paths reject remote fetch -- client should prefer data: for Flux).
+ */
+function stripDataUrlToBase64(image: string): string {
+  const m = /^data:[^;]+;base64,(.+)$/i.exec(image);
+  return m ? m[1] : image;
+}
+
+/**
  * Build image-gen params (Workers AI + proxied providers). Primitives only.
  *
  * `imageUrl` is an optional reference (https or data:) for i2i / edit paths.
@@ -252,25 +262,23 @@ export function buildImageParams(
   }
 
   if (modelId.startsWith("@cf/black-forest-labs/flux-1-schnell")) {
-    const body: Record<string, unknown> = { prompt, width: 512, height: 512, steps: 4 };
-    if (image) body.image = image;
-    return body;
+    // Pure t2i on Workers AI; no image-input schema. Ignore ref if client sent one.
+    return { prompt, width: 512, height: 512, steps: 4 };
   }
   if (modelId.startsWith("@cf/black-forest-labs/flux-2")) {
-    // Multi-reference family; JSON path is best-effort (some variants prefer multipart).
+    // Multi-reference family: CF schema is input_image_0..3 (binary / base64).
+    // Full multi-ref wants multipart (prism playground path); single ref via JSON is best-effort.
     const body: Record<string, unknown> = { prompt, width: 1024, height: 1024 };
-    if (image) body.image = image;
+    if (image) body.input_image_0 = stripDataUrlToBase64(image);
     return body;
   }
   if (modelId === "@cf/stabilityai/stable-diffusion-xl-base-1.0") {
-    const body: Record<string, unknown> = { prompt, width: 1024, height: 1024, num_steps: 20 };
-    if (image) body.image = image;
-    return body;
+    // Pure t2i; no image-input on this binding.
+    return { prompt, width: 1024, height: 1024, num_steps: 20 };
   }
   if (modelId.startsWith("@cf/")) {
-    const body: Record<string, unknown> = { prompt, width: 1024, height: 1024, steps: 25 };
-    if (image) body.image = image;
-    return body;
+    // Leonardo / Dreamshaper / etc.: pure t2i on Workers AI.
+    return { prompt, width: 1024, height: 1024, steps: 25 };
   }
   // Unified Billing providers (mirror prism proxied-image-params + CF image_input shapes)
   if (modelId.startsWith("google/")) {
