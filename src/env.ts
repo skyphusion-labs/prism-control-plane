@@ -51,58 +51,37 @@ export interface Env {
   AI_GATEWAY_COLLECT_LOG?: string;
 
   /**
-   * Which credential reaches the model: "shared" (default) or "per-user".
+   * IGNORED. Product is shared-only.
    *
-   * SHARED IS THE DEFAULT because of a hard Cloudflare ceiling: an account may hold 500 API tokens, total,
-   * across every service on it. One token per Prism user therefore caps the product in the low hundreds and
-   * competes with vivijure's per-tenant provisioning for the same slots. Cloudflare's own documented way to
-   * attribute spend per user is custom metadata, which this plane sends in both modes.
-   * https://developers.cloudflare.com/fundamentals/api/reference/limits/
-   *
-   * "per-user" remains supported and bounded (see USER_TOKEN_BUDGET) because it buys Cloudflare-layer
-   * per-user revocation, which is worth having for a deployment small enough to afford it.
+   * Cloudflare caps API tokens at **500 per account, total**
+   * (https://developers.cloudflare.com/fundamentals/api/reference/limits/). One token per Prism account
+   * would cap the product in the low hundreds and starve vivijure's per-tenant minting from the same
+   * pool. This plane therefore uses **one** account-scoped `CF_AIG_TOKEN` for every request.
+   * Per-user attribution is `cf-aig-metadata` plus the D1 ledger, never a second Cloudflare token.
+   * A leftover `per-user` value is refused at wiring time rather than partially honored.
    */
   UPSTREAM_CREDENTIAL_MODE?: string;
 
   /**
-   * SHARED MODE credential: one account-scoped token with AI Gateway Run + Workers AI Read.
+   * The ONE account-scoped credential that reaches models for every account.
    *
-   * Required when UPSTREAM_CREDENTIAL_MODE is shared or unset; without it the inference route answers 503.
-   * It is never sent to a client and never used to manage tokens.
+   * AI Gateway Run + Workers AI Read + AI Gateway Read (read is for reconciliation). Required; without
+   * it the inference route answers 503. Never sent to a client. Never used to mint other tokens.
    */
   CF_AIG_TOKEN?: string;
 
   /**
-   * PER-USER MODE: how many of the account's 500 token slots this plane may consume. Required in that mode.
-   *
-   * There is no default, and that is the point. A default would be a guess at how much of a SHARED account
-   * quota one product may take, made without knowing what else lives on the account. The deployer subtracts
-   * the operator tokens and vivijure's tenant tokens themselves and writes down what is left.
+   * RETIRED (per-user minting is not product). Kept on the Env type so an old wrangler still typechecks;
+   * `upstreamCredentialSource` never reads these.
    */
   USER_TOKEN_BUDGET?: string;
-
-  /**
-   * PER-USER MODE: the ACCOUNT-LEVEL Cloudflare token used ONLY to mint and revoke per-user tokens.
-   *
-   * Needs `Account API Tokens Write` (the dashboard calls it "Account Tokens: Edit"). MUST be created in
-   * the dashboard: Cloudflare refuses API-created tokens any token-management rights, so a token minted
-   * through this plane can never replace this one.
-   *
-   * It is never used for inference. src/cf-api.ts is the only file that reads it, and that file has no
-   * code path that can reach a model.
-   */
+  /** @deprecated See USER_TOKEN_BUDGET. */
   PCP_CF_API_TOKEN?: string;
-
-  /**
-   * Base64 32-byte AES key encrypting minted per-user tokens at rest. See src/token-crypto.ts.
-   *
-   * UNSET CLOSES THE INFERENCE DOOR. A plane that cannot encrypt a minted credential must not mint one,
-   * because the alternative is a spendable Cloudflare token sitting in plaintext D1.
-   */
+  /** @deprecated See USER_TOKEN_BUDGET. */
   USER_TOKEN_KEK?: string;
-  /** The second key, present only during a rotation window. Reads try both. */
+  /** @deprecated See USER_TOKEN_BUDGET. */
   USER_TOKEN_KEK_NEXT?: string;
-  /** "primary" (default) or "next": which installed key NEW ciphertext is written under. */
+  /** @deprecated See USER_TOKEN_BUDGET. */
   USER_TOKEN_KEK_ENCRYPT_SLOT?: string;
 
   /** Milliseconds to wait for a model before answering 504. Blank falls back to the default below. */
@@ -137,15 +116,19 @@ export interface GatewayConfig {
 }
 
 /**
- * Which credential mode this deployment runs, resolved once.
+ * Credential mode is always shared.
  *
- * DEFAULTS TO SHARED, including when the value is junk. An unrecognised mode string must not be read as
- * "per-user", because that would let a typo start consuming a finite account-wide token quota.
+ * Per-user minting is not product: Cloudflare's 500-token account ceiling makes one token per account
+ * a hard product cap. If a deploy still has `UPSTREAM_CREDENTIAL_MODE=per-user`, `upstreamCredentialSource`
+ * refuses to wire rather than mint.
  */
-export function credentialMode(env: Env): "shared" | "per-user" {
-  return (env.UPSTREAM_CREDENTIAL_MODE ?? "").trim().toLowerCase() === "per-user"
-    ? "per-user"
-    : "shared";
+export function credentialMode(_env: Env): "shared" {
+  return "shared";
+}
+
+/** True when config still asks for the retired per-user minting path. */
+export function perUserModeRequested(env: Env): boolean {
+  return (env.UPSTREAM_CREDENTIAL_MODE ?? "").trim().toLowerCase() === "per-user";
 }
 
 /**

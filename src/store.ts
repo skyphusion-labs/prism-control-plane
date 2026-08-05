@@ -15,6 +15,11 @@ export interface PlanRow {
   name: string;
   /** The opening prepaid grant, applied once at account creation. Renamed in migration 0002. */
   signup_credit_micro_usd: number;
+  /**
+   * Monthly included spend for the current UTC period, integer micro-USD. Migration 0004 / issue #11.
+   * Zero means pure prepaid. Spent before credit; unused expires at period roll, never becomes credit.
+   */
+  monthly_included_micro_usd: number;
   requests_per_minute: number;
   max_output_tokens: number;
   allowed_tiers: string;
@@ -85,6 +90,8 @@ export interface PeriodRow {
    */
   adjust_spend_micro_usd: number;
   adjust_credit_micro_usd: number;
+  /** Allowance burned this period. Migration 0004. Does not touch accounts.spent_micro_usd. */
+  allowance_spent_micro_usd: number;
 }
 
 /** One ledger write. Counts only; see the migration header for why there is no text field here. */
@@ -98,6 +105,10 @@ export interface UsageEvent {
   input_tokens: number | null;
   output_tokens: number | null;
   micro_usd: number;
+  /** Portion of micro_usd taken from this period's monthly allowance. Migration 0004. */
+  from_allowance_micro_usd: number;
+  /** Portion of micro_usd taken from prepaid credit (advances accounts.spent_micro_usd). */
+  from_credit_micro_usd: number;
   metered: boolean;
   unmetered_reason: string | null;
   upstream_status: number | null;

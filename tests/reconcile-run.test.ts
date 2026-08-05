@@ -51,6 +51,8 @@ async function storeWithLedger(
       input_tokens: 10,
       output_tokens: 20,
       micro_usd: 1000,
+      from_allowance_micro_usd: 0,
+      from_credit_micro_usd: 1000,
       metered: true,
       unmetered_reason: null,
       upstream_status: 200,

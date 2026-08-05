@@ -50,52 +50,22 @@ AI_GATEWAY_ID = "prism-proxy"
 # exists, and keeping it is what lets Cloudflare's own cost figure be reconciled against our ledger.
 # AI_GATEWAY_COLLECT_LOG = "true"
 
-# Which credential reaches the model: "shared" (default) or "per-user".
+# Credential posture is SHARED ONLY. Do not set UPSTREAM_CREDENTIAL_MODE=per-user.
 #
-# SHARED IS THE DEFAULT BECAUSE OF A HARD CLOUDFLARE CEILING: an account may hold 500 API tokens, total,
-# across every service on it (https://developers.cloudflare.com/fundamentals/api/reference/limits/). One
-# token per Prism user therefore caps the product in the low hundreds AND competes with vivijure's
-# per-tenant provisioning for the same slots. Cloudflare's documented way to attribute spend per user is
-# custom metadata, which this plane sends in both modes.
-#
-# "per-user" is supported and bounded, and buys Cloudflare-layer per-user revocation. Choose it only for a
-# deployment small enough to afford the slots, and set USER_TOKEN_BUDGET when you do.
-# UPSTREAM_CREDENTIAL_MODE = "shared"
+# Cloudflare caps API tokens at 500 per account, total
+# (https://developers.cloudflare.com/fundamentals/api/reference/limits/). One token per Prism account
+# would hard-cap the product and starve vivijure's per-tenant minting from the same pool. This plane
+# uses one CF_AIG_TOKEN for every request; per-account attribution is cf-aig-metadata + the D1 ledger.
+# A leftover per-user value closes inference rather than minting.
 
 # Milliseconds to wait for a model before answering 504. Default 60000, ceiling 120000.
 # UPSTREAM_TIMEOUT_MS = "60000"
 
-# PER-USER MODE ONLY. How many of the account's 500 token slots this plane may consume. No default, on
-# purpose: a default would be a guess about how much of a SHARED quota one product may take. Subtract the
-# operator tokens and vivijure's tenant tokens yourself, then write down what is left.
-# USER_TOKEN_BUDGET = "50"
-
 # Worker secrets (npx wrangler secret put <NAME>):
 #
-#   CF_AIG_TOKEN       SHARED MODE (the default). One account-scoped token with AI Gateway Run and
-#                      Workers AI Read, and nothing else. Required in shared mode; without it the
-#                      inference route answers 503. Never sent to a client, never used to manage tokens.
+#   CF_AIG_TOKEN       The ONE account-scoped token for all inference and gateway log reads.
+#                      AI Gateway Run + Workers AI Read + AI Gateway Read. Required; without it the
+#                      inference route answers 503. Never sent to a client. Never used to mint tokens.
 #
 #   ADMIN_TOKEN        Operator bearer for /admin/*. UNSET means there is no operator surface at all
 #                      (every /admin route answers 503), by construction rather than by discipline.
-#
-# PER-USER MODE ONLY, all three required together (partial config closes the door rather than falling
-# back to shared -- silently sharing a credential when isolation was asked for is worse than a 503):
-#
-#   PCP_CF_API_TOKEN   The ACCOUNT-LEVEL Cloudflare token used ONLY to mint and revoke per-user tokens.
-#                      Needs "Account API Tokens Write" (the dashboard calls it Account Tokens: Edit)
-#                      plus Workers AI Read and AI Gateway Run/Read so the tokens it mints can carry
-#                      them. MUST be dashboard-created: Cloudflare refuses API-created tokens any
-#                      token-management rights, so a token minted through this plane can never replace
-#                      it. Never used for inference; src/cf-api.ts has no path to a model.
-#
-#   USER_TOKEN_KEK     Base64 32-byte AES key encrypting minted per-user tokens at rest. Generate with:
-#                        openssl rand -base64 32
-#                      UNSET CLOSES THE INFERENCE DOOR. A plane that cannot encrypt a minted credential
-#                      must not mint one; the alternative is a spendable Cloudflare token in plaintext D1.
-#
-#   USER_TOKEN_KEK_NEXT             Optional second key, installed only during a rotation window.
-#                                   Reads try both keys; writes use the slot below. See token-crypto.ts.
-#   USER_TOKEN_KEK_ENCRYPT_SLOT     Optional "primary" (default) or "next": which key NEW ciphertext is
-#                                   written under. Naming "next" without installing it is a hard refusal,
-#                                   not a fallback.

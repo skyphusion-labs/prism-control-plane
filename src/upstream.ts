@@ -120,6 +120,24 @@ export function upstreamUrl(deps: GatewayRunnerDeps, billing: Billing): string {
 }
 
 /**
+ * Which output-token field the upstream body must use.
+ *
+ * Measured 2026-08-05 (issue #10): the OpenAI 5.6 family and o4-mini on Unified Billing reject
+ * `max_tokens` and require `max_completion_tokens`. xAI Grok chat models take the same field (prism's
+ * own provider dispatch has used it since Grok 4). Anthropic and Workers AI still want `max_tokens`.
+ *
+ * Detection is by id PREFIX rather than a per-entry catalog flag so a new openai/* or xai/* model
+ * inherits the right field without a second edit. Wrong field is a 400 from the provider that this
+ * plane would surface as `upstream_error` with no usable completion.
+ */
+export function outputTokenField(upstreamModel: string): "max_tokens" | "max_completion_tokens" {
+  if (upstreamModel.startsWith("openai/") || upstreamModel.startsWith("xai/")) {
+    return "max_completion_tokens";
+  }
+  return "max_tokens";
+}
+
+/**
  * Build the request body.
  *
  * `stream_options: { include_usage: true }` is the load-bearing line for streamed metering. Without it an
@@ -127,10 +145,11 @@ export function upstreamUrl(deps: GatewayRunnerDeps, billing: Billing): string {
  * in the ledger unmetered. Asking for the trailing usage frame is what makes streaming chargeable at all.
  */
 export function upstreamBody(request: InferenceRequest): Record<string, unknown> {
+  const tokenField = outputTokenField(request.upstreamModel);
   return {
     model: request.upstreamModel,
     messages: request.messages,
-    max_tokens: request.maxTokens,
+    [tokenField]: request.maxTokens,
     ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
     ...(request.topP === undefined ? {} : { top_p: request.topP }),
     ...(request.stream ? { stream: true, stream_options: { include_usage: true } } : {}),

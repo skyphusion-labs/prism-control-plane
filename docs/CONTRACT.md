@@ -225,12 +225,15 @@ Metering facts ride in **headers**, not in the body, so the body stays SDK-compa
 | `prism-usage-micro-usd` | What THIS request consumed, integer micro-USD. `0` with `prism-metered: false` means the request was not meterable. |
 | `prism-metered` | `true` / `false`. See "Unmetered requests". |
 | `prism-usage-recorded` | `true` / `false`. Whether the ledger write landed. `false` means this completion was served and NOT charged. Surfaced rather than swallowed so the gap is visible from both ends; a client shows the user nothing for it. |
-| `prism-period` | Reporting period key, `YYYY-MM` in UTC. Groups usage for display; it does **not** reset the balance. |
-| `prism-credit-micro-usd` | Total prepaid credit ever granted to this account. |
-| `prism-spent-micro-usd` | Total ever recorded as spent, INCLUDING this request. |
-| `prism-credit-remaining-micro-usd` | Credit left, clamped at 0. |
+| `prism-period` | UTC period key `YYYY-MM`. Scopes monthly allowance; does **not** reset prepaid credit. |
+| `prism-credit-micro-usd` | Total prepaid credit ever granted to this account (lifetime). |
+| `prism-spent-micro-usd` | Lifetime prepaid spend recorded, INCLUDING this request's credit portion. |
+| `prism-credit-remaining-micro-usd` | Prepaid credit left, clamped at 0. |
+| `prism-monthly-included-micro-usd` | Plan's monthly included grant for this period (0 = pure prepaid). |
+| `prism-allowance-remaining-micro-usd` | Monthly allowance left this period, clamped at 0. |
 
-A client can render a live balance from the last three headers with no extra round-trip.
+A client can render a live dual-pool balance from these headers with no extra round-trip. Spend order
+is **allowance first, then prepaid credit**.
 
 ### Streaming
 
@@ -256,6 +259,10 @@ reason rather than as free.
   "credit_micro_usd": 1000000,
   "spent_micro_usd": 21437,
   "remaining_micro_usd": 978563,
+  "monthly_included_micro_usd": 5000000,
+  "allowance_spent_micro_usd": 120000,
+  "allowance_remaining_micro_usd": 4880000,
+  "spendable_remaining_micro_usd": 5858563,
   "overage": false,
   "period": "2026-08",
   "period_start": "2026-08-01T00:00:00.000Z",
@@ -269,13 +276,14 @@ reason rather than as free.
 }
 ```
 
-The first three fields are the **balance**, and they are lifetime totals rather than per-period: credit
-ever granted, spend ever recorded, and what is left. The `period_*` fields are a reporting rollup for
-display and reset monthly; **the balance does not.** A client that renders the period figures as an
-allowance will be wrong about when service resumes, which is never, until a top-up.
+**Two money pools.** Prepaid credit (`credit_*` / `spent_*` / `remaining_micro_usd`) is **lifetime** and
+never expires. Monthly allowance (`monthly_included_*` / `allowance_*`) is **period-scoped**: spent
+first, unused expires when `period` rolls, and never becomes a credit grant. `spendable_remaining_micro_usd`
+is allowance remaining plus credit remaining (what the pre-flight gate checks). A plan with
+`monthly_included_micro_usd: 0` is pure prepaid.
 
-`overage: false` is published as a fact rather than left to be inferred from a missing field, because
-"what happens when I run out" is the first question a client implementer has. The answer is `402`.
+`overage: false` is published as a fact. The answer to "what happens when I run out" is `402` until the
+next period restores allowance or someone tops up credit.
 
 `period_unmetered_requests` is deliberately visible. It is the count of calls this plane could not
 price. It should be zero; a non-zero value means the client got service that was not charged, and it is
@@ -365,23 +373,20 @@ hammer it.
 
 ## Money semantics, stated honestly
 
-**Prepaid only. There is no overage, no postpaid, and no grace.** An account spends what it has been
-granted and not one request more. This is the entire money model, and its simplicity is the feature:
-there is no state in which this plane is owed money by a user.
+**No overage, no postpaid, no grace.** An account spends what it has been granted and not one request
+more. There is no state in which this plane is owed money by a user.
 
-- The balance is per **account**, in integer **micro-USD** (1 USD = 1,000,000 micro-USD). Integers
-  only; no floats anywhere in the money path.
-- Credit is granted by an operator (and once at signup, per the plan's `signup_credit_micro_usd`). It
-  is **cumulative and never expires**. There is no monthly reset. The `YYYY-MM` period key exists to
-  group usage for reporting, nothing more.
-- The gate is checked **before** the model runs, against spend already recorded, because the cost of
-  the request in flight is not known until it returns. So an account can overshoot its balance by at
-  most **one request**, bounded by the plan's `max_output_tokens` against the most expensive entitled
-  model. This is stated rather than hidden: a pre-flight gate on a post-hoc cost cannot be exact, and
-  pretending otherwise would be worse than the bound.
-- **A negative balance is not a debt.** It is the recorded size of that single overshoot. Nobody is
-  invoiced for it; the account simply cannot spend again until credit covers it. `remaining_micro_usd`
-  clamps at 0 so a client never has to interpret a negative number as money owed.
+- Money is per **account**, in integer **micro-USD** (1 USD = 1,000,000 micro-USD). Integers only.
+- **Monthly allowance** (`plans.monthly_included_micro_usd`): included spend for the current UTC month,
+  spent **before** prepaid credit. Unused allowance **expires** at period roll; it does not become
+  credit. Zero means pure prepaid.
+- **Prepaid credit** (`signup_credit_micro_usd` at open, then operator top-ups): cumulative, **never
+  expires**. Spent only after allowance is gone for the period.
+- The gate is checked **before** the model runs against already-recorded spend. An account can
+  overshoot the combined remaining pool by at most **one request**, bounded by `max_output_tokens`
+  against the most expensive entitled model.
+- **A negative credit balance is not a debt.** It is the recorded size of that single overshoot.
+  `remaining_micro_usd` and `allowance_remaining_micro_usd` clamp at 0.
 
 ### Unmetered requests
 
@@ -436,12 +441,10 @@ does not get to invent:
    Each one needs a number before it can be sold.
 4. **Non-chat modalities.** Image, video, speech and music models are listed and refused. Metering them
    needs a per-unit meter (per tile, per step, per audio minute) that does not exist yet.
-5. **Upstream credential mode.** This deployment authenticates to Cloudflare with a single
-   account-scoped credential and attributes per user through gateway metadata plus its own ledger. The
-   alternative, one Cloudflare API token per user, is implemented and bounded but **not** the default,
-   because a Cloudflare account may hold only
-   [500 API tokens in total](https://developers.cloudflare.com/fundamentals/api/reference/limits/)
-   across every service on it. Nothing in this contract changes either way: no client ever sees an
-   upstream credential.
+5. **Upstream credential.** Settled: one shared account-scoped Cloudflare token (`CF_AIG_TOKEN`) for
+   every Prism account. Per-account attribution is gateway metadata plus this plane's ledger. One
+   Cloudflare API token per user is **not product** (account ceiling is
+   [500 tokens total](https://developers.cloudflare.com/fundamentals/api/reference/limits/)). No client
+   ever sees an upstream credential.
 6. **Deployment identity.** Hostname, gateway id, and whether this plane fronts `play.skyphusion.org`
    or a separate host.

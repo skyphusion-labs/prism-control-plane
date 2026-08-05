@@ -12,20 +12,12 @@
 // Neither half is typed from memory. The pricing docs page was cross-read and agrees with the API to
 // the digit; where they differ in rounding the API wins, because that is the record CF bills from.
 //
-// PRICE IS NULLABLE, AND THAT IS THE WHOLE DESIGN.
+// PRICE IS NULLABLE. A model with `price: null` is catalogued but not spendable (`model_unpriced`).
 //
-// Cloudflare publishes per-token rates for Workers AI (`@cf/`) models. It does NOT publish a rate for
-// third-party Unified Billing models: those pass through at the provider's own list price with no CF
-// markup (plus a 5% fee on credit purchases), and there is no CF endpoint or table that states the
-// number. 25 of the 45 chat models are in that position, including every Claude, GPT, Gemini and Grok.
-//
-// A model with `price: null` is CATALOGUED but NOT SPENDABLE. The inference door refuses it with
-// `model_unpriced` until a rate exists. The rate can arrive without a deploy: `model_prices` in D1 is
-// an operator-set override, so pricing a model is an admin call, not a code change (see store.ts and
-// POST /admin/model-prices). That is deliberate -- it keeps "every prism model is available here" true
-// as a catalog fact while keeping the money gate closed on models this plane cannot price. Serving an
-// unpriced model would mean host-billed spend with no meter behind it, which is the one failure this
-// plane exists to prevent.
+// Workers AI (`@cf/`) rates come from Cloudflare's models API (2026-08-04). Unified Billing rates were
+// filled from CF `compat/models` + live billing verification (issue #10, 2026-08-05). Those rates move
+// intraday; operator overrides (`model_prices`) and POST /admin/reconcile true them up. One chat model
+// stays unpriced: `@cf/llava-hf/llava-1.5-7b-hf` is absent from the gateway catalog.
 //
 // `publishedRates` carries the non-token rates CF does publish (per tile, per step, per audio minute).
 // They are DISCLOSURE, not money math: the unit meters for tiles, steps and audio minutes do not exist
@@ -108,6 +100,8 @@ export interface CatalogEntry {
 }
 
 const PRICED_AT = "2026-08-04";
+/** Unified Billing rates from CF compat/models + live billing, issue #10 (2026-08-05). */
+const PRICED_AT_UB = "2026-08-05";
 
 export const CATALOG: readonly CatalogEntry[] = [
 
@@ -121,7 +115,12 @@ export const CATALOG: readonly CatalogEntry[] = [
     tier: "premium",
     streaming: true,
     maxOutputTokens: null,
-    price: null,
+    price: {
+      inputMicroUsdPerMTok: 10000000,
+      outputMicroUsdPerMTok: 50000000,
+      cachedInputMicroUsdPerMTok: 1000000,
+      pricedAt: PRICED_AT_UB,
+    },
     publishedRates: [],
   },
   {
@@ -133,7 +132,12 @@ export const CATALOG: readonly CatalogEntry[] = [
     tier: "premium",
     streaming: true,
     maxOutputTokens: null,
-    price: null,
+    price: {
+      inputMicroUsdPerMTok: 2000000,
+      outputMicroUsdPerMTok: 10000000,
+      cachedInputMicroUsdPerMTok: 200000,
+      pricedAt: PRICED_AT_UB,
+    },
     publishedRates: [],
   },
   {
@@ -145,7 +149,12 @@ export const CATALOG: readonly CatalogEntry[] = [
     tier: "premium",
     streaming: true,
     maxOutputTokens: null,
-    price: null,
+    price: {
+      inputMicroUsdPerMTok: 5000000,
+      outputMicroUsdPerMTok: 25000000,
+      cachedInputMicroUsdPerMTok: 500000,
+      pricedAt: PRICED_AT_UB,
+    },
     publishedRates: [],
   },
   {
@@ -157,7 +166,12 @@ export const CATALOG: readonly CatalogEntry[] = [
     tier: "premium",
     streaming: true,
     maxOutputTokens: null,
-    price: null,
+    price: {
+      inputMicroUsdPerMTok: 5000000,
+      outputMicroUsdPerMTok: 25000000,
+      cachedInputMicroUsdPerMTok: 500000,
+      pricedAt: PRICED_AT_UB,
+    },
     publishedRates: [],
   },
   {
@@ -169,7 +183,12 @@ export const CATALOG: readonly CatalogEntry[] = [
     tier: "premium",
     streaming: true,
     maxOutputTokens: null,
-    price: null,
+    price: {
+      inputMicroUsdPerMTok: 5000000,
+      outputMicroUsdPerMTok: 25000000,
+      cachedInputMicroUsdPerMTok: 500000,
+      pricedAt: PRICED_AT_UB,
+    },
     publishedRates: [],
   },
   {
@@ -181,7 +200,12 @@ export const CATALOG: readonly CatalogEntry[] = [
     tier: "premium",
     streaming: true,
     maxOutputTokens: null,
-    price: null,
+    price: {
+      inputMicroUsdPerMTok: 5000000,
+      outputMicroUsdPerMTok: 25000000,
+      cachedInputMicroUsdPerMTok: 500000,
+      pricedAt: PRICED_AT_UB,
+    },
     publishedRates: [],
   },
   {
@@ -193,7 +217,12 @@ export const CATALOG: readonly CatalogEntry[] = [
     tier: "premium",
     streaming: true,
     maxOutputTokens: null,
-    price: null,
+    price: {
+      inputMicroUsdPerMTok: 3000000,
+      outputMicroUsdPerMTok: 15000000,
+      cachedInputMicroUsdPerMTok: 300000,
+      pricedAt: PRICED_AT_UB,
+    },
     publishedRates: [],
   },
   {
@@ -205,7 +234,12 @@ export const CATALOG: readonly CatalogEntry[] = [
     tier: "premium",
     streaming: true,
     maxOutputTokens: null,
-    price: null,
+    price: {
+      inputMicroUsdPerMTok: 1000000,
+      outputMicroUsdPerMTok: 5000000,
+      cachedInputMicroUsdPerMTok: 100000,
+      pricedAt: PRICED_AT_UB,
+    },
     publishedRates: [],
   },
   {
@@ -217,7 +251,12 @@ export const CATALOG: readonly CatalogEntry[] = [
     tier: "premium",
     streaming: true,
     maxOutputTokens: null,
-    price: null,
+    price: {
+      inputMicroUsdPerMTok: 2000000,
+      outputMicroUsdPerMTok: 6000000,
+      cachedInputMicroUsdPerMTok: 300000,
+      pricedAt: PRICED_AT_UB,
+    },
     publishedRates: [],
   },
   {
@@ -229,7 +268,12 @@ export const CATALOG: readonly CatalogEntry[] = [
     tier: "premium",
     streaming: true,
     maxOutputTokens: null,
-    price: null,
+    price: {
+      inputMicroUsdPerMTok: 1250000,
+      outputMicroUsdPerMTok: 2500000,
+      cachedInputMicroUsdPerMTok: 200000,
+      pricedAt: PRICED_AT_UB,
+    },
     publishedRates: [],
   },
   {
@@ -241,7 +285,12 @@ export const CATALOG: readonly CatalogEntry[] = [
     tier: "premium",
     streaming: true,
     maxOutputTokens: null,
-    price: null,
+    price: {
+      inputMicroUsdPerMTok: 1250000,
+      outputMicroUsdPerMTok: 2500000,
+      cachedInputMicroUsdPerMTok: 200000,
+      pricedAt: PRICED_AT_UB,
+    },
     publishedRates: [],
   },
   {
@@ -253,7 +302,12 @@ export const CATALOG: readonly CatalogEntry[] = [
     tier: "premium",
     streaming: true,
     maxOutputTokens: null,
-    price: null,
+    price: {
+      inputMicroUsdPerMTok: 1250000,
+      outputMicroUsdPerMTok: 2500000,
+      cachedInputMicroUsdPerMTok: 200000,
+      pricedAt: PRICED_AT_UB,
+    },
     publishedRates: [],
   },
   {
@@ -265,7 +319,12 @@ export const CATALOG: readonly CatalogEntry[] = [
     tier: "premium",
     streaming: true,
     maxOutputTokens: null,
-    price: null,
+    price: {
+      inputMicroUsdPerMTok: 3000000,
+      outputMicroUsdPerMTok: 15000000,
+      cachedInputMicroUsdPerMTok: 300000,
+      pricedAt: PRICED_AT_UB,
+    },
     publishedRates: [],
   },
   {
@@ -379,7 +438,12 @@ export const CATALOG: readonly CatalogEntry[] = [
     tier: "premium",
     streaming: true,
     maxOutputTokens: null,
-    price: null,
+    price: {
+      inputMicroUsdPerMTok: 5000000,
+      outputMicroUsdPerMTok: 30000000,
+      cachedInputMicroUsdPerMTok: 500000,
+      pricedAt: PRICED_AT_UB,
+    },
     publishedRates: [],
   },
   {
@@ -391,7 +455,12 @@ export const CATALOG: readonly CatalogEntry[] = [
     tier: "premium",
     streaming: true,
     maxOutputTokens: null,
-    price: null,
+    price: {
+      inputMicroUsdPerMTok: 30000000,
+      outputMicroUsdPerMTok: 180000000,
+      cachedInputMicroUsdPerMTok: null,
+      pricedAt: PRICED_AT_UB,
+    },
     publishedRates: [],
   },
   {
@@ -403,7 +472,12 @@ export const CATALOG: readonly CatalogEntry[] = [
     tier: "premium",
     streaming: true,
     maxOutputTokens: null,
-    price: null,
+    price: {
+      inputMicroUsdPerMTok: 5000000,
+      outputMicroUsdPerMTok: 30000000,
+      cachedInputMicroUsdPerMTok: 500000,
+      pricedAt: PRICED_AT_UB,
+    },
     publishedRates: [],
   },
   {
@@ -415,7 +489,12 @@ export const CATALOG: readonly CatalogEntry[] = [
     tier: "premium",
     streaming: true,
     maxOutputTokens: null,
-    price: null,
+    price: {
+      inputMicroUsdPerMTok: 1000000,
+      outputMicroUsdPerMTok: 6000000,
+      cachedInputMicroUsdPerMTok: 100000,
+      pricedAt: PRICED_AT_UB,
+    },
     publishedRates: [],
   },
   {
@@ -427,7 +506,12 @@ export const CATALOG: readonly CatalogEntry[] = [
     tier: "premium",
     streaming: true,
     maxOutputTokens: null,
-    price: null,
+    price: {
+      inputMicroUsdPerMTok: 100000,
+      outputMicroUsdPerMTok: 600000,
+      cachedInputMicroUsdPerMTok: 10000,
+      pricedAt: PRICED_AT_UB,
+    },
     publishedRates: [],
   },
   {
@@ -439,7 +523,12 @@ export const CATALOG: readonly CatalogEntry[] = [
     tier: "premium",
     streaming: true,
     maxOutputTokens: null,
-    price: null,
+    price: {
+      inputMicroUsdPerMTok: 2500000,
+      outputMicroUsdPerMTok: 15000000,
+      cachedInputMicroUsdPerMTok: 250000,
+      pricedAt: PRICED_AT_UB,
+    },
     publishedRates: [],
   },
   {
@@ -451,7 +540,12 @@ export const CATALOG: readonly CatalogEntry[] = [
     tier: "premium",
     streaming: true,
     maxOutputTokens: null,
-    price: null,
+    price: {
+      inputMicroUsdPerMTok: 750000,
+      outputMicroUsdPerMTok: 4500000,
+      cachedInputMicroUsdPerMTok: 75000,
+      pricedAt: PRICED_AT_UB,
+    },
     publishedRates: [],
   },
   {
@@ -463,7 +557,12 @@ export const CATALOG: readonly CatalogEntry[] = [
     tier: "premium",
     streaming: true,
     maxOutputTokens: null,
-    price: null,
+    price: {
+      inputMicroUsdPerMTok: 1100000,
+      outputMicroUsdPerMTok: 4400000,
+      cachedInputMicroUsdPerMTok: null,
+      pricedAt: PRICED_AT_UB,
+    },
     publishedRates: [],
   },
   {
@@ -679,7 +778,12 @@ export const CATALOG: readonly CatalogEntry[] = [
     tier: "premium",
     streaming: true,
     maxOutputTokens: null,
-    price: null,
+    price: {
+      inputMicroUsdPerMTok: 2000000,
+      outputMicroUsdPerMTok: 12000000,
+      cachedInputMicroUsdPerMTok: 200000,
+      pricedAt: PRICED_AT_UB,
+    },
     publishedRates: [],
   },
   {
@@ -691,7 +795,12 @@ export const CATALOG: readonly CatalogEntry[] = [
     tier: "premium",
     streaming: true,
     maxOutputTokens: null,
-    price: null,
+    price: {
+      inputMicroUsdPerMTok: 1500000,
+      outputMicroUsdPerMTok: 9000000,
+      cachedInputMicroUsdPerMTok: 150000,
+      pricedAt: PRICED_AT_UB,
+    },
     publishedRates: [],
   },
   {
@@ -703,7 +812,12 @@ export const CATALOG: readonly CatalogEntry[] = [
     tier: "premium",
     streaming: true,
     maxOutputTokens: null,
-    price: null,
+    price: {
+      inputMicroUsdPerMTok: 1500000,
+      outputMicroUsdPerMTok: 7500000,
+      cachedInputMicroUsdPerMTok: 150000,
+      pricedAt: PRICED_AT_UB,
+    },
     publishedRates: [],
   },
   {

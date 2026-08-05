@@ -26,7 +26,7 @@ import { extractFinishReason, extractText } from "../inference";
 import { meterResponse, meterUsageObject, resolvePrice } from "../meter";
 import { periodBounds } from "../period";
 import { effectiveMaxTokens, entitlesTier, planFromRow } from "../plans";
-import { decideBalance, remainingMicroUsd } from "../balance";
+import { allocateCharge, decideBalance, remainingAllowanceMicroUsd, remainingMicroUsd } from "../balance";
 import { checkRateLimit, inferenceBucket } from "../rate-limit";
 import { newId } from "../crypto";
 import { readJsonBody } from "../http";
@@ -146,19 +146,29 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
     );
   }
 
-  // 9. The prepaid gate. See balance.ts for why this can be exceeded by exactly one request, and why
-  // `indeterminate` answers 503 rather than 402.
+  // 9. The dual-pool spend gate: monthly allowance first, then prepaid credit. See balance.ts for the
+  // one-request overshoot bound, and why `indeterminate` answers 503 rather than 402.
+  const bounds = periodBounds(ctx.now);
+  const periodBefore = await ctx.store.getPeriod(account.id, bounds.key);
   const balance = decideBalance({
     creditMicroUsd: account.credit_micro_usd,
     spentMicroUsd: account.spent_micro_usd,
+    monthlyIncludedMicroUsd: plan.monthlyIncludedMicroUsd,
+    allowanceSpentMicroUsd: periodBefore?.allowance_spent_micro_usd ?? 0,
   });
   if (balance.outcome === "exhausted") {
     return errorResponse(
       ctx.requestId,
       "quota_exhausted",
-      `This account's prepaid credit is spent (${balance.spentMicroUsd} of ${balance.creditMicroUsd} micro-USD). ` +
-        "There is no overage on this plane: top up to continue.",
-      { credit_micro_usd: balance.creditMicroUsd, spent_micro_usd: balance.spentMicroUsd },
+      `This account has no remaining monthly allowance or prepaid credit ` +
+        `(${balance.spentMicroUsd} of ${balance.creditMicroUsd} micro-USD credit spent; allowance exhausted). ` +
+        "There is no overage on this plane: wait for the next period or top up credit.",
+      {
+        credit_micro_usd: balance.creditMicroUsd,
+        spent_micro_usd: balance.spentMicroUsd,
+        monthly_included_micro_usd: plan.monthlyIncludedMicroUsd,
+        allowance_remaining_micro_usd: 0,
+      },
     );
   }
   if (balance.outcome === "indeterminate") {
@@ -174,14 +184,12 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
     );
   }
 
-  // 10. The credential to reach the model with: the deployment's shared token, or this user's own minted one
-  // in per-user mode. THIS ROUTE DOES NOT KNOW WHICH, and must not: the gates above and the ledger below are
-  // identical either way, which is the property that makes the mode safe to change. The value never leaves
-  // this Worker; see token-minter.ts for why handing it to a device would delete the meter.
+  // 10. The shared account credential. Product is one CF_AIG_TOKEN for every Prism account (500-token
+  // ceiling rules out minting per account). The value never leaves this Worker; handing it to a device
+  // would delete the meter. Attribution is cf-aig-metadata + the ledger, not the credential identity.
   const credential = await ctx.credentials.forAccount(account.id);
   if (credential.outcome === "unavailable") {
-    // The reason is OPERATOR information (a Cloudflare permissions code, a KEK problem, an exhausted token
-    // budget). It goes to the log and not to the phone, which gets a code it can act on.
+    // Operator information only (missing secret, retired mode still set). Not for the phone.
     console.error("no upstream credential for account", {
       requestId: ctx.requestId,
       accountId: account.id,
@@ -194,18 +202,8 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
       "An upstream credential for this request could not be obtained, so it was refused rather than run unmetered.",
     );
   }
-  // Only meaningful in per-user mode; in shared mode there is no per-account row to stamp and the write is a
-  // harmless no-op. Best-effort either way: a bookkeeping stamp must never fail a paid request.
-  if (ctx.credentials.mode === "per-user") {
-    ctx.waitUntil(
-      ctx.store
-        .touchUserToken(account.id, Math.floor(ctx.now.getTime() / 1000))
-        .catch(() => undefined),
-    );
-  }
 
   const maxTokens = effectiveMaxTokens(req.maxTokens, plan.maxOutputTokens, model.maxOutputTokens);
-  const bounds = periodBounds(ctx.now);
   const baseEvent = {
     account_id: account.id,
     client_id: client.id,
@@ -213,6 +211,42 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
     period_key: bounds.key,
     request_id: ctx.requestId,
   };
+
+  /** Build a ledger row, splitting a metered charge across allowance then credit. */
+  async function buildEvent(
+    partial: Omit<
+      UsageEvent,
+      | "account_id"
+      | "client_id"
+      | "model_id"
+      | "period_key"
+      | "request_id"
+      | "from_allowance_micro_usd"
+      | "from_credit_micro_usd"
+    > & { micro_usd: number; metered: boolean },
+  ): Promise<UsageEvent> {
+    if (!partial.metered || partial.micro_usd <= 0) {
+      return {
+        ...baseEvent,
+        ...partial,
+        from_allowance_micro_usd: 0,
+        from_credit_micro_usd: 0,
+      };
+    }
+    // Fresh period read at record time so concurrent requests each see the latest allowance burn.
+    // Overshoot by more than one is still possible under race; same accepted bound as prepaid.
+    const periodNow = await ctx.store.getPeriod(account.id, bounds.key);
+    const split = allocateCharge(partial.micro_usd, {
+      monthlyIncludedMicroUsd: plan.monthlyIncludedMicroUsd,
+      allowanceSpentMicroUsd: periodNow?.allowance_spent_micro_usd ?? 0,
+    });
+    return {
+      ...baseEvent,
+      ...partial,
+      from_allowance_micro_usd: split.fromAllowanceMicroUsd,
+      from_credit_micro_usd: split.fromCreditMicroUsd,
+    };
+  }
 
   // 11. Spend.
   const result = await ctx.runner.run({
@@ -229,9 +263,9 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
     // Attribution for the gateway log. IDS ONLY: an account id, a client id and a Cloudflare token id are
     // opaque handles, not personal data, and nothing here can carry content.
     //
-    // This is also how per-user attribution works at Cloudflare regardless of credential mode -- gateway logs
-    // do not break spend down by which token presented it, and `cf-aig-metadata` is what User Insights reads
-    // to tell one user's spend from another's.
+    // Shared CF_AIG_TOKEN for every account; gateway logs do not break spend down by which token presented
+    // it. `cf-aig-metadata` is what User Insights and the log API use for per-account attribution (and what
+    // reconcile joins on via request_id).
     //
     // EXACTLY FIVE ENTRIES, WHICH IS THE CAP. Cloudflare keeps the first five and silently drops the rest, so
     // a sixth field added here would not fail, it would quietly delete whichever one sorted last. Anything
@@ -251,17 +285,19 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
     // before the abort landed and may still bill us for them. Writing the gap down is the only way it is
     // ever visible; dropping it would make an abandoned request indistinguishable from one that never
     // happened.
-    await recordQuietly(ctx, {
-      ...baseEvent,
-      id: newId("use"),
-      input_tokens: null,
-      output_tokens: null,
-      micro_usd: 0,
-      metered: false,
-      unmetered_reason: `upstream did not answer within ${result.waitedMs}ms; tokens may have been generated and billed to us before the abort landed`,
-      upstream_status: null,
-      gateway_log_id: null,
-    });
+    await recordQuietly(
+      ctx,
+      await buildEvent({
+        id: newId("use"),
+        input_tokens: null,
+        output_tokens: null,
+        micro_usd: 0,
+        metered: false,
+        unmetered_reason: `upstream did not answer within ${result.waitedMs}ms; tokens may have been generated and billed to us before the abort landed`,
+        upstream_status: null,
+        gateway_log_id: null,
+      }),
+    );
     return errorResponse(
       ctx.requestId,
       "upstream_timeout",
@@ -292,17 +328,25 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
     );
   }
 
-  // The money position, on every served response, so a client can render a balance without a second call to
-  // /v1/usage. Named for CREDIT rather than quota throughout: there is no periodic allowance on this plane,
-  // only a prepaid balance, and a header called `quota-remaining` would invite a client to implement a
-  // monthly reset that does not exist.
-  const creditHeaders = (spentAfter: number): Record<string, string> => ({
+  // Money position on every served response so a client can render balance without a second call.
+  // Allowance and credit are separate headers so a monthly reset cannot be confused with a cash top-up.
+  const moneyHeaders = (args: {
+    spentAfter: number;
+    allowanceRemaining: number;
+  }): Record<string, string> => ({
     "prism-period": bounds.key,
     "prism-credit-micro-usd": String(account.credit_micro_usd),
-    "prism-spent-micro-usd": String(spentAfter),
+    "prism-spent-micro-usd": String(args.spentAfter),
     "prism-credit-remaining-micro-usd": String(
-      remainingMicroUsd({ creditMicroUsd: account.credit_micro_usd, spentMicroUsd: spentAfter }),
+      remainingMicroUsd({ creditMicroUsd: account.credit_micro_usd, spentMicroUsd: args.spentAfter }),
     ),
+    "prism-monthly-included-micro-usd": String(plan.monthlyIncludedMicroUsd),
+    "prism-allowance-remaining-micro-usd": String(args.allowanceRemaining),
+  });
+
+  const allowanceRemainingBefore = remainingAllowanceMicroUsd({
+    monthlyIncludedMicroUsd: plan.monthlyIncludedMicroUsd,
+    allowanceSpentMicroUsd: periodBefore?.allowance_spent_micro_usd ?? 0,
   });
 
   if (result.outcome === "stream") {
@@ -319,35 +363,38 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
     const stream = meteredRelay(result.stream, (settlement) => {
       const metered =
         settlement.usage === null ? null : meterUsageObject(settlement.usage, price);
-      const event: UsageEvent =
-        metered && metered.outcome === "metered"
-          ? {
-              ...baseEvent,
-              id: newId("use"),
-              input_tokens: metered.usage.inputTokens,
-              output_tokens: metered.usage.outputTokens,
-              micro_usd: metered.microUsd,
-              metered: true,
-              unmetered_reason: null,
-              upstream_status: 200,
-              gateway_log_id: result.gatewayLogId,
-            }
-          : {
-              ...baseEvent,
-              id: newId("use"),
-              input_tokens: null,
-              output_tokens: null,
-              micro_usd: 0,
-              metered: false,
-              unmetered_reason: streamUnmeteredReason(settlement, metered?.reason),
-              upstream_status: 200,
-              gateway_log_id: result.gatewayLogId,
-            };
       // waitUntil, because the response has already been streamed by the time this runs. This is the one
       // place in the plane where the ledger write is NOT awaited before answering, and it is not a choice:
       // the price does not exist until the last byte. The write is still awaited by the runtime, and a
       // failure is logged at error level by recordQuietly.
-      ctx.waitUntil(recordQuietly(ctx, event));
+      ctx.waitUntil(
+        (async () => {
+          const event = await buildEvent(
+            metered && metered.outcome === "metered"
+              ? {
+                  id: newId("use"),
+                  input_tokens: metered.usage.inputTokens,
+                  output_tokens: metered.usage.outputTokens,
+                  micro_usd: metered.microUsd,
+                  metered: true,
+                  unmetered_reason: null,
+                  upstream_status: 200,
+                  gateway_log_id: result.gatewayLogId,
+                }
+              : {
+                  id: newId("use"),
+                  input_tokens: null,
+                  output_tokens: null,
+                  micro_usd: 0,
+                  metered: false,
+                  unmetered_reason: streamUnmeteredReason(settlement, metered?.reason),
+                  upstream_status: 200,
+                  gateway_log_id: result.gatewayLogId,
+                },
+          );
+          await recordQuietly(ctx, event);
+        })(),
+      );
     });
 
     return new Response(stream, {
@@ -361,7 +408,10 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
         "prism-model": model.id,
         "prism-max-tokens-applied": String(maxTokens),
         "prism-stream": "true",
-        ...creditHeaders(account.spent_micro_usd),
+        ...moneyHeaders({
+          spentAfter: account.spent_micro_usd,
+          allowanceRemaining: allowanceRemainingBefore,
+        }),
       },
     });
   }
@@ -383,10 +433,9 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
 
   // 12. Meter, then record, THEN answer.
   const metered = meterResponse(result.body, price);
-  const event: UsageEvent =
+  const event = await buildEvent(
     metered.outcome === "metered"
       ? {
-          ...baseEvent,
           id: newId("use"),
           input_tokens: metered.usage.inputTokens,
           output_tokens: metered.usage.outputTokens,
@@ -397,7 +446,6 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
           gateway_log_id: result.gatewayLogId,
         }
       : {
-          ...baseEvent,
           id: newId("use"),
           input_tokens: null,
           output_tokens: null,
@@ -406,7 +454,8 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
           unmetered_reason: metered.reason,
           upstream_status: 200,
           gateway_log_id: result.gatewayLogId,
-        };
+        },
+  );
 
   // AWAITED, not deferred to waitUntil. A metering plane must not answer with a charge it has not tried to
   // record; a deferred write that fails leaves usage the account was never billed for and nothing anywhere
@@ -414,7 +463,11 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
   const recorded = await recordQuietly(ctx, event);
 
   const spentAfter =
-    account.spent_micro_usd + (metered.outcome === "metered" && recorded ? metered.microUsd : 0);
+    account.spent_micro_usd + (recorded ? event.from_credit_micro_usd : 0);
+  const allowanceRemainingAfter = Math.max(
+    0,
+    allowanceRemainingBefore - (recorded ? event.from_allowance_micro_usd : 0),
+  );
   const headers: Record<string, string> = {
     "prism-model": model.id,
     "prism-max-tokens-applied": String(maxTokens),
@@ -423,7 +476,7 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
     // Whether the ledger write landed. False means the completion below was served and NOT charged; it is
     // surfaced rather than swallowed so a client-side or operator-side reader can see the gap.
     "prism-usage-recorded": recorded ? "true" : "false",
-    ...creditHeaders(spentAfter),
+    ...moneyHeaders({ spentAfter, allowanceRemaining: allowanceRemainingAfter }),
   };
 
   return jsonResponse(

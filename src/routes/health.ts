@@ -12,7 +12,7 @@
 // than 200 with an `ok: false` body: a monitor watching status codes must be able to see this fail.
 
 import { CATALOG } from "../catalog";
-import { credentialMode, gatewayConfig } from "../env";
+import { gatewayConfig, perUserModeRequested } from "../env";
 import { jsonResponse } from "../http";
 import type { Ctx } from "./shared";
 
@@ -71,21 +71,18 @@ export async function handleDeepHealth(ctx: Ctx): Promise<Response> {
       : "CF_ACCOUNT_ID or AI_GATEWAY_ID is unset, so POST /v1/chat/completions refuses rather than calling off-gateway",
   });
 
-  // The credential path, reported SEPARATELY from the gateway. Both closing the door with the same 503 is
-  // correct behaviour and useless diagnostics: this check is what turns "inference is down" into "which
-  // secret is missing", and it names the CONFIGURED mode so a deploy that silently landed in the wrong one
-  // is visible without reading the Worker's secrets.
-  const mode = credentialMode(ctx.env);
+  // The credential path, reported SEPARATELY from the gateway. Product is one shared CF_AIG_TOKEN for
+  // every account (Cloudflare's 500-token ceiling rules out minting one per Prism account). Attribution is
+  // cf-aig-metadata + the D1 ledger. A leftover UPSTREAM_CREDENTIAL_MODE=per-user is a misdeploy and closes
+  // the door rather than minting.
   checks.push({
     name: "upstream_credential",
     ok: ctx.credentials !== null,
     detail: ctx.credentials
-      ? mode === "shared"
-        ? "shared account credential configured; per-user attribution rides on cf-aig-metadata and the ledger"
-        : "per-user tokens can be minted, stored encrypted, and are inside the configured budget"
-      : mode === "shared"
-        ? "CF_AIG_TOKEN is unset, so inference is closed"
-        : "PCP_CF_API_TOKEN, USER_TOKEN_KEK, or USER_TOKEN_BUDGET is unset, so inference is closed",
+      ? "shared CF_AIG_TOKEN configured; per-account attribution is cf-aig-metadata + the D1 ledger"
+      : perUserModeRequested(ctx.env)
+        ? "UPSTREAM_CREDENTIAL_MODE=per-user is retired (500-token account ceiling); unset it and use CF_AIG_TOKEN"
+        : "CF_AIG_TOKEN is unset, so inference is closed",
   });
 
   const ok = checks.every((check) => check.ok);

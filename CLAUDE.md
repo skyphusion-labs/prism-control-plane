@@ -14,14 +14,12 @@ multimodal surface stay in **[prism](https://github.com/skyphusion-labs/prism)**
 
 **Status: deployed and live at `play-proxy.skyphusion.org`.** Built: the client contract, the Worker
 and its route table, the D1 schema, client-key auth with one-time enrollment, entitlement and rate
-gates, the prepaid balance gate, the priced usage ledger, SSE streaming with trailing-usage capture, and
-the AI Gateway cost reconciliation job
-([#12](https://github.com/skyphusion-labs/prism-control-plane/issues/12): `POST /admin/reconcile`,
-operator-triggered, dry run by default). **Not built:** the flat plan's monthly included-token allowance
-(only the prepaid balance half exists,
-[#11](https://github.com/skyphusion-labs/prism-control-plane/issues/11)), a refresh of `src/catalog.ts`
-from `compat/models`, and a receipt-validated enrollment source. No paid traffic has been served through
-it yet. Aviation-grade `main` (PR + `ci` + `coverage` + CodeQL).
+gates, dual-pool spend (monthly allowance then prepaid credit, issue #11), the priced usage ledger
+(44 of 45 chat models priced from CF table / issue #10; reconcile trues up drift), SSE streaming with
+trailing-usage capture, shared `CF_AIG_TOKEN` only (metadata + D1 for attribution), and
+`POST /admin/reconcile` (issue #12, operator-triggered, dry run by default). **Not built:** automatic
+catalog refresh from `compat/models`, receipt-validated enrollment, reconcile cron. No paid traffic
+yet. Aviation-grade `main` (PR + `ci` + `coverage` + CodeQL).
 
 **The spend path addresses the AI Gateway host**
 ([#15](https://github.com/skyphusion-labs/prism-control-plane/issues/15)). `src/upstream.ts` POSTs to
@@ -155,12 +153,11 @@ Live: Worker **`prism-control-plane`** at **`play-proxy.skyphusion.org`** (custo
 DNS), AI Gateway **`prism-proxy`**, D1 **`prism-control-plane`**, prod account
 `fabcb25d9c7eb087110ec474a03e50d2`. No `workers.dev`. Only binding is `DB`; no KV, R2, or Queues.
 
-**Credential posture: `shared`.** One account-scoped `CF_AIG_TOKEN` (AI Gateway Run + Workers AI Read +
-**AI Gateway Read**, widened 2026-08-05 for reconciliation) reaches models; per-user attribution rides on
-`cf-aig-metadata` plus the D1 ledger. Editing a Cloudflare token's policies does not change its value, so
-that widening required no re-escrow of the ciphertext and no `wrangler secret put`. Per-user token
-minting is implemented, bounded, and **off**; do not turn it on without reading the 500-token ceiling
-note in `docs/ARCHITECTURE.md`.
+**Credential posture: one shared `CF_AIG_TOKEN` only.** AI Gateway Run + Workers AI Read + AI Gateway
+Read (read is for reconciliation). Every Prism account rides that same token; per-account attribution is
+`cf-aig-metadata` plus the D1 ledger. **Do not mint one Cloudflare token per account** -- the account
+ceiling is 500 tokens total and vivijure already draws from the same pool. `UPSTREAM_CREDENTIAL_MODE=per-user`
+is retired and closes the inference door if set.
 
 ### Where the config and credentials live
 

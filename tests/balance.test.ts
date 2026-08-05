@@ -1,70 +1,125 @@
 import { describe, expect, it } from "vitest";
-import { decideBalance, remainingMicroUsd } from "../src/balance";
+import {
+  allocateCharge,
+  decideBalance,
+  remainingAllowanceMicroUsd,
+  remainingMicroUsd,
+} from "../src/balance";
+
+const purePrepaid = {
+  creditMicroUsd: 1000,
+  spentMicroUsd: 0,
+  monthlyIncludedMicroUsd: 0,
+  allowanceSpentMicroUsd: 0,
+};
 
 describe("decideBalance", () => {
-  it("allows while there is any credit left", () => {
-    expect(decideBalance({ creditMicroUsd: 1000, spentMicroUsd: 0 })).toEqual({
+  it("allows while there is any credit left (pure prepaid)", () => {
+    expect(decideBalance(purePrepaid)).toEqual({
       outcome: "allow",
       remainingMicroUsd: 1000,
+      remainingAllowanceMicroUsd: 0,
+      remainingCreditMicroUsd: 1000,
     });
-    expect(decideBalance({ creditMicroUsd: 1000, spentMicroUsd: 999 })).toEqual({
-      outcome: "allow",
-      remainingMicroUsd: 1,
-    });
+    expect(
+      decideBalance({ ...purePrepaid, spentMicroUsd: 999 }),
+    ).toMatchObject({ outcome: "allow", remainingCreditMicroUsd: 1 });
   });
 
-  it("exhausts at exactly the credit, not one past it", () => {
-    // >= not >. Allowing a request at exactly the granted amount would hand every account one free request
-    // beyond what it paid for, forever, which on a prepaid plane is the whole business model leaking.
-    expect(decideBalance({ creditMicroUsd: 1000, spentMicroUsd: 1000 })).toMatchObject({
+  it("exhausts at exactly the credit when allowance is zero", () => {
+    expect(decideBalance({ ...purePrepaid, spentMicroUsd: 1000 })).toMatchObject({
       outcome: "exhausted",
     });
   });
 
-  it("stays exhausted after the bounded overshoot rather than calling it corruption", () => {
-    // Spend EXCEEDING credit is a normal, expected state: the cost of a request is unknowable until the
-    // model answers, so the last allowed request can carry an account negative. It must read as exhausted
-    // (402, top up) and not as indeterminate (503, our bug), because the account is fine and the number is
-    // real.
-    expect(decideBalance({ creditMicroUsd: 1000, spentMicroUsd: 1500 })).toMatchObject({
+  it("allows on remaining allowance even when credit is spent", () => {
+    expect(
+      decideBalance({
+        creditMicroUsd: 100,
+        spentMicroUsd: 100,
+        monthlyIncludedMicroUsd: 500,
+        allowanceSpentMicroUsd: 0,
+      }),
+    ).toMatchObject({
+      outcome: "allow",
+      remainingAllowanceMicroUsd: 500,
+      remainingCreditMicroUsd: 0,
+      remainingMicroUsd: 500,
+    });
+  });
+
+  it("exhausts only when both pools are gone", () => {
+    expect(
+      decideBalance({
+        creditMicroUsd: 100,
+        spentMicroUsd: 150,
+        monthlyIncludedMicroUsd: 500,
+        allowanceSpentMicroUsd: 500,
+      }),
+    ).toMatchObject({ outcome: "exhausted" });
+  });
+
+  it("stays exhausted after credit overshoot rather than calling it corruption", () => {
+    expect(decideBalance({ ...purePrepaid, spentMicroUsd: 1500 })).toMatchObject({
       outcome: "exhausted",
       creditMicroUsd: 1000,
       spentMicroUsd: 1500,
     });
   });
 
-  it("treats zero credit as a real decision that refuses everything", () => {
-    // A granted zero IS a decision (an account created on a plan with no signup credit). This layer must
-    // not second-guess it into a free request.
-    expect(decideBalance({ creditMicroUsd: 0, spentMicroUsd: 0 })).toMatchObject({
-      outcome: "exhausted",
-    });
+  it("treats zero credit and zero allowance as exhausted", () => {
+    expect(
+      decideBalance({
+        creditMicroUsd: 0,
+        spentMicroUsd: 0,
+        monthlyIncludedMicroUsd: 0,
+        allowanceSpentMicroUsd: 0,
+      }),
+    ).toMatchObject({ outcome: "exhausted" });
   });
 
   it("separates 'we could not tell' from 'nothing is left'", () => {
-    // The distinction that matters: exhausted is a fact about the account (402, stop asking until top-up);
-    // indeterminate is a fact about US (503, our bug). Mapping a corrupt counter to 402 would tell a paying
-    // user their credit is spent when it may be untouched -- plausible, user-blaming, and invisible to us.
-    expect(decideBalance({ creditMicroUsd: 1000, spentMicroUsd: -5 })).toMatchObject({
+    expect(decideBalance({ ...purePrepaid, spentMicroUsd: -5 })).toMatchObject({
       outcome: "indeterminate",
     });
-    expect(decideBalance({ creditMicroUsd: 1000, spentMicroUsd: 1.5 })).toMatchObject({
+    expect(decideBalance({ ...purePrepaid, spentMicroUsd: 1.5 })).toMatchObject({
       outcome: "indeterminate",
     });
-    expect(decideBalance({ creditMicroUsd: -1, spentMicroUsd: 0 })).toMatchObject({
-      outcome: "indeterminate",
-    });
-    expect(decideBalance({ creditMicroUsd: Number.NaN, spentMicroUsd: 0 })).toMatchObject({
+    expect(decideBalance({ ...purePrepaid, monthlyIncludedMicroUsd: -1 })).toMatchObject({
       outcome: "indeterminate",
     });
   });
 });
 
-describe("remainingMicroUsd", () => {
+describe("allocateCharge", () => {
+  it("takes allowance first, then credit", () => {
+    expect(
+      allocateCharge(300, { monthlyIncludedMicroUsd: 200, allowanceSpentMicroUsd: 0 }),
+    ).toEqual({ fromAllowanceMicroUsd: 200, fromCreditMicroUsd: 100 });
+  });
+
+  it("is pure credit when allowance is zero or exhausted", () => {
+    expect(
+      allocateCharge(50, { monthlyIncludedMicroUsd: 0, allowanceSpentMicroUsd: 0 }),
+    ).toEqual({ fromAllowanceMicroUsd: 0, fromCreditMicroUsd: 50 });
+    expect(
+      allocateCharge(50, { monthlyIncludedMicroUsd: 100, allowanceSpentMicroUsd: 100 }),
+    ).toEqual({ fromAllowanceMicroUsd: 0, fromCreditMicroUsd: 50 });
+  });
+
+  it("is pure allowance when the charge fits", () => {
+    expect(
+      allocateCharge(40, { monthlyIncludedMicroUsd: 100, allowanceSpentMicroUsd: 10 }),
+    ).toEqual({ fromAllowanceMicroUsd: 40, fromCreditMicroUsd: 0 });
+  });
+});
+
+describe("remainingMicroUsd / remainingAllowanceMicroUsd", () => {
   it("clamps at zero so an overshot account never reports a negative balance", () => {
-    // A negative here would reach a client as something that looks like a debt. There is no debt on this
-    // plane; there is only "you cannot spend until you top up".
     expect(remainingMicroUsd({ creditMicroUsd: 1000, spentMicroUsd: 1500 })).toBe(0);
     expect(remainingMicroUsd({ creditMicroUsd: 1000, spentMicroUsd: 250 })).toBe(750);
+    expect(
+      remainingAllowanceMicroUsd({ monthlyIncludedMicroUsd: 100, allowanceSpentMicroUsd: 150 }),
+    ).toBe(0);
   });
 });

@@ -12,10 +12,16 @@ export interface Plan {
   /**
    * The OPENING GRANT in integer micro-USD, applied once when an account is created.
    *
-   * NOT a recurring allowance. Prepaid means a balance that only moves when someone tops it up or
-   * something is spent; a monthly reset would be a grant of money nobody decided to give. See balance.ts.
+   * Not the monthly allowance: that is monthlyIncludedMicroUsd. Signup credit is prepaid principal.
    */
   signupCreditMicroUsd: number;
+  /**
+   * Monthly included spend for the current UTC period, integer micro-USD. Issue #11.
+   *
+   * Spent before prepaid credit. Zero means pure prepaid. Unused expires at period roll and never
+   * becomes a credit grant (that silent cash grant is the defect this field exists to avoid).
+   */
+  monthlyIncludedMicroUsd: number;
   requestsPerMinute: number;
   maxOutputTokens: number;
   allowedTiers: ModelTier[];
@@ -74,6 +80,14 @@ export function planFromRow(row: PlanRow): PlanResult {
         "grant of zero must not be the same outcome",
     };
   }
+  if (!Number.isInteger(row.monthly_included_micro_usd) || row.monthly_included_micro_usd < 0) {
+    return {
+      ok: false,
+      reason:
+        `plan "${row.id}" has monthly_included_micro_usd ${String(row.monthly_included_micro_usd)}, which is ` +
+        "not a non-negative integer. Refusing rather than inventing an allowance",
+    };
+  }
   if (!Number.isInteger(row.requests_per_minute) || row.requests_per_minute <= 0) {
     return {
       ok: false,
@@ -92,6 +106,7 @@ export function planFromRow(row: PlanRow): PlanResult {
       id: row.id,
       name: row.name,
       signupCreditMicroUsd: row.signup_credit_micro_usd,
+      monthlyIncludedMicroUsd: row.monthly_included_micro_usd,
       requestsPerMinute: row.requests_per_minute,
       maxOutputTokens: row.max_output_tokens,
       allowedTiers: parseTiers(row.allowed_tiers),
@@ -131,6 +146,7 @@ export function publicPlan(plan: Plan): Record<string, unknown> {
     id: plan.id,
     name: plan.name,
     signup_credit_micro_usd: plan.signupCreditMicroUsd,
+    monthly_included_micro_usd: plan.monthlyIncludedMicroUsd,
     requests_per_minute: plan.requestsPerMinute,
     max_output_tokens: plan.maxOutputTokens,
     allowed_tiers: plan.allowedTiers,

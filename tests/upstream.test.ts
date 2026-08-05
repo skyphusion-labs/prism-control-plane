@@ -154,6 +154,22 @@ describe("upstreamBody", () => {
     expect(body).toMatchObject({ model: "@cf/meta/llama-3.2-1b-instruct", max_tokens: 16 });
   });
 
+  it("uses max_completion_tokens for openai/* and xai/* models", () => {
+    // Issue #10: 5.6 family and o4-mini reject max_tokens; Grok expects max_completion_tokens.
+    expect(
+      upstreamBody(request({ upstreamModel: "openai/gpt-5.6-terra", billing: "unified-billing" })),
+    ).toMatchObject({ max_completion_tokens: 16 });
+    expect(
+      upstreamBody(request({ upstreamModel: "openai/gpt-5.6-terra", billing: "unified-billing" })),
+    ).not.toHaveProperty("max_tokens");
+    expect(
+      upstreamBody(request({ upstreamModel: "xai/grok-4.3", billing: "unified-billing" })),
+    ).toMatchObject({ max_completion_tokens: 16 });
+    expect(
+      upstreamBody(request({ upstreamModel: "anthropic/claude-haiku-4-5", billing: "unified-billing" })),
+    ).toMatchObject({ max_tokens: 16 });
+  });
+
   it("passes sampling params through when the client set them", () => {
     expect(upstreamBody(request({ temperature: 0, topP: 0.5 }))).toMatchObject({
       temperature: 0,
