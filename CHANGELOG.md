@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-08-05
+
 ### Fixed
 
 - **Hard-fail chat models (smoke 2026-08-05):**
