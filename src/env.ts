@@ -13,14 +13,19 @@ export interface Env {
   DB: D1Database;
 
   /**
-   * THERE IS NO `AI` BINDING, and its absence is deliberate even though the default credential mode is now
-   * a shared one.
-   *
-   * The binding hard-codes ONE identity: the Worker's. Calling the AI Gateway over HTTP instead
-   * (src/upstream.ts) means the credential is an argument, which is what lets UPSTREAM_CREDENTIAL_MODE be
-   * a config switch rather than a rewrite. Adding the binding back would make the shared path the only
-   * possible path and quietly delete the choice.
+   * Workers AI binding. Required for:
+   *   - Deepgram Flux live STT (`{ websocket: true }`)
+   *   - Unified Billing non-@cf non-chat (image/video/music via env.AI.run + gateway)
+   * Chat and most @cf HTTP models still use CF_AIG_TOKEN over REST.
+   * ABSENT: Flux and UB non-chat answer 503; @cf REST doors still work.
    */
+  AI?: Ai;
+
+  /**
+   * Durable Object namespace for live voice STT sessions (Flux bridge).
+   * ABSENT: GET /v1/stt/stream answers 503.
+   */
+  STT_SESSION?: DurableObjectNamespace;
 
   /** The Cloudflare account inference runs on. A plain var: an account id is not a secret. */
   CF_ACCOUNT_ID?: string;
@@ -66,7 +71,8 @@ export interface Env {
    * The ONE account-scoped credential that reaches models for every account.
    *
    * AI Gateway Run + Workers AI Read + AI Gateway Read (read is for reconciliation). Required; without
-   * it the inference route answers 503. Never sent to a client. Never used to mint other tokens.
+   * it the inference route answers 503. Also used to HMAC-sign the STT DO handoff (stt-handoff.ts).
+   * Never sent to a client. Never used to mint other tokens.
    */
   CF_AIG_TOKEN?: string;
 
@@ -158,10 +164,17 @@ export function userTokenBudget(env: Env, accountQuota: number): number | null {
  * (`gateway.ai.cloudflare.com/v1/{account}/{gateway}/...`), so a missing one is not a degraded mode, it is
  * no upstream at all.
  */
+/** Cloudflare account ids are 32 hex chars. Reject anything else before it enters a URL path. */
+const CF_ACCOUNT_ID_RE = /^[a-f0-9]{32}$/i;
+
 export function gatewayConfig(env: Env): GatewayConfig | null {
   const accountId = (env.CF_ACCOUNT_ID ?? "").trim();
   const id = (env.AI_GATEWAY_ID ?? "").trim();
   if (!accountId || !id) return null;
+  // Fail closed on a non-hex account id so it cannot rewrite the REST/gateway URL path.
+  if (!CF_ACCOUNT_ID_RE.test(accountId)) return null;
+  // Gateway slug: letters, digits, hyphen, underscore only.
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) return null;
   return {
     accountId,
     id,

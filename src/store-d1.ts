@@ -117,6 +117,17 @@ export function d1Store(db: D1Database): ControlPlaneStore {
         .first<ClientRow>();
     },
 
+    async getClient(clientId) {
+      return await db
+        .prepare(
+          `SELECT id, account_id, key_id, secret_hash, label, platform, created_at, last_seen_at,
+                  revoked_at
+             FROM clients WHERE id = ?`,
+        )
+        .bind(clientId)
+        .first<ClientRow>();
+    },
+
     async touchClient(clientId) {
       await db
         .prepare(`UPDATE clients SET last_seen_at = datetime('now') WHERE id = ?`)
@@ -201,6 +212,38 @@ export function d1Store(db: D1Database): ControlPlaneStore {
         )
         .bind(args.token_hash, args.account_id, args.expires_at, args.note)
         .run();
+    },
+
+    async createSttTicket(args) {
+      await db
+        .prepare(
+          `INSERT INTO stt_tickets (token_hash, account_id, client_id, expires_at)
+           VALUES (?, ?, ?, ?)`,
+        )
+        .bind(args.token_hash, args.account_id, args.client_id, args.expires_at)
+        .run();
+    },
+
+    /**
+     * Single-use redemption (same meta.changes guard as enrollments).
+     * Expiry compared in SQLite so the clock matches stored timestamps.
+     */
+    async consumeSttTicket(tokenHash) {
+      const result = await db
+        .prepare(
+          `UPDATE stt_tickets
+              SET consumed_at = datetime('now')
+            WHERE token_hash = ?
+              AND consumed_at IS NULL
+              AND datetime(expires_at) > datetime('now')`,
+        )
+        .bind(tokenHash)
+        .run();
+      if (!result.meta.changes) return null;
+      return await db
+        .prepare(`SELECT account_id, client_id FROM stt_tickets WHERE token_hash = ?`)
+        .bind(tokenHash)
+        .first<{ account_id: string; client_id: string }>();
     },
 
     async getPeriod(accountId, periodKey) {
@@ -548,7 +591,8 @@ export function d1Store(db: D1Database): ControlPlaneStore {
     async getModelPrice(modelId) {
       return await db
         .prepare(
-          `SELECT model_id, input_micro_usd_per_mtok, output_micro_usd_per_mtok, priced_at, note
+          `SELECT model_id, input_micro_usd_per_mtok, output_micro_usd_per_mtok, unit_micro_usd,
+                  priced_at, note
              FROM model_prices WHERE model_id = ?`,
         )
         .bind(modelId)
@@ -558,7 +602,8 @@ export function d1Store(db: D1Database): ControlPlaneStore {
     async listModelPrices() {
       const result = await db
         .prepare(
-          `SELECT model_id, input_micro_usd_per_mtok, output_micro_usd_per_mtok, priced_at, note
+          `SELECT model_id, input_micro_usd_per_mtok, output_micro_usd_per_mtok, unit_micro_usd,
+                  priced_at, note
              FROM model_prices ORDER BY model_id`,
         )
         .all<ModelPriceRow>();
@@ -569,11 +614,13 @@ export function d1Store(db: D1Database): ControlPlaneStore {
       await db
         .prepare(
           `INSERT INTO model_prices
-             (model_id, input_micro_usd_per_mtok, output_micro_usd_per_mtok, priced_at, note)
-           VALUES (?, ?, ?, ?, ?)
+             (model_id, input_micro_usd_per_mtok, output_micro_usd_per_mtok, unit_micro_usd,
+              priced_at, note)
+           VALUES (?, ?, ?, ?, ?, ?)
            ON CONFLICT(model_id) DO UPDATE SET
              input_micro_usd_per_mtok  = excluded.input_micro_usd_per_mtok,
              output_micro_usd_per_mtok = excluded.output_micro_usd_per_mtok,
+             unit_micro_usd            = excluded.unit_micro_usd,
              priced_at                 = excluded.priced_at,
              note                      = excluded.note,
              updated_at                = datetime('now')`,
@@ -582,6 +629,7 @@ export function d1Store(db: D1Database): ControlPlaneStore {
           row.model_id,
           row.input_micro_usd_per_mtok,
           row.output_micro_usd_per_mtok,
+          row.unit_micro_usd,
           row.priced_at,
           row.note,
         )

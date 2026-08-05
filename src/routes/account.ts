@@ -5,7 +5,7 @@ import { errorResponse, jsonResponse } from "../http";
 import { periodBounds } from "../period";
 import { planFromRow, publicPlan, type Plan } from "../plans";
 import { remainingAllowanceMicroUsd, remainingMicroUsd } from "../balance";
-import { resolvePrice } from "../meter";
+import { resolvePrice, resolveUnitPrice } from "../meter";
 import type { Caller } from "../auth";
 import type { AccountRow, ControlPlaneStore } from "../store";
 import { requireCaller, type Ctx } from "./shared";
@@ -135,9 +135,10 @@ export async function handleModels(ctx: Ctx, request: Request): Promise<Response
   const overrides = new Map((await ctx.store.listModelPrices()).map((row) => [row.model_id, row]));
   return jsonResponse(ctx.requestId, {
     object: "list",
-    data: modelsForTiers(planResult.plan.allowedTiers).map((entry) =>
-      publicModel(entry, resolvePrice(entry, overrides.get(entry.id) ?? null)),
-    ),
+    data: modelsForTiers(planResult.plan.allowedTiers).map((entry) => {
+      const row = overrides.get(entry.id) ?? null;
+      return publicModel(entry, resolvePrice(entry, row), resolveUnitPrice(entry, row));
+    }),
   });
 }
 

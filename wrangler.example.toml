@@ -11,10 +11,19 @@ compatibility_date = "2026-05-01"
 # workers.dev hostname would be a second, un-DNS'd door to the same metered routes.
 workers_dev = false
 
-# THERE IS NO [ai] BINDING, and its absence is deliberate even though the default credential is a shared
-# one. The binding hard-codes ONE identity: the Worker's. Calling the AI Gateway over HTTP instead
-# (src/upstream.ts) makes the credential a per-request argument, which is what lets UPSTREAM_CREDENTIAL_MODE
-# below be a config switch rather than a rewrite. Adding the binding back would delete that choice.
+# Workers AI binding: required for Deepgram Flux (websocket) and Unified Billing
+# non-@cf non-chat (image/video/music). Chat and most @cf HTTP models use CF_AIG_TOKEN.
+[ai]
+binding = "AI"
+
+# Live voice STT (Deepgram Flux) session bridge.
+[[durable_objects.bindings]]
+name = "STT_SESSION"
+class_name = "SttSession"
+
+[[migrations]]
+tag = "v1_stt_session"
+new_classes = ["SttSession"]
 
 [[d1_databases]]
 binding = "DB"

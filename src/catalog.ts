@@ -20,13 +20,23 @@
 // LLaVA is image-to-text (native wire, not chat/completions); measured 2026-08-05 gateway cost and
 // neurons are $0 / 0 on successful runs, so its catalog rate is zero (still spendable).
 //
-// `publishedRates` carries the non-token rates CF does publish (per tile, per step, per audio minute).
-// They are DISCLOSURE, not money math: the unit meters for tiles, steps and audio minutes do not exist
-// yet, so those modalities have no door. Their numbers are floats in USD on purpose, so nobody mistakes
-// them for the integer micro-USD the ledger is denominated in.
+// `publishedRates` carries the non-token rates CF publishes (per tile, per step, per audio minute).
+// Floats in USD, disclosure-shaped. The meter uses integer `unitPrice` (micro-USD per request /
+// audio minute / k-characters) derived from those rates for models that have a door.
 
-/** Which door a model belongs to. Only `chat` has one today; the rest are catalogued for parity. */
+/** Which door a model belongs to. `voice` is websocket-only and has no HTTP door yet. */
 export type Modality = "chat" | "image" | "tts" | "stt" | "voice" | "music" | "video";
+
+/** Modalities with a door on this plane (HTTP or WebSocket). */
+export const DOOR_MODALITIES: ReadonlySet<Modality> = new Set([
+  "chat",
+  "image",
+  "tts",
+  "stt",
+  "music",
+  "video",
+  "voice",
+]);
 
 /**
  * Which bill the inference lands on.
@@ -63,11 +73,20 @@ export interface TokenPrice {
   pricedAt: string;
 }
 
-/** A published rate whose unit is not tokens, and which therefore no meter here can charge. */
+/** A published rate whose unit is not tokens. Disclosure in publicModel; money uses UnitPrice. */
 export interface UnitRate {
   unit: string;
   /** USD per unit, as published. Float on purpose: see the header. */
   usdPerUnit: number;
+}
+
+/** Meterable non-token rate. Integer micro-USD per unit. */
+export type MeterUnit = "request" | "audio_minute" | "k_characters";
+
+export interface UnitPrice {
+  microUsdPerUnit: number;
+  unit: MeterUnit;
+  pricedAt: string;
 }
 
 export interface CatalogEntry {
@@ -94,9 +113,15 @@ export interface CatalogEntry {
    * catalog for the same reason.
    */
   maxOutputTokens: number | null;
-  /** The meterable rate, or null when Cloudflare publishes none. Null closes the door: see header. */
+  /** Token meter rate for chat, or null. */
   price: TokenPrice | null;
-  /** Non-token published rates. Disclosure only; nothing here is charged. */
+  /**
+   * Unit meter rate for non-chat doors (image/tts/stt/video/music), or null.
+   * Null closes the non-chat door with model_unpriced until an operator sets a rate.
+   * Chat entries leave this null (they use `price`).
+   */
+  unitPrice: UnitPrice | null;
+  /** Non-token published rates. Disclosure; money math uses unitPrice. */
   publishedRates: readonly UnitRate[];
 }
 
@@ -122,6 +147,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: 1000000,
       pricedAt: PRICED_AT_UB,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -139,6 +165,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: 200000,
       pricedAt: PRICED_AT_UB,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -156,6 +183,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: 500000,
       pricedAt: PRICED_AT_UB,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -173,6 +201,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: 500000,
       pricedAt: PRICED_AT_UB,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -190,6 +219,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: 500000,
       pricedAt: PRICED_AT_UB,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -207,6 +237,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: 500000,
       pricedAt: PRICED_AT_UB,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -224,6 +255,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: 300000,
       pricedAt: PRICED_AT_UB,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -241,6 +273,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: 100000,
       pricedAt: PRICED_AT_UB,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -258,6 +291,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: 300000,
       pricedAt: PRICED_AT_UB,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -275,6 +309,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: 200000,
       pricedAt: PRICED_AT_UB,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -292,6 +327,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: 200000,
       pricedAt: PRICED_AT_UB,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -309,6 +345,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: 200000,
       pricedAt: PRICED_AT_UB,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -326,6 +363,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: 300000,
       pricedAt: PRICED_AT_UB,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -343,6 +381,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: 160_000,
       pricedAt: PRICED_AT,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -360,6 +399,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: 190_000,
       pricedAt: PRICED_AT,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -377,6 +417,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: null,
       pricedAt: PRICED_AT,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -394,6 +435,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: null,
       pricedAt: PRICED_AT,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -411,6 +453,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: null,
       pricedAt: PRICED_AT,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -428,6 +471,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: null,
       pricedAt: PRICED_AT,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -445,6 +489,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: 500000,
       pricedAt: PRICED_AT_UB,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -462,6 +507,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: null,
       pricedAt: PRICED_AT_UB,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -479,6 +525,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: 500000,
       pricedAt: PRICED_AT_UB,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -496,6 +543,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: 100000,
       pricedAt: PRICED_AT_UB,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -513,6 +561,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: 10000,
       pricedAt: PRICED_AT_UB,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -530,6 +579,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: 250000,
       pricedAt: PRICED_AT_UB,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -547,6 +597,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: 75000,
       pricedAt: PRICED_AT_UB,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -564,6 +615,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: null,
       pricedAt: PRICED_AT_UB,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -581,6 +633,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: null,
       pricedAt: PRICED_AT,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -598,6 +651,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: null,
       pricedAt: PRICED_AT,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -615,6 +669,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: null,
       pricedAt: PRICED_AT,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -632,6 +687,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: null,
       pricedAt: PRICED_AT,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -649,6 +705,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: null,
       pricedAt: PRICED_AT,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -666,6 +723,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: null,
       pricedAt: PRICED_AT,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -683,6 +741,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: null,
       pricedAt: PRICED_AT,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -700,6 +759,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: null,
       pricedAt: PRICED_AT,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -717,6 +777,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: null,
       pricedAt: PRICED_AT,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -734,6 +795,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: 260_000,
       pricedAt: PRICED_AT,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -751,6 +813,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: null,
       pricedAt: PRICED_AT,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -768,6 +831,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: null,
       pricedAt: PRICED_AT,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -785,6 +849,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: 200000,
       pricedAt: PRICED_AT_UB,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -802,6 +867,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: 150000,
       pricedAt: PRICED_AT_UB,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -819,6 +885,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: 150000,
       pricedAt: PRICED_AT_UB,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -836,6 +903,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: null,
       pricedAt: PRICED_AT,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -856,6 +924,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: null,
       pricedAt: PRICED_AT_UB,
     },
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -873,6 +942,7 @@ export const CATALOG: readonly CatalogEntry[] = [
       cachedInputMicroUsdPerMTok: null,
       pricedAt: PRICED_AT,
     },
+    unitPrice: null,
     publishedRates: [],
   },
 
@@ -887,6 +957,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -899,6 +970,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -911,6 +983,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -923,6 +996,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -935,6 +1009,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -947,6 +1022,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -959,6 +1035,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -971,6 +1048,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -983,6 +1061,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -995,6 +1074,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -1007,6 +1087,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -1019,6 +1100,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -1031,6 +1113,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -1043,6 +1126,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: { microUsdPerUnit: 0, unit: "request", pricedAt: PRICED_AT },
     publishedRates: [],
   },
   {
@@ -1055,6 +1139,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: { microUsdPerUnit: 0, unit: "request", pricedAt: PRICED_AT },
     publishedRates: [],
   },
   {
@@ -1067,6 +1152,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: { microUsdPerUnit: 0, unit: "request", pricedAt: PRICED_AT },
     publishedRates: [],
   },
   {
@@ -1079,6 +1165,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: { microUsdPerUnit: 477, unit: "request", pricedAt: PRICED_AT },
     publishedRates: [{ unit: "per 512 by 512 tile", usdPerUnit: 5.28e-05 }, { unit: "per step", usdPerUnit: 0.000106 }],
   },
   {
@@ -1091,6 +1178,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: { microUsdPerUnit: 10300, unit: "request", pricedAt: PRICED_AT },
     publishedRates: [{ unit: "per 512 by 512 tile", usdPerUnit: 0.007 }, { unit: "per step", usdPerUnit: 0.000132 }],
   },
   {
@@ -1103,6 +1191,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: { microUsdPerUnit: 8580, unit: "request", pricedAt: PRICED_AT },
     publishedRates: [{ unit: "per 512 by 512 tile", usdPerUnit: 0.00583 }, { unit: "per step", usdPerUnit: 0.00011 }],
   },
   {
@@ -1115,6 +1204,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: { microUsdPerUnit: 0, unit: "request", pricedAt: PRICED_AT },
     publishedRates: [],
   },
   {
@@ -1127,6 +1217,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: { microUsdPerUnit: 1, unit: "request", pricedAt: PRICED_AT },
     publishedRates: [{ unit: "per step", usdPerUnit: 0 }],
   },
 
@@ -1141,6 +1232,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -1153,6 +1245,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -1165,6 +1258,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -1177,6 +1271,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -1189,6 +1284,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -1201,6 +1297,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -1213,6 +1310,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -1225,6 +1323,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -1237,6 +1336,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -1249,6 +1349,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -1261,6 +1362,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -1273,6 +1375,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -1285,6 +1388,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -1297,6 +1401,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -1309,6 +1414,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -1321,6 +1427,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -1333,6 +1440,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -1345,6 +1453,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
   {
@@ -1357,6 +1466,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
   },
 
@@ -1371,6 +1481,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: { microUsdPerUnit: 30000, unit: "k_characters", pricedAt: PRICED_AT },
     publishedRates: [{ unit: "per 1k characters", usdPerUnit: 0.03 }],
   },
   {
@@ -1383,6 +1494,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: { microUsdPerUnit: 30000, unit: "k_characters", pricedAt: PRICED_AT },
     publishedRates: [{ unit: "per 1k characters", usdPerUnit: 0.03 }],
   },
   {
@@ -1395,6 +1507,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: { microUsdPerUnit: 205, unit: "audio_minute", pricedAt: PRICED_AT },
     publishedRates: [{ unit: "per audio minute", usdPerUnit: 0.000205 }],
   },
 
@@ -1409,6 +1522,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: { microUsdPerUnit: 513, unit: "audio_minute", pricedAt: PRICED_AT },
     publishedRates: [{ unit: "per audio minute", usdPerUnit: 0.000513 }],
   },
   {
@@ -1421,6 +1535,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: { microUsdPerUnit: 453, unit: "audio_minute", pricedAt: PRICED_AT },
     publishedRates: [{ unit: "per audio minute", usdPerUnit: 0.000453 }],
   },
   {
@@ -1433,6 +1548,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: { microUsdPerUnit: 0, unit: "audio_minute", pricedAt: PRICED_AT },
     publishedRates: [],
   },
   {
@@ -1445,6 +1561,7 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: { microUsdPerUnit: 5200, unit: "audio_minute", pricedAt: PRICED_AT },
     publishedRates: [{ unit: "per audio minute", usdPerUnit: 0.0052 }, { unit: "per audio minute (websocket)", usdPerUnit: 0.0092 }],
   },
 
@@ -1459,6 +1576,8 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    // Published $0.0077 per audio minute (websocket). Live door: GET/WS /v1/stt/stream.
+    unitPrice: { microUsdPerUnit: 7700, unit: "audio_minute", pricedAt: PRICED_AT },
     publishedRates: [{ unit: "per audio minute (websocket)", usdPerUnit: 0.0077 }],
   },
 
@@ -1473,8 +1592,10 @@ export const CATALOG: readonly CatalogEntry[] = [
     streaming: false,
     maxOutputTokens: null,
     price: null,
+    unitPrice: null,
     publishedRates: [],
-  },];
+  },
+];
 
 const BY_ID = new Map(CATALOG.map((entry) => [entry.id, entry]));
 
@@ -1492,34 +1613,40 @@ export function modelsForTiers(tiers: readonly ModelTier[]): CatalogEntry[] {
 /**
  * Whether this plane will actually run this model right now.
  *
- * TWO CONDITIONS, AND BOTH ARE ABOUT METERING RATHER THAN CAPABILITY. A non-chat modality has no door here
- * because its published rates are per tile, per step and per audio minute and no meter for those units
- * exists; an unpriced model has no rate to charge. In both cases the model is real and may well be entitled,
- * and serving it anyway would mean spending money this plane cannot put a number on.
+ * THREE CONDITIONS, ALL ABOUT METERING AND DOORS rather than capability:
+ *   1. The modality has an HTTP door (voice does not -- live WebSocket).
+ *   2. Chat has a token rate (or operator override).
+ *   3. Non-chat has a unit rate (or operator unit override).
  *
- * Exported so that GET /v1/models, the inference route's refusal, and the readiness check all answer this
- * question with the same code. Three copies of this predicate would eventually disagree, and the way that
- * disagreement surfaces is a client being told a model is spendable and then being refused at the 409.
+ * Serving without a rate means host-billed spend this plane cannot put a number on.
  */
-export function spendable(entry: CatalogEntry, priceOverride: TokenPrice | null): boolean {
-  return entry.modality === "chat" && (priceOverride ?? entry.price) !== null;
+export function spendable(
+  entry: CatalogEntry,
+  tokenOverride: TokenPrice | null,
+  unitOverride: UnitPrice | null = null,
+): boolean {
+  if (!DOOR_MODALITIES.has(entry.modality)) return false;
+  if (entry.modality === "chat") {
+    return (tokenOverride ?? entry.price) !== null;
+  }
+  return (unitOverride ?? entry.unitPrice) !== null;
 }
 
 /**
  * The client-facing projection. One place, so GET /v1/models and the contract cannot drift.
  *
- * `spendable` is computed, not stored, and it is the field a client should branch on. A model can be
- * listed, entitled, and still refused because it has no rate; publishing that as its own boolean means
- * a picker can grey the entry out instead of discovering it at the 409.
- *
- * THE OVERRIDE WINS AND IS LABELLED. `price.source` says whether the rate came from Cloudflare's published
- * card or from an operator's own number, because those two carry very different warranties: one is the
- * vendor's, the other is ours. Publishing an operator rate as though Cloudflare set it would misrepresent
- * where the figure came from on the one surface a client uses to decide what a request will cost.
+ * `spendable` is computed, not stored. Token rates land in `price`; unit rates land in `unit_price`.
+ * A non-chat model with no unit rate is listed with spendable:false until an operator sets one.
  */
-export function publicModel(entry: CatalogEntry, priceOverride?: TokenPrice | null): Record<string, unknown> {
-  const override = priceOverride ?? null;
-  const price = override ?? entry.price;
+export function publicModel(
+  entry: CatalogEntry,
+  tokenOverride?: TokenPrice | null,
+  unitOverride?: UnitPrice | null,
+): Record<string, unknown> {
+  const tOverride = tokenOverride ?? null;
+  const uOverride = unitOverride ?? null;
+  const price = tOverride ?? entry.price;
+  const unit = uOverride ?? entry.unitPrice;
   return {
     id: entry.id,
     display_name: entry.displayName,
@@ -1528,7 +1655,7 @@ export function publicModel(entry: CatalogEntry, priceOverride?: TokenPrice | nu
     tier: entry.tier,
     streaming: entry.streaming,
     max_output_tokens: entry.maxOutputTokens,
-    spendable: spendable(entry, override),
+    spendable: spendable(entry, tOverride, uOverride),
     price:
       price === null
         ? null
@@ -1536,7 +1663,16 @@ export function publicModel(entry: CatalogEntry, priceOverride?: TokenPrice | nu
             input_micro_usd_per_mtok: price.inputMicroUsdPerMTok,
             output_micro_usd_per_mtok: price.outputMicroUsdPerMTok,
             priced_at: price.pricedAt,
-            source: override ? "operator" : "cloudflare",
+            source: tOverride ? "operator" : "cloudflare",
+          },
+    unit_price:
+      unit === null
+        ? null
+        : {
+            micro_usd_per_unit: unit.microUsdPerUnit,
+            unit: unit.unit,
+            priced_at: unit.pricedAt,
+            source: uOverride ? "operator" : "cloudflare",
           },
     published_rates: entry.publishedRates.map((rate) => ({
       unit: rate.unit,

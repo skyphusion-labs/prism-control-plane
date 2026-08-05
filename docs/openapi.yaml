@@ -190,6 +190,166 @@ paths:
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
+  /v1/stt/sessions:
+    post:
+      tags: [inference]
+      summary: Mint a short-lived STT session ticket
+      description: >-
+        Authenticate with Authorization Bearer pcp_…. Returns a single-use stt_ ticket (default 60s)
+        for browser WebSocket auth via Sec-WebSocket-Protocol. Do not put the long-lived client key
+        in the protocol list.
+      security:
+        - clientKey: []
+      responses:
+        "200":
+          description: Ticket minted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ticket, expires_at, expires_in, protocol, stream_path]
+                properties:
+                  ticket: { type: string, description: "stt_… plaintext (shown once)" }
+                  expires_at: { type: string, format: date-time }
+                  expires_in: { type: integer, description: "Seconds until expiry" }
+                  protocol: { type: string, example: prism.v1 }
+                  stream_path: { type: string, example: /v1/stt/stream }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/stt/stream:
+    get:
+      tags: [inference]
+      summary: Live voice STT (Deepgram Flux WebSocket)
+      description: >-
+        WebSocket upgrade only. Auth via Authorization Bearer pcp_… (preferred, native) or
+        Sec-WebSocket-Protocol `prism.v1, stt_…` after POST /v1/stt/sessions (browsers).
+        Long-lived client keys and query tokens are rejected on the upgrade. Bridges to
+        @cf/deepgram/flux; meters audio minutes on close (15 min wall-clock cap).
+        Requires AI + STT_SESSION bindings.
+      responses:
+        "101":
+          description: Switching Protocols (WebSocket)
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "402": { $ref: "#/components/responses/QuotaExhausted" }
+        "409": { $ref: "#/components/responses/ModelUnpriced" }
+        "503":
+          description: AI binding or STT_SESSION Durable Object not configured
+
+  /v1/images/generations:
+    post:
+      tags: [inference]
+      summary: Metered image generation
+      description: >-
+        Unit-metered image door. Body requires model + prompt. Workers AI (@cf/) uses REST ai/run;
+        Unified Billing providers need the Worker AI binding.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, prompt]
+              properties:
+                model: { type: string }
+                prompt: { type: string }
+      responses:
+        "200":
+          description: Image (b64_json)
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "402": { $ref: "#/components/responses/QuotaExhausted" }
+        "409": { $ref: "#/components/responses/ModelUnpriced" }
+        "501": { $ref: "#/components/responses/ModelUnsupported" }
+
+  /v1/audio/speech:
+    post:
+      tags: [inference]
+      summary: Metered text-to-speech
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, input]
+              properties:
+                model: { type: string }
+                input: { type: string }
+                text: { type: string }
+      responses:
+        "200":
+          description: Audio (base64)
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "402": { $ref: "#/components/responses/QuotaExhausted" }
+        "409": { $ref: "#/components/responses/ModelUnpriced" }
+
+  /v1/audio/transcriptions:
+    post:
+      tags: [inference]
+      summary: Metered speech-to-text
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, audio]
+              properties:
+                model: { type: string }
+                audio: { type: string, description: base64 or data URL }
+      responses:
+        "200":
+          description: Transcript
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "402": { $ref: "#/components/responses/QuotaExhausted" }
+        "409": { $ref: "#/components/responses/ModelUnpriced" }
+
+  /v1/videos/generations:
+    post:
+      tags: [inference]
+      summary: Metered video generation
+      description: >-
+        Unit-metered video door. Requires the Worker AI binding for Unified Billing providers.
+        Long-running models may time out at UPSTREAM_TIMEOUT_MS.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                model: { type: string }
+                prompt: { type: string }
+                image: { type: string }
+      responses:
+        "200":
+          description: Provider result (opaque)
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "402": { $ref: "#/components/responses/QuotaExhausted" }
+        "409": { $ref: "#/components/responses/ModelUnpriced" }
+
+  /v1/music/generations:
+    post:
+      tags: [inference]
+      summary: Metered music generation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, prompt]
+              properties:
+                model: { type: string }
+                prompt: { type: string }
+                lyrics: { type: string }
+      responses:
+        "200":
+          description: Provider result (opaque)
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "402": { $ref: "#/components/responses/QuotaExhausted" }
+        "409": { $ref: "#/components/responses/ModelUnpriced" }
+
   /v1/chat/completions:
     post:
       tags: [inference]
@@ -197,7 +357,7 @@ paths:
       description: >-
         Gated on entitlement, rate limit, and remaining allowance, then forwarded to AI Gateway /
         Workers AI and metered. Metering facts ride in prism-* response headers so the body stays
-        consumable by an OpenAI SDK unchanged.
+        consumable by an OpenAI SDK unchanged. Non-chat models must use their modality doors.
       requestBody:
         required: true
         content:

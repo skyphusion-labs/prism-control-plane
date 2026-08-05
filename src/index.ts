@@ -11,11 +11,12 @@
 // Splitting them is what keeps "does the gate refuse" a unit test rather than an integration exercise.
 
 import { gatewayRunner } from "./upstream";
+import { nonChatRunnerFor } from "./nonchat-upstream";
 import { errorResponse, newRequestId } from "./http";
 import { d1Store } from "./store-d1";
 import { gatewayLogSource, type GatewayLogSource } from "./aig-logs";
 import { SharedTokenSource, type UpstreamCredentialSource } from "./token-minter";
-import { gatewayConfig, perUserModeRequested, type Env } from "./env";
+import { gatewayConfig, perUserModeRequested, upstreamTimeoutMs, type Env } from "./env";
 import type { ControlPlaneStore } from "./store";
 import {
   handleCreateAccount,
@@ -28,11 +29,26 @@ import {
 import { handleMe, handleModels, handleUsage } from "./routes/account";
 import { handleReconcile } from "./routes/reconcile";
 import { handleChatCompletions } from "./routes/chat";
+import {
+  handleAudioSpeech,
+  handleAudioTranscriptions,
+  handleImageGenerations,
+  handleMusicGenerations,
+  handleVideoGenerations,
+} from "./routes/nonchat";
 import { handleEnroll } from "./routes/clients";
 import { handleDeepHealth, handleHealth, SERVICE_NAME } from "./routes/health";
+import {
+  handleCreateSttSession,
+  handleSttStreamUpgrade,
+  isSttStreamUpgrade,
+} from "./routes/stt-stream";
 import type { Ctx } from "./routes/shared";
 
 export { SERVICE_NAME };
+// Durable Object class must be exported from the Worker entry (wrangler class_name).
+// Lazy re-export: tests import handleRequest without loading cloudflare:workers.
+export { SttSession } from "./stt-session";
 
 const REVOKE_CLIENT_PATH = /^\/admin\/clients\/([A-Za-z0-9_-]{1,64})\/revoke$/;
 const CREDIT_PATH = /^\/admin\/accounts\/([A-Za-z0-9_-]{1,64})\/credits$/;
@@ -89,8 +105,18 @@ export async function handleRequest(ctx: Ctx, request: Request): Promise<Respons
   const path = url.pathname.replace(/\/+$/, "") || "/";
   const method = request.method.toUpperCase();
 
+  // Live voice STT (Flux): WebSocket upgrade, not a POST body door.
+  if (path === "/v1/stt/stream" && isSttStreamUpgrade(request, path)) {
+    return await handleSttStreamUpgrade(ctx, request);
+  }
+
   if (method === "GET" && path === "/health") return handleHealth(ctx);
   if (method === "GET" && path === "/health/deep") return await handleDeepHealth(ctx);
+
+  // Browser path: mint short-lived stt_ ticket (never put pcp_ in Sec-WebSocket-Protocol).
+  if (method === "POST" && path === "/v1/stt/sessions") {
+    return await handleCreateSttSession(ctx, request);
+  }
 
   if (method === "POST" && path === "/v1/clients") return await handleEnroll(ctx, request);
   if (method === "GET" && path === "/v1/me") return await handleMe(ctx, request);
@@ -98,6 +124,21 @@ export async function handleRequest(ctx: Ctx, request: Request): Promise<Respons
   if (method === "GET" && path === "/v1/usage") return await handleUsage(ctx, request);
   if (method === "POST" && path === "/v1/chat/completions") {
     return await handleChatCompletions(ctx, request);
+  }
+  if (method === "POST" && path === "/v1/images/generations") {
+    return await handleImageGenerations(ctx, request);
+  }
+  if (method === "POST" && path === "/v1/audio/speech") {
+    return await handleAudioSpeech(ctx, request);
+  }
+  if (method === "POST" && path === "/v1/audio/transcriptions") {
+    return await handleAudioTranscriptions(ctx, request);
+  }
+  if (method === "POST" && path === "/v1/videos/generations") {
+    return await handleVideoGenerations(ctx, request);
+  }
+  if (method === "POST" && path === "/v1/music/generations") {
+    return await handleMusicGenerations(ctx, request);
   }
 
   if (method === "POST" && path === "/admin/accounts") return await handleCreateAccount(ctx, request);
@@ -131,6 +172,17 @@ export default {
       // POST /admin/reconcile into one. Every other route works normally, so a half-configured deploy
       // closes the door that costs money without taking the read surface down with it.
       runner: gatewayRunner(env),
+      nonChatRunner: (() => {
+        const gw = gatewayConfig(env);
+        if (!gw) return null;
+        return nonChatRunnerFor({
+          accountId: gw.accountId,
+          gatewayId: gw.id,
+          timeoutMs: upstreamTimeoutMs(env),
+          collectLog: gw.collectLog,
+          ai: env.AI,
+        });
+      })(),
       credentials: upstreamCredentialSource(env, store, () => Math.floor(now.getTime() / 1000)),
       logs: gatewayLogs(env),
       requestId,

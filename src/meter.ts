@@ -171,6 +171,41 @@ export function resolvePrice(entry: CatalogEntry, override: ModelPriceRow | null
 }
 
 /**
+ * Resolve the unit rate for a non-chat door. Operator unit_micro_usd wins when present and valid.
+ * Zero is a real measured free rate (same posture as LLaVA token zeros).
+ */
+export function resolveUnitPrice(
+  entry: CatalogEntry,
+  override: ModelPriceRow | null,
+): import("./catalog").UnitPrice | null {
+  if (override && override.unit_micro_usd !== null && override.unit_micro_usd !== undefined) {
+    const micro = override.unit_micro_usd;
+    if (!Number.isInteger(micro) || micro < 0) return null;
+    const base = entry.unitPrice;
+    return {
+      microUsdPerUnit: micro,
+      unit: base?.unit ?? "request",
+      pricedAt: override.priced_at,
+    };
+  }
+  return entry.unitPrice;
+}
+
+/**
+ * Price N units at a unit rate. Zero rate with any units is a real free charge (metered, 0).
+ * At least one unit is always charged for a successful request (callers pass units >= 1).
+ */
+export function priceUnits(
+  units: number,
+  unitPrice: import("./catalog").UnitPrice,
+): { microUsd: number; units: number } {
+  const n = Math.max(0, Math.floor(units));
+  if (n <= 0) return { microUsd: 0, units: 0 };
+  const microUsd = n * unitPrice.microUsdPerUnit;
+  return { microUsd, units: n };
+}
+
+/**
  * Price a usage object that arrived on its own, without a response body around it.
  *
  * This is the streaming path: the trailing SSE frame yields a bare `usage` object, and re-wrapping it so

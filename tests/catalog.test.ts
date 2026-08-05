@@ -27,11 +27,16 @@ describe("CATALOG", () => {
   });
 
   it("closes the door on every unpriced entry", () => {
-    // THE LOAD-BEARING INVARIANT. An unpriced model must not be spendable, in the catalog and with no
-    // override. If this ever inverts, the plane serves inference it cannot put a number on.
+    // THE LOAD-BEARING INVARIANT. Chat needs a token rate; non-chat needs a unit rate (and a door).
+    // Voice never has a door. If this ever inverts, the plane serves inference it cannot price.
     for (const entry of CATALOG) {
-      if (entry.price) continue;
-      expect(spendable(entry, null)).toBe(false);
+      if (entry.modality === "chat") {
+        if (entry.price) continue;
+        expect(spendable(entry, null, null)).toBe(false);
+      } else {
+        if (entry.unitPrice) continue;
+        expect(spendable(entry, null, null)).toBe(false);
+      }
     }
   });
 
@@ -83,6 +88,7 @@ describe("publicModel", () => {
       "spendable",
       "streaming",
       "tier",
+      "unit_price",
     ]);
   });
 

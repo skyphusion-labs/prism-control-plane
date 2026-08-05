@@ -5,6 +5,7 @@ import { errorResponse } from "../http";
 import type { Env } from "../env";
 import type { GatewayLogSource } from "../aig-logs";
 import type { InferenceRunner } from "../inference";
+import type { NonChatRunner } from "../nonchat-upstream";
 import type { Caller, ResolveFailure } from "../auth";
 import { resolveClient } from "../auth";
 import type { ControlPlaneStore } from "../store";
@@ -39,6 +40,8 @@ export interface Ctx {
   env: Env;
   store: ControlPlaneStore;
   runner: InferenceRunner | null;
+  /** Non-chat doors (image/tts/stt/video/music). Null when gateway wiring is missing. */
+  nonChatRunner: NonChatRunner | null;
   credentials: UpstreamCredentialSource | null;
   logs: GatewayLogSource | null;
   requestId: string;

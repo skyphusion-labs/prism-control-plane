@@ -88,11 +88,24 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
   // image or video model reaching here is a real client mistake and deserves its own answer rather than a
   // confusing shape error from a model that was never going to return a completion.
   if (model.modality !== "chat") {
+    const doorHint =
+      model.modality === "image"
+        ? "POST /v1/images/generations"
+        : model.modality === "tts"
+          ? "POST /v1/audio/speech"
+          : model.modality === "stt"
+            ? "POST /v1/audio/transcriptions"
+            : model.modality === "video"
+              ? "POST /v1/videos/generations"
+              : model.modality === "music"
+                ? "POST /v1/music/generations"
+                : model.modality === "voice"
+                  ? "GET/WS /v1/stt/stream (Deepgram Flux live mic)"
+                  : "no door for this modality";
     return errorResponse(
       ctx.requestId,
       "model_unsupported",
-      `Model "${model.id}" is a ${model.modality} model. This deployment exposes chat only; ` +
-        "its price is per tile, step or audio minute and no meter for those units exists yet.",
+      `Model "${model.id}" is a ${model.modality} model. Use ${doorHint}, not /v1/chat/completions.`,
       { modality: model.modality },
     );
   }

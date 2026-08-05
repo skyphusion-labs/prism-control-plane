@@ -53,11 +53,16 @@ export interface UserTokenRow {
   last_used_at: number | null;
 }
 
-/** An operator-set per-token rate. Overrides the compiled-in catalog price. */
+/**
+ * Operator-set rate override. Token columns for chat; optional unit_micro_usd for non-chat.
+ * unit_micro_usd null means this row is a token override only.
+ */
 export interface ModelPriceRow {
   model_id: string;
   input_micro_usd_per_mtok: number;
   output_micro_usd_per_mtok: number;
+  /** Integer micro-USD per catalog unit (request / audio_minute / k_characters). */
+  unit_micro_usd: number | null;
   priced_at: string;
   note: string | null;
 }
@@ -214,6 +219,8 @@ export interface ControlPlaneStore {
 
   /** Look up by the non-secret half of the bearer. The caller compares the secret hash itself. */
   getClientByKeyId(keyId: string): Promise<ClientRow | null>;
+  /** Look up by primary id (e.g. STT finalize after a signed handoff). */
+  getClient(clientId: string): Promise<ClientRow | null>;
   /** Best-effort last-seen stamp. A failure here must never fail the request it belongs to. */
   touchClient(clientId: string): Promise<void>;
   createClient(client: NewClient): Promise<ClientRow>;
@@ -233,6 +240,22 @@ export interface ControlPlaneStore {
     expires_at: string;
     note: string | null;
   }): Promise<void>;
+
+  /**
+   * Mint a short-lived STT session ticket (hash only; plaintext returns once on POST /v1/stt/sessions).
+   */
+  createSttTicket(args: {
+    token_hash: string;
+    account_id: string;
+    client_id: string;
+    expires_at: string;
+  }): Promise<void>;
+
+  /**
+   * Redeem an STT ticket. Single-use via conditional UPDATE (consumed_at IS NULL + not expired).
+   * Returns account/client binding or null (unknown, already used, or expired).
+   */
+  consumeSttTicket(tokenHash: string): Promise<{ account_id: string; client_id: string } | null>;
 
   getPeriod(accountId: string, periodKey: string): Promise<PeriodRow | null>;
 
