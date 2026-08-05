@@ -118,6 +118,17 @@ All paths are relative to the deployment origin. All request and response bodies
 | POST | `/v1/music/generations` | client key | Metered music generation (unit-priced). |
 | POST | `/v1/stt/sessions` | client key | Mint a single-use short-lived STT ticket (browser WS auth). |
 | GET/WS | `/v1/stt/stream` | client key or STT ticket | Live voice STT (Deepgram Flux). WebSocket upgrade. |
+| POST | `/admin/catalog/refresh` | admin | Pull chat token rates from AI Gateway `compat/models` into `model_prices`. Dry-run default. |
+
+### `POST /admin/catalog/refresh`
+
+Operator-only. Body required (every field optional). **`dry_run` omitted means true**; only
+`"dry_run": false` writes. `"force": true` overwrites `model_prices` rows with a non-`gateway-compat`
+note (hand-set operator rates).
+
+Source: `GET gateway.ai.cloudflare.com/v1/{account}/{gateway}/compat/models` with
+`cf-aig-authorization`. Writes token rates for **chat** catalog models only; never mutates
+`src/catalog.ts`. Unit rates for non-chat are unchanged.
 
 ### `GET /v1/models`
 
