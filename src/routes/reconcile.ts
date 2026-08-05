@@ -1,10 +1,8 @@
 // POST /admin/reconcile -- the operator door onto the AI Gateway cost true-up.
 //
-// AN OPERATOR ROUTE, NOT A CRON, and that is the whole reason this exists as a route at all. A scheduled
-// handler would give a robot with write access to a money column its own trigger before anybody had
-// watched it run once against real data. Pulling the trigger by hand means the first live run has a human
-// reading the report, and the dry run makes that reading free. A `[triggers]` cron can be added later by
-// calling `runReconcile` from a `scheduled` handler; nothing in the run path assumes a request.
+// OPERATOR ROUTE + shared core with the cron (src/scheduled.ts). The cron defaults to dry-run;
+// live apply on the schedule requires RECONCILE_CRON_LIVE=true. This route stays human-pulled for
+// the first live money writes: dry_run omitted-means-true, only literal false writes.
 //
 // DRY RUN IS THE DEFAULT AND IT IS ABSENT-MEANS-TRUE. `dry_run` omitted, null, or anything other than the
 // literal `false` previews. Only `"dry_run": false` writes money. A truthiness check would make

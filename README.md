@@ -132,8 +132,9 @@ attribution, priced catalog (**45/45 chat**), SSE metering, operator reconciliat
 (`POST /admin/reconcile`), and operator plan upsert (`POST /admin/plans`). Provisional `dev` plan
 covers standard+premium chat. Non-chat unit-metered doors and Flux live STT are built. **Catalog rate
 refresh:** `POST /admin/catalog/refresh` (operator; dry-run default) pulls chat rates from AI Gateway
-`compat/models` into `model_prices`. **Not built:** store-receipt enrollment, reconcile cron,
-commercial plan pricing. No overage billing, ever.
+`compat/models` into `model_prices`. **Reconcile cron:** hourly scheduled dry-run (live only with
+`RECONCILE_CRON_LIVE=true`). **Not built:** store-receipt enrollment, commercial plan pricing. No
+overage billing, ever.
 
 Full production wiring, the mermaid flowchart, and the reconciliation design are in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Agent-facing guidance, non-negotiables, and deploy /

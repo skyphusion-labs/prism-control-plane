@@ -85,7 +85,7 @@ flowchart TB
     gw --> wai
     gw --> prov
 
-    gw -.->|"cost + token counts<br/>(POST /admin/reconcile,<br/>operator-triggered, no cron yet)"| meter
+    gw -.->|"cost + token counts<br/>(POST /admin/reconcile + hourly cron,<br/>dry-run default; live needs flag)"| meter
 ```
 
 The dashed gateway-to-meter edge is deliberately non-continuous: `POST /admin/reconcile` reads
@@ -222,10 +222,13 @@ catalog chat ids (including `@cf` ↔ `workers-ai/@cf`, `xai` ↔ `grok`, `googl
 
 ## Reconciliation: truing the ledger up against the biller
 
-`POST /admin/reconcile`, operator-triggered. **There is no cron**, and that is a decision rather than an
-omission: this is a robot with write access to a money column, driven by another system's telemetry, so
-the first live runs happen with a human reading the report. A `scheduled` handler can call
-`runReconcile` later; nothing in the run path assumes a request.
+`POST /admin/reconcile`, operator-triggered, **and** an hourly Worker cron (`[triggers] crons`,
+`src/scheduled.ts`). Both call the same `runReconcile`. **Cron dry-run is the default:** money writes
+require the plain var `RECONCILE_CRON_LIVE=true`. That preserves the original decision (a robot with
+write access to a money column should not apply true-ups until a human has watched dry reports) while
+still continuous-logging drift. Admin POST is independent (still dry-run unless `"dry_run": false`).
+First cron tick without a watermark uses a 7-day lookback floor (configurable
+`RECONCILE_CRON_INITIAL_LOOKBACK_DAYS`).
 
 **Dry run is the default and it is absent-means-true.** Only a literal `"dry_run": false` writes money. A
 dry run does every read, join and decision and reports exactly what it would move, while writing
