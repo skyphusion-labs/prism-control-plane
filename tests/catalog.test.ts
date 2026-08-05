@@ -79,6 +79,7 @@ describe("publicModel", () => {
   it("projects exactly the contract's model fields", () => {
     expect(Object.keys(publicModel(CATALOG[0], null)).sort()).toEqual([
       "billing",
+      "capabilities",
       "display_name",
       "id",
       "max_output_tokens",

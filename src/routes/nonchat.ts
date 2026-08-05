@@ -461,7 +461,10 @@ export async function handleImageGenerations(ctx: Ctx, request: Request): Promis
   if (!prompt) {
     return errorResponse(ctx.requestId, "invalid_request", '"prompt" is required.');
   }
-  const params = buildImageParams(gate.model.id, prompt);
+  // Optional reference image for i2i / edit models (https or data:).
+  const imageUrl =
+    requireString(raw, "image") ?? requireString(raw, "image_url") ?? undefined;
+  const params = buildImageParams(gate.model.id, prompt, imageUrl);
   const up = await runUpstream(ctx, gate, params);
   if (!up.ok) return up.response;
   const fail = providerStateFailed(up.body);

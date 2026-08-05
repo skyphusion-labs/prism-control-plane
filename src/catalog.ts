@@ -1656,6 +1656,63 @@ export function spendable(
 }
 
 /**
+ * Client picker hints (not entitlement).
+ *
+ * Image:
+ * - `text-to-image`: works from prompt alone (pure t2i or dual)
+ * - `image-input`: accepts a reference image for i2i / edit / multi-ref
+ *   A large share of the catalog is dual-mode (t2i + refs). Flux 2 multi-ref,
+ *   nano-banana, gpt-image, and Grok Imagine Image are the main i2i paths;
+ *   pure t2i (Flux-1 schnell, SDXL, Seedream, Recraft, Imagen, Leonardo) omit this.
+ * - `image-input-required`: must pass image (none on image modality today)
+ *
+ * Video:
+ * - `text-to-video`, `image-input`, `image-input-required` (Hailuo is i2v-only)
+ */
+export function capabilitiesFor(entry: CatalogEntry): string[] {
+  if (entry.modality === "image") {
+    const caps = ["text-to-image"];
+    // Dual / i2i-capable: prompt alone still works, but product value is often the ref path.
+    if (imageAcceptsReference(entry.id)) {
+      caps.push("image-input");
+    }
+    return caps;
+  }
+  if (entry.modality === "video") {
+    const caps: string[] = [];
+    // Most video models can t2v; Hailuo is i2v-only on CF.
+    if (entry.id.startsWith("minimax/hailuo")) {
+      caps.push("image-input", "image-input-required");
+    } else {
+      caps.push("text-to-video");
+      if (
+        entry.id.startsWith("bytedance/seedance") ||
+        entry.id.startsWith("xai/grok-imagine-video") ||
+        entry.id.startsWith("runwayml/") ||
+        entry.id.includes("-i2v")
+      ) {
+        caps.push("image-input");
+      }
+    }
+    return caps;
+  }
+  return [];
+}
+
+/** True when the CF / UB schema accepts a reference image for i2i / edit. */
+export function imageAcceptsReference(modelId: string): boolean {
+  // Flux 2 family: multi-reference (input_image_0..3). Label says multi-ref on -dev.
+  if (modelId.includes("flux-2")) return true;
+  // Google nano-banana*: image_input[] for identity / edit (heavily used with refs).
+  if (modelId.startsWith("google/nano-banana")) return true;
+  // OpenAI gpt-image*: images[] for edit alongside prompt generation.
+  if (modelId.startsWith("openai/gpt-image")) return true;
+  // xAI Grok Imagine Image: optional image object for edit / i2i.
+  if (modelId.startsWith("xai/grok-imagine-image")) return true;
+  return false;
+}
+
+/**
  * The client-facing projection. One place, so GET /v1/models and the contract cannot drift.
  *
  * `spendable` is computed, not stored. Token rates land in `price`; unit rates land in `unit_price`.
@@ -1679,6 +1736,8 @@ export function publicModel(
     streaming: entry.streaming,
     max_output_tokens: entry.maxOutputTokens,
     spendable: spendable(entry, tOverride, uOverride),
+    // Client hints for pickers (not entitlement). image-input = accepts a reference image.
+    capabilities: capabilitiesFor(entry),
     price:
       price === null
         ? null
