@@ -25,6 +25,12 @@ export interface InferenceRequest {
   /** The UPSTREAM model id from the catalog entry, never the client's raw string. */
   upstreamModel: string;
   /**
+   * When set, the runner uses `env.AI.run(bindingModel, …)` (Workers AI binding + gateway)
+   * instead of the HTTP `/compat` path. Catalog public `id` for models that need Unified
+   * Billing credential injection the legacy gateway allowlist does not provide.
+   */
+  bindingModel?: string;
+  /**
    * Which billing surface this model sits on, carried FROM THE CATALOG rather than re-derived.
    *
    * It selects the gateway endpoint in upstream.ts. Sniffing an `@cf/` prefix at the call site would
@@ -92,6 +98,18 @@ export function extractText(body: unknown): string | null {
     const content = first?.message?.content;
     if (typeof content === "string") return content;
     if (typeof first?.text === "string") return first.text;
+  }
+
+  // Anthropic Messages API (env.AI.run binding for Fable etc.): only type:"text" blocks.
+  // Thinking / tool blocks are ignored (same discipline as prism extractOutput).
+  const content = asRecord.content;
+  if (Array.isArray(content)) {
+    const text = content
+      .filter((b): b is { type?: string; text?: string } => !!b && typeof b === "object")
+      .filter((b) => b.type === "text" && typeof b.text === "string")
+      .map((b) => b.text as string)
+      .join("");
+    if (text) return text;
   }
 
   // Some model families come back wrapped in `{ result: ... }`. One level of unwrapping, not a recursive

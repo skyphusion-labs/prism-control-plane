@@ -78,7 +78,7 @@
 // own arithmetic against the biller's is trusting itself for no reason.
 // https://developers.cloudflare.com/ai-gateway/observability/logging/
 
-import type { Billing } from "./catalog";
+import { findModel, type Billing } from "./catalog";
 import { LLAVA_MODEL_ID } from "./chat-request";
 import { gatewayConfig, upstreamTimeoutMs, type Env } from "./env";
 import type { InferenceRequest, InferenceResult, InferenceRunner } from "./inference";
@@ -94,6 +94,11 @@ export interface GatewayRunnerDeps {
   timeoutMs: number;
   collectLog: boolean;
   fetchImpl?: typeof fetch;
+  /**
+   * Workers AI binding. Required for catalog `binding: true` chat models (Fable, Grok 4.5).
+   * Absent: those models return upstream_error rather than falling back to broken /compat.
+   */
+  ai?: Ai;
 }
 
 /**
@@ -134,10 +139,149 @@ export function upstreamUrl(deps: GatewayRunnerDeps, billing: Billing): string {
  * plane would surface as `upstream_error` with no usable completion.
  */
 export function outputTokenField(upstreamModel: string): "max_tokens" | "max_completion_tokens" {
-  if (upstreamModel.startsWith("openai/") || upstreamModel.startsWith("xai/")) {
+  // Compat Grok ids are `grok/*` (provider slug); public catalog ids remain `xai/*` for binding.
+  if (
+    upstreamModel.startsWith("openai/") ||
+    upstreamModel.startsWith("xai/") ||
+    upstreamModel.startsWith("grok/")
+  ) {
     return "max_completion_tokens";
   }
   return "max_tokens";
+}
+
+/**
+ * Body for env.AI.run on binding-dispatch chat models.
+ *
+ * Anthropic binding expects Messages API shape (system top-level, content blocks).
+ * Grok / OpenAI-shaped bindings take Chat Completions (messages + max_completion_tokens).
+ * Model id is the first argument to run(), not a body field.
+ */
+export function bindingChatBody(request: InferenceRequest): Record<string, unknown> {
+  const modelId = request.bindingModel ?? request.upstreamModel;
+  if (modelId.startsWith("anthropic/")) {
+    const systemParts: string[] = [];
+    const messages: Array<{ role: "user" | "assistant"; content: Array<{ type: "text"; text: string }> }> =
+      [];
+    for (const m of request.messages) {
+      if (m.role === "system") {
+        if (m.content.trim()) systemParts.push(m.content);
+        continue;
+      }
+      if (m.role !== "user" && m.role !== "assistant") continue;
+      messages.push({
+        role: m.role,
+        content: [{ type: "text", text: m.content }],
+      });
+    }
+    const body: Record<string, unknown> = {
+      max_tokens: request.maxTokens,
+      messages,
+    };
+    if (systemParts.length) body.system = systemParts.join("\n\n");
+    if (request.stream) body.stream = true;
+    if (request.temperature !== undefined) body.temperature = request.temperature;
+    if (request.topP !== undefined) body.top_p = request.topP;
+    return body;
+  }
+
+  // OpenAI-compatible (Grok via binding uses public xai/* id + max_completion_tokens).
+  const body: Record<string, unknown> = {
+    messages: request.messages,
+    max_completion_tokens: request.maxTokens,
+  };
+  if (request.stream) {
+    body.stream = true;
+    body.stream_options = { include_usage: true };
+  }
+  if (request.temperature !== undefined) body.temperature = request.temperature;
+  if (request.topP !== undefined) body.top_p = request.topP;
+  return body;
+}
+
+/**
+ * Binding chat is only for catalog entries flagged `binding: true`.
+ * The public `id` is the allowlist key (what env.AI.run expects); never a client string.
+ */
+export function isAllowedBindingChatModel(bindingModel: string): boolean {
+  const entry = findModel(bindingModel);
+  return !!entry && entry.modality === "chat" && entry.binding === true && entry.id === bindingModel;
+}
+
+async function runViaBinding(
+  deps: GatewayRunnerDeps,
+  request: InferenceRequest,
+): Promise<InferenceResult> {
+  const ai = deps.ai;
+  const bindingModel = request.bindingModel;
+  if (!ai || !bindingModel) {
+    return {
+      outcome: "upstream_error",
+      status: null,
+      detail:
+        "This model requires the Worker AI binding (catalog binding: true). " +
+        "Add [ai] binding = \"AI\" to wrangler config.",
+    };
+  }
+
+  // Defense in depth: chat.ts only sets bindingModel from the catalog, but the runner
+  // refuses any other string so a future caller cannot point env.AI.run at an arbitrary id.
+  if (!isAllowedBindingChatModel(bindingModel)) {
+    return {
+      outcome: "upstream_error",
+      status: null,
+      detail: `Model is not allowlisted for AI binding dispatch: ${bindingModel.slice(0, 80)}`,
+    };
+  }
+
+  type RunFn = (
+    model: string,
+    params: unknown,
+    opts?: { gateway?: { id: string } },
+  ) => Promise<unknown>;
+
+  // INTENTIONAL: not HTTP + cf-aig-authorization. Cloudflare injects Unified Billing only via
+  // env.AI.run for these ids (legacy /compat allowlist is frozen). gateway: { id } still routes
+  // the call through AI_GATEWAY_ID for logs/reconcile. Money authority remains the D1 ledger after
+  // the call (same posture as non-chat UB binding). See docs/security-false-positives.md.
+  try {
+    const result = await Promise.race([
+      (ai as unknown as { run: RunFn }).run(bindingModel, bindingChatBody(request), {
+        gateway: { id: deps.gatewayId },
+      }),
+      new Promise<never>((_, reject) => {
+        setTimeout(
+          () => reject(Object.assign(new Error("timeout"), { name: "TimeoutError" })),
+          deps.timeoutMs,
+        );
+      }),
+    ]);
+
+    const logId =
+      (ai as unknown as { aiGatewayLogId?: string }).aiGatewayLogId ?? null;
+
+    if (request.stream) {
+      if (!(result instanceof ReadableStream)) {
+        return {
+          outcome: "upstream_error",
+          status: null,
+          detail: `binding stream expected ReadableStream, got ${typeof result}`,
+        };
+      }
+      return { outcome: "stream", stream: result as ReadableStream<Uint8Array>, gatewayLogId: logId };
+    }
+
+    return { outcome: "ok", body: result, gatewayLogId: logId };
+  } catch (err) {
+    const aborted = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+    if (aborted) return { outcome: "timeout", waitedMs: deps.timeoutMs };
+    // Do not echo raw provider/body dumps to the client path; keep a short operator-safe string.
+    return {
+      outcome: "upstream_error",
+      status: null,
+      detail: String(err instanceof Error ? err.message : err).slice(0, 200),
+    };
+  }
 }
 
 /**
@@ -192,6 +336,7 @@ export function gatewayRunner(env: Env): InferenceRunner | null {
     gatewayId: gateway.id,
     timeoutMs: upstreamTimeoutMs(env),
     collectLog: gateway.collectLog,
+    ai: env.AI,
   });
 }
 
@@ -244,6 +389,11 @@ export function runnerFor(deps: GatewayRunnerDeps): InferenceRunner {
 
   return {
     async run(request: InferenceRequest): Promise<InferenceResult> {
+      // Binding-first for catalog models that cannot use keyless /compat (Fable, Grok 4.5).
+      if (request.bindingModel) {
+        return runViaBinding(deps, request);
+      }
+
       const isLlava = request.upstreamModel === LLAVA_MODEL_ID;
       if (isLlava && !request.imageBytes?.byteLength) {
         return {

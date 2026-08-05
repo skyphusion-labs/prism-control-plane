@@ -58,6 +58,29 @@ Each entry names the finding, why it is not a defect, and when to reopen it.
 - This plane is a **user AI proxy**; the user's prompt is the product input. We forward only
   **whitelisted primitives** from `build*Params` with length caps, not raw client JSON spreads.
 
+## Chat AI binding for Fable / Grok 4.5 (high FP)
+
+- **Audit title:** "Binding path bypasses cf-aig-authorization and gateway URL pinning"
+- **Why accepted (with hardening):** Same class as non-chat Unified Billing via `env.AI.run`. CF's
+  legacy `/compat` allowlist does **not** inject UB credentials for `anthropic/claude-fable-5` or
+  `xai/grok-4.5` (measured 401 / "No credentials presented"). The binding path is the only
+  working door. Mitigations already in code:
+  - `bindingModel` is set only from catalog `id` when `entry.binding === true` (chat route).
+  - `isAllowedBindingChatModel` re-checks the catalog in the runner (refuse arbitrary ids).
+  - `gateway: { id: AI_GATEWAY_ID }` still attributes logs for reconcile.
+  - Money authority is the **D1 ledger** after the call, not the gateway header shape.
+- **Reopen when:** CF documents a working keyless `/compat` path for these ids, or the binding
+  path can take an explicit `cf-aig-authorization` equivalent.
+
+## /compat never sets plain Authorization (high FP)
+
+- **Audit title:** "Credentials in cf-aig-authorization may be forwarded as BYOK Authorization"
+- **Why FP:** `upstreamHeaders` sets **only** `cf-aig-authorization: Bearer <CF_AIG_TOKEN>` and
+  deliberately omits `authorization` / `x-api-key`. On `/compat`, a plain `Authorization` value
+  would be the **provider** key slot; we never put the Cloudflare token there. Client `pcp_` keys
+  never leave the Worker on the upstream hop.
+- **Reopen when:** a code path copies client or CF tokens into `authorization` on the gateway host.
+
 ## Sec-WebSocket-Protocol residual (fixed, not FP)
 
 - **Was:** long-lived `pcp_…` client keys accepted in `Sec-WebSocket-Protocol` for browser WS

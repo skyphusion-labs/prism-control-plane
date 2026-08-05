@@ -98,7 +98,23 @@ export interface CatalogEntry {
    * change to every installed client.
    */
   id: string;
+  /**
+   * Id sent on the HTTP gateway path (`/compat` or `/workers-ai`).
+   *
+   * May differ from `id` when Cloudflare's compat provider prefix is not the public id prefix
+   * (measured 2026-08-05: public `xai/grok-*` must hit compat as `grok/grok-*` or the gateway
+   * answers 400 `Invalid provider`).
+   */
   upstream: string;
+  /**
+   * When true, chat dispatches via `env.AI.run(id, …, { gateway })` instead of HTTP `/compat`.
+   *
+   * Needed for models CF's legacy gateway allowlist does not inject Unified Billing credentials
+   * for (measured: `anthropic/claude-fable-5` → provider 401; `xai/grok-4.5` → no credentials on
+   * `grok/grok-4.5`). Prism already flags these `binding: true` for the same reason. Public `id`
+   * is what the binding catalog expects.
+   */
+  binding?: boolean;
   displayName: string;
   modality: Modality;
   billing: Billing;
@@ -135,6 +151,8 @@ export const CATALOG: readonly CatalogEntry[] = [
   {
     id: "anthropic/claude-fable-5",
     upstream: "anthropic/claude-fable-5",
+    // /compat keyless → Anthropic 401 Invalid API Key; env.AI.run injects UB.
+    binding: true,
     displayName: "Claude Fable 5 (Anthropic)",
     modality: "chat",
     billing: "unified-billing",
@@ -277,8 +295,12 @@ export const CATALOG: readonly CatalogEntry[] = [
     publishedRates: [],
   },
   {
+    // Public id stays xai/* (prism catalog). Compat provider is `grok`, not `xai`
+    // (xai/* → 400 Invalid provider). Grok 4.5 also needs binding: keyless
+    // grok/grok-4.5 answers "No credentials presented".
     id: "xai/grok-4.5",
-    upstream: "xai/grok-4.5",
+    upstream: "grok/grok-4.5",
+    binding: true,
     displayName: "Grok 4.5 (xAI)",
     modality: "chat",
     billing: "unified-billing",
@@ -296,7 +318,7 @@ export const CATALOG: readonly CatalogEntry[] = [
   },
   {
     id: "xai/grok-4.3",
-    upstream: "xai/grok-4.3",
+    upstream: "grok/grok-4.3",
     displayName: "Grok 4.3 (xAI)",
     modality: "chat",
     billing: "unified-billing",
@@ -314,7 +336,7 @@ export const CATALOG: readonly CatalogEntry[] = [
   },
   {
     id: "xai/grok-4.20-multi-agent-0309",
-    upstream: "xai/grok-4.20-multi-agent-0309",
+    upstream: "grok/grok-4.20-multi-agent-0309",
     displayName: "Grok 4.20 Multi-Agent (xAI)",
     modality: "chat",
     billing: "unified-billing",
@@ -332,7 +354,7 @@ export const CATALOG: readonly CatalogEntry[] = [
   },
   {
     id: "xai/grok-4.20-0309-reasoning",
-    upstream: "xai/grok-4.20-0309-reasoning",
+    upstream: "grok/grok-4.20-0309-reasoning",
     displayName: "Grok 4.20 Reasoning (xAI)",
     modality: "chat",
     billing: "unified-billing",

@@ -282,6 +282,8 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
   // 11. Spend.
   const result = await ctx.runner.run({
     upstreamModel: model.upstream,
+    // Fable / Grok 4.5: env.AI.run with the public catalog id (binding injects UB).
+    ...(model.binding ? { bindingModel: model.id } : {}),
     // Selects the gateway endpoint: Workers AI models take the provider-native path, third-party
     // Unified Billing models take the OpenAI-compatible one. See src/upstream.ts.
     billing: model.billing,

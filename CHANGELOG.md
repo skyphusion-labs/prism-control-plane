@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **Grok + Fable chat on play-proxy.** Root causes measured against AI Gateway:
+  - Public catalog ids `xai/grok-*` hit `/compat` as provider `xai` → **400 Invalid provider**. Compat expects **`grok/grok-*`**. Catalog `upstream` for Grok chat remapped; public `id` stays `xai/*` for clients.
+  - **Grok 4.5** and **Claude Fable 5** still fail keyless `/compat` (no credentials / Invalid Anthropic API Key). Same as prism: dispatch via **`env.AI.run` binding** with `gateway: { id }` (catalog `binding: true`).
+  - `outputTokenField` treats `grok/*` like OpenAI/xAI (`max_completion_tokens`).
+  - `extractText` accepts Anthropic Messages `content[]` blocks from the binding path.
+  - Runner re-allowlists `bindingModel` (`isAllowedBindingChatModel`); security FP notes for
+    binding + `/compat` Authorization posture in `docs/security-false-positives.md`.
+
+### Fixed (prior)
+
 - **Dev plan `max_output_tokens` 1024 → 8192** (migration `0008`). 1024 was a provisional seed, not a normal chat ceiling; Opus/Sonnet on hard prompts burned the budget on invisible reasoning and returned empty content with `finish_reason=length`. Live D1 already applied; this lands the migration in git for deploy parity.
 
 ## [0.4.0] - 2026-08-05
