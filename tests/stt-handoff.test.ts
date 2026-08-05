@@ -8,7 +8,13 @@ import {
   STT_HANDOFF_TTL_SEC,
 } from "../src/stt-handoff";
 import { assertCatalogUpstream, safeCfRunPath } from "../src/nonchat-upstream";
-import { bearerFromSttUpgrade, STT_WS_PROTOCOL } from "../src/routes/stt-stream";
+import {
+  authFromSttUpgrade,
+  bearerFromSttUpgrade,
+  parseSttTicket,
+  STT_TICKET_PREFIX,
+  STT_WS_PROTOCOL,
+} from "../src/routes/stt-stream";
 
 describe("stt handoff HMAC", () => {
   const secret = "test-cf-aig-token-not-real";
@@ -78,18 +84,19 @@ describe("parseClientKey on WS candidates", () => {
   });
 });
 
-describe("bearerFromSttUpgrade grammar", () => {
-  it("rejects protocol token that is not a full pcp key", () => {
+describe("authFromSttUpgrade grammar", () => {
+  it("rejects junk protocol tokens", () => {
     const req = new Request("https://example.invalid/v1/stt/stream", {
       headers: {
         upgrade: "websocket",
         "sec-websocket-protocol": `${STT_WS_PROTOCOL}, pcp_foo`,
       },
     });
+    expect(authFromSttUpgrade(req).kind).toBeNull();
     expect(bearerFromSttUpgrade(req).bearer).toBeNull();
   });
 
-  it("accepts a well-formed key in the protocol list", () => {
+  it("rejects well-formed pcp keys in the protocol list", () => {
     const key = `pcp_${"b".repeat(16)}_${"B".repeat(43)}`;
     const req = new Request("https://example.invalid/v1/stt/stream", {
       headers: {
@@ -97,6 +104,21 @@ describe("bearerFromSttUpgrade grammar", () => {
         "sec-websocket-protocol": `${STT_WS_PROTOCOL}, ${key}`,
       },
     });
-    expect(bearerFromSttUpgrade(req).bearer).toBe(key);
+    expect(authFromSttUpgrade(req).kind).toBeNull();
+    expect(bearerFromSttUpgrade(req).bearer).toBeNull();
+  });
+
+  it("accepts a well-formed stt_ ticket in the protocol list", () => {
+    const ticket = `${STT_TICKET_PREFIX}_${"C".repeat(43)}`;
+    const req = new Request("https://example.invalid/v1/stt/stream", {
+      headers: {
+        upgrade: "websocket",
+        "sec-websocket-protocol": `${STT_WS_PROTOCOL}, ${ticket}`,
+      },
+    });
+    const auth = authFromSttUpgrade(req);
+    expect(auth.kind).toBe("stt_ticket");
+    if (auth.kind === "stt_ticket") expect(auth.ticket).toBe(ticket);
+    expect(parseSttTicket(ticket)).toBe(ticket);
   });
 });

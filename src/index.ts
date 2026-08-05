@@ -38,7 +38,11 @@ import {
 } from "./routes/nonchat";
 import { handleEnroll } from "./routes/clients";
 import { handleDeepHealth, handleHealth, SERVICE_NAME } from "./routes/health";
-import { handleSttStreamUpgrade, isSttStreamUpgrade } from "./routes/stt-stream";
+import {
+  handleCreateSttSession,
+  handleSttStreamUpgrade,
+  isSttStreamUpgrade,
+} from "./routes/stt-stream";
 import type { Ctx } from "./routes/shared";
 
 export { SERVICE_NAME };
@@ -108,6 +112,11 @@ export async function handleRequest(ctx: Ctx, request: Request): Promise<Respons
 
   if (method === "GET" && path === "/health") return handleHealth(ctx);
   if (method === "GET" && path === "/health/deep") return await handleDeepHealth(ctx);
+
+  // Browser path: mint short-lived stt_ ticket (never put pcp_ in Sec-WebSocket-Protocol).
+  if (method === "POST" && path === "/v1/stt/sessions") {
+    return await handleCreateSttSession(ctx, request);
+  }
 
   if (method === "POST" && path === "/v1/clients") return await handleEnroll(ctx, request);
   if (method === "GET" && path === "/v1/me") return await handleMe(ctx, request);

@@ -18,9 +18,11 @@ gates, dual-pool spend (monthly allowance then prepaid credit, issue #11), the p
 (**45/45 chat** token-priced; non-chat **unit-priced doors** for image/tts/stt/video/music), SSE
 streaming, shared `CF_AIG_TOKEN`, `POST /admin/reconcile`, adversarial audit CI, `POST /admin/plans`.
 Non-chat doors: `/v1/images/generations`, `/v1/audio/speech`, `/v1/audio/transcriptions`,
-`/v1/videos/generations`, `/v1/music/generations`. Live voice: `GET/WS /v1/stt/stream` (Deepgram Flux
-via AI binding + `STT_SESSION` DO; meters audio minutes, no transcript stored). UB non-@cf non-chat
-uses the same AI binding through the gateway. **Not built:** auto catalog refresh, receipt enrollment,
+`/v1/videos/generations`, `/v1/music/generations`. Live voice: `POST /v1/stt/sessions` (mint
+short-lived `stt_` ticket) + `GET/WS /v1/stt/stream` (Deepgram Flux via AI binding + `STT_SESSION`
+DO; meters audio minutes, no transcript stored). Browser WS uses the ticket in
+`Sec-WebSocket-Protocol`, never the long-lived `pcp_` key. UB non-@cf non-chat uses the same AI
+binding through the gateway. **Not built:** auto catalog refresh, receipt enrollment,
 reconcile cron, commercial plan numbers. Aviation-grade `main`.
 
 **The spend path addresses the AI Gateway host**

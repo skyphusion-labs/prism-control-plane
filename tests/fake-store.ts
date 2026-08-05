@@ -10,6 +10,7 @@
 //     row was actually new
 //   - an unmetered event advances requests and unmetered_requests but NOT micro_usd
 //   - consumeEnrollment is single-use and honours expiry
+//   - consumeSttTicket is single-use and honours expiry
 //   - revokeClient is idempotent and reports whether THIS call revoked a live client
 //   - grantCredit is idempotent on the operator's key and reports whether THIS call granted
 //   - a metered event advances accounts.spent_micro_usd, which is the column the money gate reads
@@ -44,6 +45,15 @@ export class FakeStore implements ControlPlaneStore {
   enrollments = new Map<
     string,
     { account_id: string; expires_at: string; consumed_at: string | null; consumed_by_client: string | null }
+  >();
+  sttTickets = new Map<
+    string,
+    {
+      account_id: string;
+      client_id: string;
+      expires_at: string;
+      consumed_at: string | null;
+    }
   >();
   periods = new Map<string, PeriodRow>();
   events: UsageEvent[] = [];
@@ -191,6 +201,29 @@ export class FakeStore implements ControlPlaneStore {
       consumed_at: null,
       consumed_by_client: null,
     });
+  }
+
+  async createSttTicket(args: {
+    token_hash: string;
+    account_id: string;
+    client_id: string;
+    expires_at: string;
+  }) {
+    this.sttTickets.set(args.token_hash, {
+      account_id: args.account_id,
+      client_id: args.client_id,
+      expires_at: args.expires_at,
+      consumed_at: null,
+    });
+  }
+
+  async consumeSttTicket(tokenHash: string) {
+    const row = this.sttTickets.get(tokenHash);
+    if (!row) return null;
+    if (row.consumed_at) return null;
+    if (new Date(row.expires_at).getTime() <= this.nowSeconds * 1000) return null;
+    row.consumed_at = this.iso();
+    return { account_id: row.account_id, client_id: row.client_id };
   }
 
   async getPeriod(accountId: string, periodKey: string) {

@@ -214,6 +214,38 @@ export function d1Store(db: D1Database): ControlPlaneStore {
         .run();
     },
 
+    async createSttTicket(args) {
+      await db
+        .prepare(
+          `INSERT INTO stt_tickets (token_hash, account_id, client_id, expires_at)
+           VALUES (?, ?, ?, ?)`,
+        )
+        .bind(args.token_hash, args.account_id, args.client_id, args.expires_at)
+        .run();
+    },
+
+    /**
+     * Single-use redemption (same meta.changes guard as enrollments).
+     * Expiry compared in SQLite so the clock matches stored timestamps.
+     */
+    async consumeSttTicket(tokenHash) {
+      const result = await db
+        .prepare(
+          `UPDATE stt_tickets
+              SET consumed_at = datetime('now')
+            WHERE token_hash = ?
+              AND consumed_at IS NULL
+              AND datetime(expires_at) > datetime('now')`,
+        )
+        .bind(tokenHash)
+        .run();
+      if (!result.meta.changes) return null;
+      return await db
+        .prepare(`SELECT account_id, client_id FROM stt_tickets WHERE token_hash = ?`)
+        .bind(tokenHash)
+        .first<{ account_id: string; client_id: string }>();
+    },
+
     async getPeriod(accountId, periodKey) {
       return await db
         .prepare(

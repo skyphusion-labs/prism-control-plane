@@ -241,6 +241,22 @@ export interface ControlPlaneStore {
     note: string | null;
   }): Promise<void>;
 
+  /**
+   * Mint a short-lived STT session ticket (hash only; plaintext returns once on POST /v1/stt/sessions).
+   */
+  createSttTicket(args: {
+    token_hash: string;
+    account_id: string;
+    client_id: string;
+    expires_at: string;
+  }): Promise<void>;
+
+  /**
+   * Redeem an STT ticket. Single-use via conditional UPDATE (consumed_at IS NULL + not expired).
+   * Returns account/client binding or null (unknown, already used, or expired).
+   */
+  consumeSttTicket(tokenHash: string): Promise<{ account_id: string; client_id: string } | null>;
+
   getPeriod(accountId: string, periodKey: string): Promise<PeriodRow | null>;
 
   /**

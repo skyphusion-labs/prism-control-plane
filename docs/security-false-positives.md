@@ -57,3 +57,12 @@ Each entry names the finding, why it is not a defect, and when to reopen it.
 
 - This plane is a **user AI proxy**; the user's prompt is the product input. We forward only
   **whitelisted primitives** from `build*Params` with length caps, not raw client JSON spreads.
+
+## Sec-WebSocket-Protocol residual (fixed, not FP)
+
+- **Was:** long-lived `pcp_…` client keys accepted in `Sec-WebSocket-Protocol` for browser WS
+  (browsers cannot set Authorization on upgrade).
+- **Fix:** `POST /v1/stt/sessions` mints a single-use `stt_…` ticket (60s, hashed in D1);
+  protocol list accepts only `prism.v1, stt_…`. Native clients still use `Authorization: Bearer pcp_…`.
+- **Reopen when:** a browser can set custom upgrade headers, or we move auth fully off the protocol
+  list (e.g. first-message ticket after connect).

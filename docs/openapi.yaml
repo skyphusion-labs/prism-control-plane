@@ -190,14 +190,42 @@ paths:
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
+  /v1/stt/sessions:
+    post:
+      tags: [inference]
+      summary: Mint a short-lived STT session ticket
+      description: >-
+        Authenticate with Authorization Bearer pcp_…. Returns a single-use stt_ ticket (default 60s)
+        for browser WebSocket auth via Sec-WebSocket-Protocol. Do not put the long-lived client key
+        in the protocol list.
+      security:
+        - clientKey: []
+      responses:
+        "200":
+          description: Ticket minted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ticket, expires_at, expires_in, protocol, stream_path]
+                properties:
+                  ticket: { type: string, description: "stt_… plaintext (shown once)" }
+                  expires_at: { type: string, format: date-time }
+                  expires_in: { type: integer, description: "Seconds until expiry" }
+                  protocol: { type: string, example: prism.v1 }
+                  stream_path: { type: string, example: /v1/stt/stream }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
   /v1/stt/stream:
     get:
       tags: [inference]
       summary: Live voice STT (Deepgram Flux WebSocket)
       description: >-
-        WebSocket upgrade only. Auth via Authorization Bearer (preferred) or
-        Sec-WebSocket-Protocol `prism.v1, <clientKey>` (browsers). Query tokens are rejected.
-        Bridges to @cf/deepgram/flux; meters audio minutes on close (15 min wall-clock cap).
+        WebSocket upgrade only. Auth via Authorization Bearer pcp_… (preferred, native) or
+        Sec-WebSocket-Protocol `prism.v1, stt_…` after POST /v1/stt/sessions (browsers).
+        Long-lived client keys and query tokens are rejected on the upgrade. Bridges to
+        @cf/deepgram/flux; meters audio minutes on close (15 min wall-clock cap).
         Requires AI + STT_SESSION bindings.
       responses:
         "101":

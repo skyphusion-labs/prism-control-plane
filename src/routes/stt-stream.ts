@@ -1,23 +1,52 @@
-// WebSocket upgrade for live voice STT (Deepgram Flux).
+// WebSocket upgrade for live voice STT (Deepgram Flux) + short-lived session tickets.
 //
-// Auth + entitlement happen here; the Durable Object only bridges sockets and meters on close.
-// Clients may send the client key as Authorization: Bearer, or as ?access_token= for stacks that
-// cannot set upgrade headers (some browsers). Prefer Authorization on native clients.
+// Auth happens here; the Durable Object only bridges sockets and meters on close.
+//
+// TWO paths (never put the long-lived client key in Sec-WebSocket-Protocol):
+//
+//   1. Native: Authorization: Bearer pcp_... on the upgrade (preferred).
+//   2. Browser: POST /v1/stt/sessions with Bearer pcp_... → stt_ ticket,
+//      then new WebSocket(url, ["prism.v1", ticket]). Protocol carries only the
+//      single-use short-lived ticket; query tokens are rejected (proxy logs).
 
-import { bearerFromRequest, parseClientKey, resolveClient } from "../auth";
+import { bearerFromRequest, parseClientKey, resolveClient, type Caller } from "../auth";
 import { decideBalance, remainingAllowanceMicroUsd, remainingMicroUsd } from "../balance";
 import { findModel } from "../catalog";
-import { newId } from "../crypto";
-import { errorResponse } from "../http";
+import { newId, randomSecret, sha256Hex } from "../crypto";
+import {
+  FLUX_STT_MODEL,
+  STT_TICKET_PREFIX,
+  STT_TICKET_TTL_SEC,
+  STT_WS_PROTOCOL,
+} from "../flux-stt";
+import { errorResponse, jsonResponse } from "../http";
 import { resolveUnitPrice } from "../meter";
 import { periodBounds } from "../period";
 import { entitlesTier, planFromRow } from "../plans";
 import { checkRateLimit, inferenceBucket } from "../rate-limit";
-import { FLUX_STT_MODEL, STT_WS_PROTOCOL } from "../flux-stt";
 import { requireHandoffSecret, signSttHandoff, STT_HANDOFF_TTL_SEC } from "../stt-handoff";
-import type { Ctx } from "./shared";
+import { authFailureResponse, requireCaller, type Ctx } from "./shared";
 
-export { STT_WS_PROTOCOL };
+export { STT_WS_PROTOCOL, STT_TICKET_PREFIX, STT_TICKET_TTL_SEC };
+
+/** base64url secret length from crypto.randomSecret (256-bit → 43 chars). */
+const STT_TICKET_SECRET_RE = /^[A-Za-z0-9_-]{43}$/;
+
+/**
+ * Parse a plaintext STT session ticket (`stt_<secret>`).
+ * Shape-checked before any D1 work so junk never hits the store.
+ */
+export function parseSttTicket(raw: string): string | null {
+  const first = raw.indexOf("_");
+  if (first < 0 || raw.slice(0, first) !== STT_TICKET_PREFIX) return null;
+  const secret = raw.slice(first + 1);
+  if (!STT_TICKET_SECRET_RE.test(secret)) return null;
+  return raw;
+}
+
+export function formatSttTicket(secret: string): string {
+  return `${STT_TICKET_PREFIX}_${secret}`;
+}
 
 export function isSttStreamUpgrade(request: Request, path: string): boolean {
   return (
@@ -27,38 +56,189 @@ export function isSttStreamUpgrade(request: Request, path: string): boolean {
   );
 }
 
+export type SttUpgradeAuth =
+  | { kind: "client_key"; bearer: string; acceptProtocol: null }
+  | { kind: "stt_ticket"; ticket: string; acceptProtocol: string }
+  | { kind: null; bearer: null; acceptProtocol: null };
+
 /**
- * Extract the client key without putting it in the URL.
+ * Extract upgrade credentials without putting secrets in the URL.
  *
- * Order: Authorization Bearer (preferred, native clients) → Sec-WebSocket-Protocol
- * `prism.v1, <key>` (browsers cannot set Authorization on WebSocket).
+ * Order:
+ *   1. Authorization Bearer with a well-formed pcp_ client key (native clients).
+ *   2. Sec-WebSocket-Protocol: prism.v1, stt_<ticket> (browsers; ticket only, never pcp_).
  *
- * Query-string tokens are deliberately NOT accepted: access_token in the URL is
- * logged by proxies, CDNs, and browser history (adversarial-audit high on PR #22).
- *
- * Any candidate is run through parseClientKey so junk `pcp_…` strings never reach D1.
+ * Query-string tokens are deliberately NOT accepted.
+ * A pcp_ key in the protocol list is deliberately NOT accepted (that was the residual leak).
  */
-export function bearerFromSttUpgrade(request: Request): {
-  bearer: string | null;
-  /** When auth came from Sec-WebSocket-Protocol, echo this on the 101 response. */
-  acceptProtocol: string | null;
-} {
+export function authFromSttUpgrade(request: Request): SttUpgradeAuth {
   const headerBearer = bearerFromRequest(request);
   if (headerBearer) {
-    return {
-      bearer: parseClientKey(headerBearer) ? headerBearer : null,
-      acceptProtocol: null,
-    };
+    if (parseClientKey(headerBearer)) {
+      return { kind: "client_key", bearer: headerBearer, acceptProtocol: null };
+    }
+    // stt_ on Authorization is not the browser path; refuse rather than dual-path confuse.
+    return { kind: null, bearer: null, acceptProtocol: null };
   }
 
   const proto = request.headers.get("sec-websocket-protocol");
-  if (!proto) return { bearer: null, acceptProtocol: null };
+  if (!proto) return { kind: null, bearer: null, acceptProtocol: null };
   const parts = proto.split(",").map((p) => p.trim()).filter(Boolean);
-  // new WebSocket(url, ["prism.v1", clientKey])
-  if (parts[0] === STT_WS_PROTOCOL && parts[1] && parseClientKey(parts[1])) {
-    return { bearer: parts[1], acceptProtocol: STT_WS_PROTOCOL };
+  // new WebSocket(url, ["prism.v1", sttTicket])
+  if (parts[0] === STT_WS_PROTOCOL && parts[1] && parseSttTicket(parts[1])) {
+    return {
+      kind: "stt_ticket",
+      ticket: parts[1],
+      acceptProtocol: STT_WS_PROTOCOL,
+    };
+  }
+  return { kind: null, bearer: null, acceptProtocol: null };
+}
+
+/**
+ * @deprecated Prefer authFromSttUpgrade. Kept for tests that only care about Bearer pcp shape.
+ * Protocol path no longer returns a pcp bearer.
+ */
+export function bearerFromSttUpgrade(request: Request): {
+  bearer: string | null;
+  acceptProtocol: string | null;
+} {
+  const auth = authFromSttUpgrade(request);
+  if (auth.kind === "client_key") {
+    return { bearer: auth.bearer, acceptProtocol: null };
+  }
+  if (auth.kind === "stt_ticket") {
+    // Not a client key; callers that only understand pcp must not treat the ticket as one.
+    return { bearer: null, acceptProtocol: auth.acceptProtocol };
   }
   return { bearer: null, acceptProtocol: null };
+}
+
+/**
+ * POST /v1/stt/sessions
+ *
+ * Mint a single-use short-lived ticket for browser WebSocket auth.
+ * Requires Authorization: Bearer pcp_... (the long-lived key stays on HTTPS POST only).
+ */
+export async function handleCreateSttSession(ctx: Ctx, request: Request): Promise<Response> {
+  const authed = await requireCaller(ctx, request);
+  if (!authed.ok) return authed.response;
+
+  const { client, account } = authed.caller;
+  const secret = randomSecret();
+  const ticket = formatSttTicket(secret);
+  const expiresAt = new Date(ctx.now.getTime() + STT_TICKET_TTL_SEC * 1000);
+
+  await ctx.store.createSttTicket({
+    token_hash: await sha256Hex(ticket),
+    account_id: account.id,
+    client_id: client.id,
+    expires_at: expiresAt.toISOString(),
+  });
+
+  return jsonResponse(ctx.requestId, {
+    ticket,
+    expires_at: expiresAt.toISOString(),
+    expires_in: STT_TICKET_TTL_SEC,
+    protocol: STT_WS_PROTOCOL,
+    // Client wiring hint: new WebSocket(wsUrl, [protocol, ticket])
+    stream_path: "/v1/stt/stream",
+  });
+}
+
+/**
+ * Resolve the caller for a WebSocket upgrade: client key path or single-use ticket.
+ */
+async function resolveSttCaller(
+  ctx: Ctx,
+  request: Request,
+  auth: Exclude<SttUpgradeAuth, { kind: null }>,
+): Promise<{ ok: true; caller: Caller; acceptProtocol: string | null } | { ok: false; response: Response }> {
+  if (auth.kind === "client_key") {
+    const authHeaders = new Headers(request.headers);
+    authHeaders.set("authorization", `Bearer ${auth.bearer}`);
+    authHeaders.delete("sec-websocket-protocol");
+    const authRequest = new Request(request.url, { method: request.method, headers: authHeaders });
+    const resolved = await resolveClient(ctx.store, authRequest);
+    if (!resolved.ok) {
+      return {
+        ok: false,
+        response: authFailureResponse(ctx.requestId, resolved.failure, resolved.detail),
+      };
+    }
+    return { ok: true, caller: resolved.caller, acceptProtocol: null };
+  }
+
+  // Ticket path: consume once, then re-load live client/account (do not trust mint-time state alone).
+  const consumed = await ctx.store.consumeSttTicket(await sha256Hex(auth.ticket));
+  if (!consumed) {
+    return {
+      ok: false,
+      response: errorResponse(
+        ctx.requestId,
+        "unauthenticated",
+        "That STT session ticket is not valid. Tickets are single-use and expire quickly; mint a new one via POST /v1/stt/sessions.",
+      ),
+    };
+  }
+
+  const client = await ctx.store.getClient(consumed.client_id);
+  if (!client || client.account_id !== consumed.account_id) {
+    return {
+      ok: false,
+      response: errorResponse(
+        ctx.requestId,
+        "unauthenticated",
+        "That STT session ticket is not valid.",
+      ),
+    };
+  }
+  if (client.revoked_at) {
+    return {
+      ok: false,
+      response: errorResponse(
+        ctx.requestId,
+        "client_revoked",
+        "This client key has been revoked. Delete the stored key and enroll again; retrying will not help.",
+      ),
+    };
+  }
+
+  const account = await ctx.store.getAccount(consumed.account_id);
+  if (!account) {
+    return {
+      ok: false,
+      response: errorResponse(
+        ctx.requestId,
+        "unavailable",
+        "This client resolves to an account that is not configured.",
+      ),
+    };
+  }
+  if (account.suspended_at) {
+    return {
+      ok: false,
+      response: errorResponse(ctx.requestId, "forbidden", "This account is suspended."),
+    };
+  }
+
+  const plan = await ctx.store.getPlan(account.plan_id);
+  if (!plan) {
+    return {
+      ok: false,
+      response: errorResponse(
+        ctx.requestId,
+        "unavailable",
+        "This client resolves to a plan that is not configured.",
+      ),
+    };
+  }
+
+  return {
+    ok: true,
+    caller: { client, account, plan },
+    acceptProtocol: auth.acceptProtocol,
+  };
 }
 
 /**
@@ -80,43 +260,22 @@ export async function handleSttStreamUpgrade(ctx: Ctx, request: Request): Promis
     );
   }
 
-  const { bearer, acceptProtocol } = bearerFromSttUpgrade(request);
-  if (!bearer) {
+  const auth = authFromSttUpgrade(request);
+  if (auth.kind === null) {
     return errorResponse(
       ctx.requestId,
       "unauthenticated",
-      "A valid client key is required: Authorization: Bearer pcp_… " +
-        `or Sec-WebSocket-Protocol: ${STT_WS_PROTOCOL}, <key>. Query tokens are not accepted.`,
+      "A valid credential is required: Authorization: Bearer pcp_… (native), or " +
+        `Sec-WebSocket-Protocol: ${STT_WS_PROTOCOL}, stt_… after POST /v1/stt/sessions (browsers). ` +
+        "Long-lived client keys and query tokens are not accepted in the WebSocket handshake.",
     );
   }
-  const authHeaders = new Headers(request.headers);
-  authHeaders.set("authorization", `Bearer ${bearer}`);
-  // Do not forward Sec-WebSocket-Protocol list with the secret to resolveClient; only Authorization.
-  authHeaders.delete("sec-websocket-protocol");
-  const authRequest = new Request(request.url, { method: request.method, headers: authHeaders });
 
-  const resolved = await resolveClient(ctx.store, authRequest);
-  if (!resolved.ok) {
-    const map = {
-      unauthenticated: "unauthenticated" as const,
-      revoked: "client_revoked" as const,
-      suspended: "forbidden" as const,
-      misconfigured: "unavailable" as const,
-    };
-    return errorResponse(
-      ctx.requestId,
-      map[resolved.failure],
-      resolved.failure === "revoked"
-        ? "This client key has been revoked."
-        : resolved.failure === "suspended"
-          ? "This account is suspended."
-          : resolved.failure === "misconfigured"
-            ? "Account or plan is misconfigured."
-            : "A valid client key is required (Authorization Bearer or Sec-WebSocket-Protocol).",
-    );
-  }
+  const resolved = await resolveSttCaller(ctx, request, auth);
+  if (!resolved.ok) return resolved.response;
 
   const { client, account, plan: planRow } = resolved.caller;
+  const acceptProtocol = resolved.acceptProtocol;
   const planResult = planFromRow(planRow);
   if (!planResult.ok) {
     return errorResponse(ctx.requestId, "unavailable", planResult.reason);

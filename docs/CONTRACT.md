@@ -116,7 +116,8 @@ All paths are relative to the deployment origin. All request and response bodies
 | POST | `/v1/audio/transcriptions` | client key | Metered speech-to-text (unit-priced). |
 | POST | `/v1/videos/generations` | client key | Metered video generation (unit-priced). |
 | POST | `/v1/music/generations` | client key | Metered music generation (unit-priced). |
-| GET/WS | `/v1/stt/stream` | client key | Live voice STT (Deepgram Flux). WebSocket upgrade. |
+| POST | `/v1/stt/sessions` | client key | Mint a single-use short-lived STT ticket (browser WS auth). |
+| GET/WS | `/v1/stt/stream` | client key or STT ticket | Live voice STT (Deepgram Flux). WebSocket upgrade. |
 
 ### `GET /v1/models`
 
@@ -159,15 +160,36 @@ unspendable:
 - Calling a non-chat model on `/v1/chat/completions` returns `501 model_unsupported` and names the
   correct modality door (voice → `GET/WS /v1/stt/stream`).
 
+### `POST /v1/stt/sessions`
+
+Mint a **single-use, short-lived** ticket (`stt_…`, default **60s**) for browser WebSocket auth.
+Requires `Authorization: Bearer pcp_…` over ordinary HTTPS. Response:
+
+```json
+{
+  "ticket": "stt_…",
+  "expires_at": "2026-08-05T12:00:00.000Z",
+  "expires_in": 60,
+  "protocol": "prism.v1",
+  "stream_path": "/v1/stt/stream"
+}
+```
+
+The long-lived client key never goes in `Sec-WebSocket-Protocol` (that header can land in upgrade
+logs and browser internals). Tickets are stored hashed, consumed with a conditional D1 update
+(same single-use pattern as enrollment tokens).
+
 ### `GET /v1/stt/stream` (WebSocket)
 
 Live mic STT via **Deepgram Flux** (`@cf/deepgram/flux`). Not a one-shot HTTP body.
 
 1. Upgrade with `Upgrade: websocket`.
-2. Authenticate **without putting the key in the URL** (query tokens are rejected; they leak in logs):
-   - Prefer `Authorization: Bearer pcp_...` (native clients).
-   - Browsers: `new WebSocket(url, ["prism.v1", clientKey])` so the key rides
-     `Sec-WebSocket-Protocol` (the server echoes `prism.v1`).
+2. Authenticate **without putting secrets in the URL** (query tokens are rejected; they leak in logs):
+   - Prefer `Authorization: Bearer pcp_...` on the upgrade (native clients that can set headers).
+   - Browsers: `POST /v1/stt/sessions` first, then
+     `new WebSocket(url, ["prism.v1", ticket])` so only the short-lived `stt_…` ticket rides
+     `Sec-WebSocket-Protocol` (the server echoes `prism.v1`). A `pcp_…` key in the protocol list
+     is **rejected**.
 3. Send binary linear16 PCM at 16 kHz; receive Deepgram JSON events (including EndOfTurn).
 4. On close (or after a **15-minute** hard cap), the plane meters **ceil(duration/60)** audio minutes
    at the catalog unit rate (no transcript is stored -- privacy invariant).
