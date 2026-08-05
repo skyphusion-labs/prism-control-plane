@@ -15,10 +15,13 @@ This plane owns **who may call what, and how much**. Conversation history, RAG, 
 multimodal surface stay in [prism](https://github.com/skyphusion-labs/prism).
 
 ```
-mobile client --(bearer client key)--> prism-control-plane --(AI binding)--> AI Gateway / Workers AI
+mobile client --(bearer client key)--> prism-control-plane --(gateway.ai.cloudflare.com)--> AI Gateway --> model
                                               |
-                                              +-- D1: entitlements, per-period usage ledger
+                                              +-- D1: entitlements, prepaid credit, usage ledger
 ```
+
+Live at `play-proxy.skyphusion.org`, AI Gateway `prism-proxy`. Full production wiring, the credential
+model, and the mermaid flowchart are in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## The client contract comes first
 
@@ -59,12 +62,20 @@ enrollment tokens, and revoke client keys. They are not part of the client contr
 ## How metering works
 
 - Money is **integer micro-USD** everywhere (1 USD = 1,000,000 micro-USD). No floats in the money path.
-- The period is a **UTC calendar month**, keyed `YYYY-MM`.
-- The allowance gate runs **before** the model does, against usage already recorded, so an account can
-  overshoot by at most one request. That overshoot is bounded by the plan's `max_output_tokens`. The
-  bound is documented rather than hidden; a pre-flight gate on a post-hoc cost cannot be exact.
-- Requests are priced from token counts against a per-model rate pinned in `src/catalog.ts` (read off
-  Cloudflare's published pricing, with the date recorded).
+- **Prepaid only.** An account spends a credit balance; there is no overage and no postpaid invoice,
+  ever. The pre-flight balance gate runs **before** the model does, against spend already recorded, so
+  an account can overshoot by at most one request, bounded by the plan's `max_output_tokens`. The bound
+  is documented rather than hidden; a pre-flight gate on a post-hoc cost cannot be exact. `402` when the
+  balance is gone.
+- The reporting period is a **UTC calendar month**, keyed `YYYY-MM`. It groups usage for display; it
+  does not reset the balance and it grants nothing.
+- **The plane's own meter is what actually charges an account, in real time**, pricing each request from
+  token counts against a per-model rate pinned in `src/catalog.ts`. Cloudflare's own per-request cost
+  figure is read back later, by `POST /admin/reconcile`, and used only to **true up** the estimate as an
+  auditable adjustment; it never gates or delays a response. See `docs/ARCHITECTURE.md#pricing-and-why-it-needs-reconciliation`.
+- Today a plan is an entitlement set plus a one-time signup credit, not a monthly bucket: the flat plan's
+  **monthly included-token allowance is not built yet**
+  ([#11](https://github.com/skyphusion-labs/prism-control-plane/issues/11)).
 - **Unmetered is a first-class outcome.** A model that answers without usable token counts, or a
   request we stopped waiting for, records a ledger row with `metered = 0` and a reason, charges
   nothing, and increments a separate `unmetered_requests` counter that `GET /v1/usage` publishes.
@@ -116,16 +127,27 @@ store and a fake runner.
 
 ## Status
 
-Foundation built, not deployed. What exists: the client contract, the Worker, the D1 schema, client-key
-auth with one-time enrollment, entitlement and rate gates, the allowance gate, the priced usage ledger,
-and 128 unit tests. What does not: streaming (`stream: true` answers `501`), overage billing, a
-receipt-validated enrollment source, and any deployment.
+**Deployed and live** at `play-proxy.skyphusion.org`. Built: the client contract, the Worker and its
+route table, the D1 schema, client-key auth with one-time enrollment, entitlement and rate gates, the
+prepaid balance gate, the priced usage ledger, SSE streaming with trailing-usage capture, and the AI
+Gateway cost reconciliation job (`POST /admin/reconcile`, operator-triggered, dry run by default; see
+[#12](https://github.com/skyphusion-labs/prism-control-plane/issues/12)). 260 tests. **Not built:** the
+flat plan's monthly included-token allowance (only the prepaid balance half exists;
+[#11](https://github.com/skyphusion-labs/prism-control-plane/issues/11)), a refresh of `src/catalog.ts`
+from `compat/models`, and a receipt-validated enrollment source. There is no overage billing and there
+never will be. No paid traffic has been served through it yet.
 
-Plan pricing, the model set, streaming, overage, and the gateway logging posture are **open decisions**
-listed at the end of [`docs/CONTRACT.md`](docs/CONTRACT.md). The seeded `dev` plan is a provisional
+Full production wiring, the mermaid flowchart, and the reconciliation design are in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Agent-facing guidance, non-negotiables, and deploy /
+secret procedure are in [`CLAUDE.md`](CLAUDE.md).
+
+Plan pricing, the model set, and enrollment source of truth are **open decisions** listed at the end of
+[`docs/CONTRACT.md`](docs/CONTRACT.md). The seeded `dev` plan is a provisional
 placeholder for local work, not a product tier.
 
 ## Related
 
-- Live playground: https://play.skyphusion.org  
+- This plane, live: `play-proxy.skyphusion.org`
+- Sibling playground + inference Worker: [prism](https://github.com/skyphusion-labs/prism), live at
+  https://play.skyphusion.org
 - Pattern peer: [vivijure-control-plane](https://github.com/skyphusion-labs/vivijure-control-plane)

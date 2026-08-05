@@ -85,11 +85,12 @@ flowchart TB
     gw --> wai
     gw --> prov
 
-    gw -.->|"cost + token counts<br/>(reconciliation, NOT yet automated)"| meter
+    gw -.->|"cost + token counts<br/>(POST /admin/reconcile,<br/>operator-triggered, no cron yet)"| meter
 ```
 
-The dashed gateway-to-meter edge is the honest part: Cloudflare's own per-request cost figure is
-available in the gateway logs, and nothing reads it back yet. See **Pricing** below.
+The dashed gateway-to-meter edge is deliberately non-continuous: `POST /admin/reconcile` reads
+Cloudflare's own per-request cost figure back from the gateway logs and trues up the D1 ledger, but
+nothing schedules it yet, only an operator call. See **Pricing** and **Reconciliation** below.
 
 ### Gate order
 
