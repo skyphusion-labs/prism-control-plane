@@ -21,7 +21,7 @@ import {
   buildTtsParams,
   buildVideoParams,
   extractAudioBase64,
-  extractImageBase64,
+  extractImageAsset,
   extractMusicAsset,
   extractTranscript,
   extractVideoAsset,
@@ -469,8 +469,8 @@ export async function handleImageGenerations(ctx: Ctx, request: Request): Promis
     await recordUnmetered(ctx, gate, "provider_failed", 200);
     return errorResponse(ctx.requestId, "upstream_error", fail);
   }
-  const b64 = extractImageBase64(up.body);
-  if (!b64) {
+  const asset = extractImageAsset(up.body);
+  if (!asset || (!asset.b64_json && !asset.url)) {
     await recordUnmetered(ctx, gate, "no_image_payload", 200);
     return errorResponse(
       ctx.requestId,
@@ -478,13 +478,17 @@ export async function handleImageGenerations(ctx: Ctx, request: Request): Promis
       "Image generation returned no image payload.",
     );
   }
+  // OpenAI-shaped: put bytes in b64_json and URLs in url — never a URL in b64_json.
+  const item: { b64_json?: string; url?: string } = {};
+  if (asset.b64_json) item.b64_json = asset.b64_json;
+  if (asset.url) item.url = asset.url;
   return meterAndRespond(
     ctx,
     gate,
     1,
     {
       created: Math.floor(ctx.now.getTime() / 1000),
-      data: [{ b64_json: b64 }],
+      data: [item],
       model: gate.model.id,
     },
     200,

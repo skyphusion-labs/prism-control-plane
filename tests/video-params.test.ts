@@ -56,7 +56,7 @@ describe("nonChatUpstreamTimeoutMs", () => {
       UPSTREAM_TIMEOUT_MS: "60000",
     } as import("../src/env").Env;
     expect(nonChatUpstreamTimeoutMs(env)).toBe(DEFAULT_NONCHAT_UPSTREAM_TIMEOUT_MS);
-    expect(nonChatUpstreamTimeoutMs(env)).toBe(120_000);
+    expect(nonChatUpstreamTimeoutMs(env)).toBe(180_000);
   });
 
   it("honors NONCHAT_UPSTREAM_TIMEOUT_MS", () => {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  extractImageAsset,
   extractMusicAsset,
   extractVideoAsset,
   providerStateFailed,
@@ -31,5 +32,20 @@ describe("extractMusicAsset", () => {
     );
     expect(extractMusicAsset({ audio: "base64blob" })).toBe("base64blob");
     expect(extractMusicAsset({ state: "Completed", result: {} })).toBeNull();
+  });
+});
+
+describe("extractImageAsset", () => {
+  it("puts https URLs in url, not b64_json", () => {
+    expect(
+      extractImageAsset({
+        state: "Completed",
+        result: { image: "https://cdn.example/out.png" },
+      }),
+    ).toEqual({ url: "https://cdn.example/out.png" });
+  });
+
+  it("puts bare base64 in b64_json", () => {
+    expect(extractImageAsset({ image: "abc123base64" })).toEqual({ b64_json: "abc123base64" });
   });
 });

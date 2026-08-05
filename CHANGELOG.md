@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.4.12] - 2026-08-05
+
+### Fixed
+
+- **Image:** UB providers often return an **https URL**, not base64. That string was stuffed into
+  `data[].b64_json`, so iOS clients failed to decode. URLs now go in `data[].url`; raw base64 stays
+  in `b64_json`.
+- **Video:** non-chat default upstream timeout **180s** (Seedance full/fast can exceed 120s).
+
 ## [0.4.11] - 2026-08-05
 
 ### Fixed
