@@ -13,29 +13,15 @@
 import { gatewayRunner } from "./upstream";
 import { errorResponse, newRequestId } from "./http";
 import { d1Store } from "./store-d1";
-import { CfApi } from "./cf-api";
 import { gatewayLogSource, type GatewayLogSource } from "./aig-logs";
-import {
-  CF_ACCOUNT_TOKEN_QUOTA,
-  CfUserTokenProvider,
-  SharedTokenSource,
-  type UpstreamCredentialSource,
-} from "./token-minter";
-import { kekRing } from "./token-crypto";
-import {
-  credentialMode,
-  gatewayConfig,
-  userTokenBudget,
-  userTokenKekConfig,
-  type Env,
-} from "./env";
+import { SharedTokenSource, type UpstreamCredentialSource } from "./token-minter";
+import { gatewayConfig, perUserModeRequested, type Env } from "./env";
 import type { ControlPlaneStore } from "./store";
 import {
   handleCreateAccount,
   handleCreateEnrollment,
   handleGrantCredit,
   handleRevokeClient,
-  handleRevokeUserToken,
   handleSetModelPrice,
 } from "./routes/admin";
 import { handleMe, handleModels, handleUsage } from "./routes/account";
@@ -49,40 +35,25 @@ export { SERVICE_NAME };
 
 const REVOKE_CLIENT_PATH = /^\/admin\/clients\/([A-Za-z0-9_-]{1,64})\/revoke$/;
 const CREDIT_PATH = /^\/admin\/accounts\/([A-Za-z0-9_-]{1,64})\/credits$/;
-const REVOKE_TOKEN_PATH = /^\/admin\/accounts\/([A-Za-z0-9_-]{1,64})\/upstream-token\/revoke$/;
 
 /**
  * The upstream credential source for this deployment, or null when it cannot issue one at all.
  *
- * NULL IS A CLOSED INFERENCE DOOR, never a fallback to the other mode. Falling back would be the worst
- * possible behaviour in both directions: silently sharing one credential when the operator asked for
- * per-user isolation, or silently minting against a finite account quota when they asked for shared. A
- * half-configured deploy refuses to spend and says which switch is missing.
- *
- * PER-USER MODE NEEDS THREE THINGS and has no degraded mode. Without the minting token there is nothing to
- * mint with; without a KEK there is nowhere safe to keep what was minted, and a spendable Cloudflare token
- * in plaintext D1 is not a fallback but a breach waiting for a database dump; without a budget there is
- * nothing stopping it from eating the account's shared token quota.
+ * PRODUCT IS ONE SHARED TOKEN. Cloudflare caps API tokens at 500 per account; minting one per Prism
+ * account is not product and is not wired. NULL is a closed inference door: missing CF_AIG_TOKEN, or a
+ * deploy that still asks for the retired per-user mode.
  */
 export function upstreamCredentialSource(
   env: Env,
-  store: ControlPlaneStore,
-  now: () => number,
+  _store: ControlPlaneStore,
+  _now: () => number,
 ): UpstreamCredentialSource | null {
-  const gateway = gatewayConfig(env);
-  if (!gateway) return null;
-
-  if (credentialMode(env) === "shared") {
-    const token = (env.CF_AIG_TOKEN ?? "").trim();
-    return token ? new SharedTokenSource(token) : null;
-  }
-
-  const minting = (env.PCP_CF_API_TOKEN ?? "").trim();
-  const kek = userTokenKekConfig(env);
-  const budget = userTokenBudget(env, CF_ACCOUNT_TOKEN_QUOTA);
-  if (!minting || !kek || budget === null) return null;
-  const cf = new CfApi({ accountId: gateway.accountId, token: minting });
-  return new CfUserTokenProvider(cf, store, kekRing(kek.primary, kek.next, kek.slot), now, budget);
+  if (!gatewayConfig(env)) return null;
+  // Refuse rather than partially honor a leftover per-user config. Minting against the 500-token
+  // ceiling was the design error; silently ignoring the flag would hide a misdeploy.
+  if (perUserModeRequested(env)) return null;
+  const token = (env.CF_AIG_TOKEN ?? "").trim();
+  return token ? new SharedTokenSource(token) : null;
 }
 
 /**
@@ -93,9 +64,9 @@ export function upstreamCredentialSource(
  * no isolation that matters: `CF_AIG_TOKEN` can already spend on this gateway, so adding the ability to
  * read the resulting cost rows does not widen the blast radius in any direction an attacker cares about.
  *
- * NULL IS A CLOSED RECONCILIATION DOOR, never a silent skip. In per-user credential mode there is no
- * shared token at all, so this is null and POST /admin/reconcile answers 503. A reconciliation job that
- * quietly did nothing would look exactly like a healthy one that found no drift.
+ * NULL IS A CLOSED RECONCILIATION DOOR, never a silent skip. Missing CF_AIG_TOKEN closes both spend and
+ * reconcile together. A reconciliation job that quietly did nothing would look exactly like a healthy one
+ * that found no drift.
  */
 export function gatewayLogs(env: Env): GatewayLogSource | null {
   const gateway = gatewayConfig(env);
@@ -140,8 +111,6 @@ export async function handleRequest(ctx: Ctx, request: Request): Promise<Respons
   if (revokeClient) return await handleRevokeClient(ctx, request, revokeClient[1]);
   const credit = method === "POST" ? CREDIT_PATH.exec(path) : null;
   if (credit) return await handleGrantCredit(ctx, request, credit[1]);
-  const revokeToken = method === "POST" ? REVOKE_TOKEN_PATH.exec(path) : null;
-  if (revokeToken) return await handleRevokeUserToken(ctx, request, revokeToken[1]);
 
   return errorResponse(ctx.requestId, "not_found", `No route for ${method} ${path}.`);
 }

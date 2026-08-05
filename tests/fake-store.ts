@@ -219,17 +219,21 @@ export class FakeStore implements ControlPlaneStore {
         unmetered_requests: 0,
         adjust_spend_micro_usd: 0,
         adjust_credit_micro_usd: 0,
+        allowance_spent_micro_usd: 0,
       } satisfies PeriodRow);
     row.requests += 1;
-    if (event.metered) row.micro_usd += event.micro_usd;
-    else row.unmetered_requests += 1;
+    if (event.metered) {
+      row.micro_usd += event.micro_usd;
+      row.allowance_spent_micro_usd += event.from_allowance_micro_usd;
+    } else {
+      row.unmetered_requests += 1;
+    }
     this.periods.set(key, row);
 
-    // The account counter the money gate reads. Advanced here for the same reason the D1 store does it:
-    // a test that asserts the prepaid gate must see spend where production sees it.
-    if (event.metered && event.micro_usd > 0) {
+    // Prepaid credit only. Allowance never advances this column (mirrors store-d1).
+    if (event.metered && event.from_credit_micro_usd > 0) {
       const account = this.accounts.get(event.account_id);
-      if (account) account.spent_micro_usd += event.micro_usd;
+      if (account) account.spent_micro_usd += event.from_credit_micro_usd;
     }
   }
 
@@ -275,6 +279,7 @@ export class FakeStore implements ControlPlaneStore {
         unmetered_requests: 0,
         adjust_spend_micro_usd: 0,
         adjust_credit_micro_usd: 0,
+        allowance_spent_micro_usd: 0,
       } satisfies PeriodRow);
     if (row.direction === "spend") period.adjust_spend_micro_usd += row.applied_micro_usd;
     else period.adjust_credit_micro_usd += row.applied_micro_usd;
@@ -386,6 +391,7 @@ export function testPlan(overrides: Partial<PlanRow> = {}): PlanRow {
     id: "test",
     name: "Test",
     signup_credit_micro_usd: 1_000_000,
+    monthly_included_micro_usd: 0,
     requests_per_minute: 20,
     max_output_tokens: 1024,
     allowed_tiers: "standard",

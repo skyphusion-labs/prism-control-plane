@@ -24,15 +24,16 @@ const ACCOUNT_COLUMNS =
 
 const USAGE_EVENT_COLUMNS =
   "id, request_id, account_id, client_id, model_id, period_key, input_tokens, output_tokens, " +
-  "micro_usd, metered, unmetered_reason, upstream_status, gateway_log_id";
+  "micro_usd, from_allowance_micro_usd, from_credit_micro_usd, metered, unmetered_reason, " +
+  "upstream_status, gateway_log_id";
 
 export function d1Store(db: D1Database): ControlPlaneStore {
   return {
     async getPlan(id) {
       return await db
         .prepare(
-          `SELECT id, name, signup_credit_micro_usd, requests_per_minute, max_output_tokens,
-                  allowed_tiers
+          `SELECT id, name, signup_credit_micro_usd, monthly_included_micro_usd, requests_per_minute,
+                  max_output_tokens, allowed_tiers
              FROM plans WHERE id = ?`,
         )
         .bind(id)
@@ -206,7 +207,7 @@ export function d1Store(db: D1Database): ControlPlaneStore {
       return await db
         .prepare(
           `SELECT account_id, period_key, micro_usd, requests, unmetered_requests,
-                  adjust_spend_micro_usd, adjust_credit_micro_usd
+                  adjust_spend_micro_usd, adjust_credit_micro_usd, allowance_spent_micro_usd
              FROM usage_periods WHERE account_id = ? AND period_key = ?`,
         )
         .bind(accountId, periodKey)
@@ -228,12 +229,15 @@ export function d1Store(db: D1Database): ControlPlaneStore {
      * re-sum) and under-charges rather than over-charges, which is the right way for this to break.
      */
     async recordUsage(event: UsageEvent) {
+      const fromAllowance = event.metered ? event.from_allowance_micro_usd : 0;
+      const fromCredit = event.metered ? event.from_credit_micro_usd : 0;
       const insert = await db
         .prepare(
           `INSERT OR IGNORE INTO usage_events
              (id, request_id, account_id, client_id, model_id, period_key, input_tokens,
-              output_tokens, micro_usd, metered, unmetered_reason, upstream_status, gateway_log_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              output_tokens, micro_usd, from_allowance_micro_usd, from_credit_micro_usd,
+              metered, unmetered_reason, upstream_status, gateway_log_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           event.id,
@@ -245,6 +249,8 @@ export function d1Store(db: D1Database): ControlPlaneStore {
           event.input_tokens,
           event.output_tokens,
           event.micro_usd,
+          fromAllowance,
+          fromCredit,
           event.metered ? 1 : 0,
           event.unmetered_reason,
           event.upstream_status,
@@ -253,35 +259,36 @@ export function d1Store(db: D1Database): ControlPlaneStore {
         .run();
       if (!insert.meta.changes) return;
 
-      // An unmetered request advances `requests` and `unmetered_requests` but NOT `micro_usd`. That is
+      // An unmetered request advances `requests` and `unmetered_requests` but NOT money columns. That is
       // the whole point of the third outcome: the call is counted, the gap is counted, and nothing is
       // charged from a number we do not have.
       await db
         .prepare(
-          `INSERT INTO usage_periods (account_id, period_key, micro_usd, requests, unmetered_requests)
-           VALUES (?, ?, ?, 1, ?)
+          `INSERT INTO usage_periods
+             (account_id, period_key, micro_usd, requests, unmetered_requests, allowance_spent_micro_usd)
+           VALUES (?, ?, ?, 1, ?, ?)
            ON CONFLICT(account_id, period_key) DO UPDATE SET
-             micro_usd          = micro_usd + excluded.micro_usd,
-             requests           = requests + 1,
-             unmetered_requests = unmetered_requests + excluded.unmetered_requests,
-             updated_at         = datetime('now')`,
+             micro_usd                 = micro_usd + excluded.micro_usd,
+             requests                  = requests + 1,
+             unmetered_requests        = unmetered_requests + excluded.unmetered_requests,
+             allowance_spent_micro_usd = allowance_spent_micro_usd + excluded.allowance_spent_micro_usd,
+             updated_at                = datetime('now')`,
         )
         .bind(
           event.account_id,
           event.period_key,
           event.metered ? event.micro_usd : 0,
           event.metered ? 0 : 1,
+          fromAllowance,
         )
         .run();
 
-      // THE MONEY GATE READS THIS COLUMN, not usage_periods. It is advanced last because it is the one
-      // increment that can deny the user their next request: if the process dies between the two writes,
-      // the account has been under-charged (recoverable, re-summable from usage_events) rather than
-      // locked out over a write that only half happened.
-      if (event.metered && event.micro_usd > 0) {
+      // Prepaid spend only. Allowance never touches this column; the gate reads both pools.
+      // Advanced last so a crash between writes under-charges (recoverable) rather than locks out.
+      if (event.metered && fromCredit > 0) {
         await db
           .prepare(`UPDATE accounts SET spent_micro_usd = spent_micro_usd + ? WHERE id = ?`)
-          .bind(event.micro_usd, event.account_id)
+          .bind(fromCredit, event.account_id)
           .run();
       }
     },

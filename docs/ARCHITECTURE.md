@@ -115,25 +115,24 @@ prevent.
 hashed, and are never Cloudflare credentials. A client key cannot authenticate anything at
 Cloudflare.
 
-**The upstream credential** is what reaches a model. `UPSTREAM_CREDENTIAL_MODE` selects it:
+**The upstream credential** is what reaches a model. Product is **one shared token only**:
 
-- **`shared` (the default, and the product path).** One account-scoped Cloudflare API token,
-  `CF_AIG_TOKEN`, holding AI Gateway Run plus Workers AI Read and nothing else. Sent as both
-  `authorization` and `cf-aig-authorization` so the plane works whether gateway auth is on or off.
-- **`per-user`.** Mints one Cloudflare API token per account, encrypted at rest in `user_tokens`.
-  Supported, bounded by `USER_TOKEN_BUDGET`, and **off**.
+- **One account-scoped Cloudflare API token, `CF_AIG_TOKEN`**, for every Prism account. Permissions:
+  AI Gateway Run, Workers AI Read, and AI Gateway Read (the last for reconciliation). Sent only as
+  `cf-aig-authorization` on the gateway host (issue #15). On `/compat` the plain `authorization`
+  header is the provider key slot, so the Cloudflare token must never go there.
 
-Shared is the default because of a hard Cloudflare ceiling: **500 API tokens per account, total,
-across every service on it**
+There is **no per-account Cloudflare token minting.** Cloudflare caps API tokens at **500 per
+account, total**
 ([limits](https://developers.cloudflare.com/fundamentals/api/reference/limits/)). One token per Prism
-user caps the product in the low hundreds and competes with vivijure's per-tenant provisioning for
-the same slots. Per-user tokens buy Cloudflare-layer per-user revocation, which is worth having for a
-deployment small enough to afford the slots, and worth nothing to a mobile product that cannot fit.
+account would cap the product in the low hundreds and starve vivijure's per-tenant provisioning from
+the same pool. Code that used to mint into `user_tokens` is retired from the wiring path; a leftover
+`UPSTREAM_CREDENTIAL_MODE=per-user` closes inference rather than minting.
 
-### Attribution without per-user tokens
+### Attribution with a shared token
 
-Because the credential is shared, Cloudflare cannot tell whose request it was. `cf-aig-metadata`
-carries that, and the ledger is the authority. **Exactly five entries, which is Cloudflare's cap**
+Cloudflare cannot tell whose request it was from the credential alone. `cf-aig-metadata` carries
+that, and the D1 ledger is the authority. **Exactly five entries, which is Cloudflare's cap**
 (the first five are kept and the rest are silently dropped, so a sixth field would delete whichever
 sorted last, not fail):
 
@@ -172,18 +171,11 @@ billing, ever.** When the money runs out the plane refuses with `402`.
 | Top-ups as an audited grant ledger (`credit_grants`, idempotent) | **built** |
 | Pre-flight balance gate, `402` on exhaustion, never postpaid | **built** |
 | One-time signup grant (`plans.signup_credit_micro_usd`) | **built** |
-| **Monthly included token allowance** | **NOT built** |
+| **Monthly included allowance** | **built** (migration 0004 / issue #11). Plan field `monthly_included_micro_usd`; spent before prepaid credit; unused expires at period roll. Zero = pure prepaid. |
 
-`src/plans.ts` is explicit that the signup grant is not recurring: "a monthly reset would be a grant
-of money nobody decided to give." That was the right call for a pure prepaid balance, and it means
-the flat-plan monthly allowance has no implementation. `usage_periods` and `period_key` exist and
-**count** usage per UTC calendar month; they do not grant anything.
-
-So a plan today is an entitlement set (rate limit, output-token clamp, allowed tiers) plus an opening
-credit, not a monthly bucket. Closing that gap needs a plan-level monthly allowance that is spent
-before credits are, and it must not silently become a monthly cash grant. Tracked in
-[#11](https://github.com/skyphusion-labs/prism-control-plane/issues/11); do not describe the allowance
-as shipped until it is.
+Spend order: monthly allowance first, then prepaid credit, then `402`. The D1 ledger records the
+split (`from_allowance_micro_usd` / `from_credit_micro_usd`). Product plan numbers still need
+commercial decisions; the machinery is shipped.
 
 ### Unmetered is not free
 
@@ -301,8 +293,8 @@ The runtime `CF_AIG_TOKEN` was **widened** with `AI Gateway Read` rather than jo
 (2026-08-05, verified live against `prism-proxy`). A separate read token would be another secret to
 escrow, rotate and lose, buying no isolation that matters: the token can already spend on this gateway.
 Editing a Cloudflare token's policies does **not** change its value, so the escrowed ciphertext and the
-live Worker secret stayed valid. In per-user credential mode there is no shared token, so
-`POST /admin/reconcile` answers 503 rather than quietly doing nothing.
+live Worker secret stayed valid. Without `CF_AIG_TOKEN`, both spend and `POST /admin/reconcile` answer
+503 rather than quietly doing nothing.
 
 ### Why the spend path addresses the gateway host, not the AI REST API
 

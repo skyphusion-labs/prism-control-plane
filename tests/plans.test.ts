@@ -39,6 +39,11 @@ describe("planFromRow", () => {
     expect(planFromRow(testPlan({ signup_credit_micro_usd: 1.5 }))).toMatchObject({ ok: false });
   });
 
+  it("accepts zero monthly included and refuses a malformed one", () => {
+    expect(planFromRow(testPlan({ monthly_included_micro_usd: 0 })).ok).toBe(true);
+    expect(planFromRow(testPlan({ monthly_included_micro_usd: -1 }))).toMatchObject({ ok: false });
+  });
+
   it("refuses a non-positive rate limit or output ceiling", () => {
     expect(planFromRow(testPlan({ requests_per_minute: 0 }))).toMatchObject({ ok: false });
     // max_output_tokens is what BOUNDS the single-request prepaid overshoot, so a bad value there quietly

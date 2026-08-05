@@ -50,6 +50,25 @@ describe("extractUsage", () => {
     expect(extractUsage({ usage: { prompt_tokens: -1, completion_tokens: 2 } })).toBeNull();
     expect(extractUsage({ usage: { prompt_tokens: "3", completion_tokens: 2 } })).toBeNull();
   });
+
+  it("folds separate reasoning_tokens into output when completion under-reports", () => {
+    // Issue #10: grok-style responses with completion_tokens: 1 and reasoning_tokens: 113.
+    expect(
+      extractUsage({
+        usage: { prompt_tokens: 10, completion_tokens: 1, reasoning_tokens: 113 },
+      }),
+    ).toEqual({ inputTokens: 10, outputTokens: 114 });
+    // Already-included: do not double-count.
+    expect(
+      extractUsage({
+        usage: {
+          prompt_tokens: 10,
+          completion_tokens: 114,
+          completion_tokens_details: { reasoning_tokens: 113 },
+        },
+      }),
+    ).toEqual({ inputTokens: 10, outputTokens: 114 });
+  });
 });
 
 describe("priceUsage", () => {

@@ -63,8 +63,27 @@ export function extractUsage(body: unknown): TokenUsage | null {
   const output = raw.completion_tokens ?? raw.output_tokens;
   if (!Number.isInteger(input) || !Number.isInteger(output)) return null;
   const inputTokens = input as number;
-  const outputTokens = output as number;
+  let outputTokens = output as number;
   if (inputTokens < 0 || outputTokens < 0) return null;
+
+  // REASONING TOKENS ARE BILLED AND OFTEN OMITTED FROM completion_tokens (issue #10, measured on
+  // grok-4.x and the OpenAI reasoning family). When the response surfaces them, fold them into the
+  // output count so the local estimate is not systematically low. Reconcile still trues up against
+  // the gateway's cost; this only shrinks the drift.
+  const reasoning =
+    raw.reasoning_tokens ??
+    (typeof raw.completion_tokens_details === "object" &&
+    raw.completion_tokens_details !== null
+      ? (raw.completion_tokens_details as { reasoning_tokens?: unknown }).reasoning_tokens
+      : undefined);
+  if (Number.isInteger(reasoning) && (reasoning as number) > 0) {
+    // Only add when completion_tokens did not already include them. If the provider reported
+    // completion_tokens >= reasoning, treat completion as the full billed output and leave it.
+    // The under-report case is completion_tokens small and reasoning_tokens large and separate.
+    const r = reasoning as number;
+    if (outputTokens < r) outputTokens = outputTokens + r;
+  }
+
   return { inputTokens, outputTokens };
 }
 

@@ -234,17 +234,22 @@ paths:
               schema: { type: string, enum: ["true"] }
             prism-period:
               description: >-
-                Reporting period key, YYYY-MM in UTC. Groups usage for display only; the prepaid
-                balance does not reset with it.
+                UTC period key YYYY-MM. Scopes monthly allowance; prepaid credit does not reset with it.
               schema: { type: string }
             prism-credit-micro-usd:
-              description: Total prepaid credit ever granted to this account.
+              description: Total prepaid credit ever granted to this account (lifetime).
               schema: { type: integer }
             prism-spent-micro-usd:
-              description: Total ever recorded as spent, including this request.
+              description: Lifetime prepaid spend recorded, including this request's credit portion.
               schema: { type: integer }
             prism-credit-remaining-micro-usd:
               description: Prepaid credit left, clamped at 0. Never negative; there is no debt.
+              schema: { type: integer }
+            prism-monthly-included-micro-usd:
+              description: Plan monthly included grant for this period (0 = pure prepaid).
+              schema: { type: integer }
+            prism-allowance-remaining-micro-usd:
+              description: Monthly allowance remaining this period, clamped at 0.
               schema: { type: integer }
           content:
             application/json:
@@ -259,8 +264,8 @@ paths:
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "402":
           description: >-
-            The account's prepaid credit is spent. Code `quota_exhausted`. Budgetary, not temporal:
-            there is no overage and no reset, so retrying will not help until someone tops up.
+            Monthly allowance and prepaid credit are both exhausted. Code `quota_exhausted`.
+            Budgetary, not temporal: no overage; retry only after the next period or a credit top-up.
           content:
             application/json:
               schema:
@@ -425,7 +430,15 @@ components:
     Plan:
       type: object
       required:
-        [id, name, signup_credit_micro_usd, requests_per_minute, max_output_tokens, allowed_tiers]
+        [
+          id,
+          name,
+          signup_credit_micro_usd,
+          monthly_included_micro_usd,
+          requests_per_minute,
+          max_output_tokens,
+          allowed_tiers,
+        ]
       properties:
         id: { type: string }
         name: { type: string }
@@ -433,8 +446,13 @@ components:
           type: integer
           description: >-
             One-time prepaid credit granted when an account is created on this plan, in integer
-            micro-USD (1 USD = 1,000,000 micro-USD). NOT a recurring allowance: nothing about this
-            number resets.
+            micro-USD (1 USD = 1,000,000 micro-USD). Not the monthly allowance.
+        monthly_included_micro_usd:
+          type: integer
+          description: >-
+            Monthly included spend for the current UTC period, integer micro-USD. Spent before
+            prepaid credit. Zero means pure prepaid. Unused expires at period roll and never becomes
+            a credit grant.
         requests_per_minute: { type: integer }
         max_output_tokens: { type: integer }
         allowed_tiers:
@@ -519,6 +537,10 @@ components:
         - credit_micro_usd
         - spent_micro_usd
         - remaining_micro_usd
+        - monthly_included_micro_usd
+        - allowance_spent_micro_usd
+        - allowance_remaining_micro_usd
+        - spendable_remaining_micro_usd
         - overage
         - period
         - period_start
@@ -530,36 +552,40 @@ components:
         - period_adjust_credit_micro_usd
         - period_reconciled_micro_usd
       description: >-
-        The first three fields are LIFETIME totals, not per-period: prepaid credit is cumulative and
-        never expires. The period_* fields are a reporting rollup that resets monthly; the BALANCE does
-        not. A client that treats the period figures as an allowance will be wrong about when service
-        resumes, which is never, until a top-up.
+        Two money pools. Prepaid credit (credit_*, spent_*, remaining_micro_usd) is LIFETIME and never
+        expires. Monthly allowance (monthly_included_*, allowance_*) is period-scoped, spent first;
+        unused expires at period roll and never becomes credit. spendable_remaining_micro_usd is both.
 
 
-        THE MONTH IS PUBLISHED TWICE, and the difference between the two figures is the point.
-        period_micro_usd is what this plane's own meter ESTIMATED from token counts.
-        period_reconciled_micro_usd is that estimate corrected against AI Gateway's authoritative
-        per-request cost. A client showing one number should show the reconciled one; the estimate and
-        both corrections are published alongside it so the difference can always be accounted for
-        rather than looking like an error.
+        THE MONTH IS PUBLISHED TWICE for metering: period_micro_usd is the local estimate;
+        period_reconciled_micro_usd is corrected against AI Gateway cost.
       properties:
         credit_micro_usd:
           type: integer
           description: Total prepaid credit ever granted to this account.
         spent_micro_usd:
           type: integer
-          description: Total ever recorded as spent.
+          description: Lifetime prepaid spend (not allowance burn).
         remaining_micro_usd:
           type: integer
           description: >-
-            Clamped at 0; never negative. A single request may overshoot the balance because its cost is
-            unknowable until the model answers, but that overshoot is not a debt and is never invoiced.
+            Prepaid credit left, clamped at 0. A single request may overshoot; that is not a debt.
+        monthly_included_micro_usd:
+          type: integer
+          description: Plan monthly included grant for the current period (0 = pure prepaid).
+        allowance_spent_micro_usd:
+          type: integer
+          description: Allowance burned this period.
+        allowance_remaining_micro_usd:
+          type: integer
+          description: Monthly allowance left this period, clamped at 0.
+        spendable_remaining_micro_usd:
+          type: integer
+          description: allowance_remaining + credit remaining (what the pre-flight gate checks).
         overage:
           type: boolean
           description: >-
-            Always false. Published as a fact rather than left to be inferred from a missing field,
-            because "what happens when I run out" is the first question a client implementer has. The
-            answer is 402.
+            Always false. Published as a fact. When both pools are gone the answer is 402.
         period: { type: string, examples: ["2026-08"] }
         period_start: { type: string, format: date-time }
         period_end: { type: string, format: date-time }

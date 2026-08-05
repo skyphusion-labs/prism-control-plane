@@ -19,7 +19,8 @@ import { FakeStore, testPlan } from "./fake-store";
 const NOW = new Date("2026-08-04T12:00:00.000Z");
 const MODEL = "@cf/meta/llama-3.2-3b-instruct";
 /** A catalog model Cloudflare publishes no per-token rate for. Unpriced until an operator says otherwise. */
-const UNPRICED_MODEL = "anthropic/claude-sonnet-5";
+// Still unpriced: absent from the gateway catalog (issue #10). Unified Billing chat is now priced.
+const UNPRICED_MODEL = "@cf/llava-hf/llava-1.5-7b-hf";
 /** A catalog model that is not chat, so it has no door here. */
 const IMAGE_MODEL = "@cf/black-forest-labs/flux-1-schnell";
 
@@ -45,7 +46,7 @@ class FakeCredentialSource implements UpstreamCredentialSource {
   revoked: string[] = [];
   constructor(
     private readonly outcome: CredentialOutcome,
-    readonly mode: "shared" | "per-user" = "per-user",
+    readonly mode: "shared" | "per-user" = "shared",
   ) {}
   async forAccount(accountId: string): Promise<CredentialOutcome> {
     this.asked.push(accountId);
@@ -144,7 +145,7 @@ async function harness(
       ? null
       : new FakeCredentialSource(
           options.credential ?? OK_CREDENTIAL,
-          options.credentialMode ?? "per-user",
+          options.credentialMode ?? "shared",
         );
   const deferred: Promise<unknown>[] = [];
   const ctx: Ctx = {
@@ -221,25 +222,35 @@ describe("health", () => {
     expect(body.checks.find((check) => check.name === "upstream_credential")?.ok).toBe(false);
   });
 
-  it("names the configured credential mode so a wrong deploy is visible", async () => {
-    // The mode is invisible to the routes by design, which is exactly why readiness has to say it out loud.
-    // A deploy that silently landed in shared mode when the operator meant per-user is otherwise
-    // indistinguishable from a working one until someone needs a per-user revocation and finds none.
+  it("names the shared credential posture, and flags a retired per-user misdeploy", async () => {
+    // Product is one shared CF_AIG_TOKEN. Readiness says so out loud, and a leftover
+    // UPSTREAM_CREDENTIAL_MODE=per-user is a closed door with an explicit reason, not a silent mint.
     const shared = await harness();
     const sharedBody = (await (await handleRequest(shared.ctx, get("/health/deep"))).json()) as {
-      checks: { name: string; detail: string }[];
+      checks: { name: string; detail: string; ok: boolean }[];
     };
-    expect(
-      sharedBody.checks.find((check) => check.name === "upstream_credential")?.detail,
-    ).toContain("shared");
+    const sharedCred = sharedBody.checks.find((check) => check.name === "upstream_credential");
+    expect(sharedCred?.ok).toBe(true);
+    expect(sharedCred?.detail).toMatch(/shared CF_AIG_TOKEN|cf-aig-metadata/i);
 
-    const perUser = await harness({ env: { UPSTREAM_CREDENTIAL_MODE: "per-user" } });
+    // Harness injects a FakeCredentialSource by default; force real wiring for this misdeploy check.
+    const perUser = await harness({
+      env: { UPSTREAM_CREDENTIAL_MODE: "per-user", CF_AIG_TOKEN: "tok" },
+      withTokens: false,
+    });
+    // Re-build credentials the way the Worker does: null when per-user is requested.
+    const { upstreamCredentialSource } = await import("../src/index");
+    perUser.ctx.credentials = upstreamCredentialSource(
+      perUser.ctx.env,
+      perUser.ctx.store,
+      () => 0,
+    );
     const perUserBody = (await (await handleRequest(perUser.ctx, get("/health/deep"))).json()) as {
-      checks: { name: string; detail: string }[];
+      checks: { name: string; detail: string; ok: boolean }[];
     };
-    expect(
-      perUserBody.checks.find((check) => check.name === "upstream_credential")?.detail,
-    ).toContain("per-user");
+    const perUserCred = perUserBody.checks.find((check) => check.name === "upstream_credential");
+    expect(perUserCred?.ok).toBe(false);
+    expect(perUserCred?.detail).toMatch(/per-user|retired|500-token/i);
   });
 
   it("does not fail readiness over models Cloudflare publishes no rate for", async () => {
@@ -731,7 +742,10 @@ describe("GET /v1/usage", () => {
       credit_micro_usd: 1_000_000,
       spent_micro_usd: 385_900,
       remaining_micro_usd: 614_100,
-      // Published as a fact rather than left to be inferred from the absence of an overage field.
+      monthly_included_micro_usd: 0,
+      allowance_spent_micro_usd: 0,
+      allowance_remaining_micro_usd: 0,
+      spendable_remaining_micro_usd: 614_100,
       overage: false,
       period: "2026-08",
       period_start: "2026-08-01T00:00:00.000Z",
@@ -739,8 +753,6 @@ describe("GET /v1/usage", () => {
       period_micro_usd: 385_900,
       period_requests: 1,
       period_unmetered_requests: 0,
-      // Both true-up counters and the reconciled total are present at zero. An exhaustive assertion is
-      // the point: a field that appeared only once drift existed is a field no client would handle.
       period_adjust_spend_micro_usd: 0,
       period_adjust_credit_micro_usd: 0,
       period_reconciled_micro_usd: 385_900,
@@ -1027,6 +1039,8 @@ describe("POST /admin/reconcile", () => {
       input_tokens: 10,
       output_tokens: 20,
       micro_usd: 1000,
+      from_allowance_micro_usd: 0,
+      from_credit_micro_usd: 1000,
       metered: true,
       unmetered_reason: null,
       upstream_status: 200,

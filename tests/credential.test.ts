@@ -6,18 +6,15 @@
 //   https://developers.cloudflare.com/fundamentals/api/reference/limits/
 //
 // What must hold, and what these tests pin:
-//   1. The default is the SHARED credential. A missing or misspelled mode never resolves to per-user, because
-//      that would start silently consuming a finite account-wide quota.
-//   2. Per-user mode refuses to run at all without an explicit budget. There is no default budget, because a
-//      default would be a guess about how much of a SHARED quota this one product may take.
-//   3. The budget is enforced BEFORE a mint, so the ceiling is hit as a clean refusal rather than as a
-//      Cloudflare rejection during someone's signup -- and rather than by taking the last slots that
-//      vivijure's tenant provisioning also needs.
-//   4. Neither mode ever hands a credential to a client. Covered end to end in router.test.ts.
+//   1. Product is SHARED ONLY. One CF_AIG_TOKEN for every Prism account. Cloudflare's 500-token
+//      account ceiling makes one-token-per-account a hard product cap and starves vivijure.
+//   2. credentialMode is always "shared", even if someone left UPSTREAM_CREDENTIAL_MODE=per-user.
+//   3. A leftover per-user config REFUSES to wire (null) rather than minting or silently sharing.
+//   4. The shared credential is never handed to a client. Covered end to end in router.test.ts.
 
 import { describe, expect, it } from "vitest";
 import { CfApi } from "../src/cf-api";
-import { credentialMode, userTokenBudget, type Env } from "../src/env";
+import { credentialMode, perUserModeRequested, type Env } from "../src/env";
 import { upstreamCredentialSource } from "../src/index";
 import {
   CF_ACCOUNT_TOKEN_QUOTA,
@@ -34,39 +31,22 @@ const KEK = Buffer.alloc(32, 7).toString("base64");
 const WIRED: Partial<Env> = { CF_ACCOUNT_ID: "acct-cf", AI_GATEWAY_ID: "prism-proxy" };
 
 describe("credentialMode", () => {
-  it("defaults to shared, including for junk", () => {
-    // A typo must not be read as "per-user". This is the assertion that keeps a misconfiguration from
-    // quietly eating the account's token quota.
+  it("is always shared, including when config still says per-user", () => {
+    // Product ruling: one account token. The mode flag cannot re-open minting.
     expect(credentialMode({} as Env)).toBe("shared");
     expect(credentialMode({ UPSTREAM_CREDENTIAL_MODE: "" } as Env)).toBe("shared");
-    expect(credentialMode({ UPSTREAM_CREDENTIAL_MODE: "peruser" } as Env)).toBe("shared");
-    expect(credentialMode({ UPSTREAM_CREDENTIAL_MODE: "PER_USER" } as Env)).toBe("shared");
-  });
-
-  it("honours an exact per-user, case- and space-insensitively", () => {
-    expect(credentialMode({ UPSTREAM_CREDENTIAL_MODE: "per-user" } as Env)).toBe("per-user");
-    expect(credentialMode({ UPSTREAM_CREDENTIAL_MODE: " Per-User " } as Env)).toBe("per-user");
+    expect(credentialMode({ UPSTREAM_CREDENTIAL_MODE: "per-user" } as Env)).toBe("shared");
+    expect(credentialMode({ UPSTREAM_CREDENTIAL_MODE: " Per-User " } as Env)).toBe("shared");
+    expect(credentialMode({ UPSTREAM_CREDENTIAL_MODE: "junk" } as Env)).toBe("shared");
   });
 });
 
-describe("userTokenBudget", () => {
-  it("returns null rather than inventing a number", () => {
-    // Null closes per-user mode. The budget is the only thing between this plane and a shared 500-token
-    // quota, so an absent or malformed one is a configuration error to refuse on.
-    expect(userTokenBudget({} as Env, CF_ACCOUNT_TOKEN_QUOTA)).toBeNull();
-    expect(userTokenBudget({ USER_TOKEN_BUDGET: "0" } as Env, CF_ACCOUNT_TOKEN_QUOTA)).toBeNull();
-    expect(userTokenBudget({ USER_TOKEN_BUDGET: "-5" } as Env, CF_ACCOUNT_TOKEN_QUOTA)).toBeNull();
-    expect(userTokenBudget({ USER_TOKEN_BUDGET: "10.5" } as Env, CF_ACCOUNT_TOKEN_QUOTA)).toBeNull();
-    expect(userTokenBudget({ USER_TOKEN_BUDGET: "lots" } as Env, CF_ACCOUNT_TOKEN_QUOTA)).toBeNull();
-  });
-
-  it("clamps to the Cloudflare account quota", () => {
-    // No local config can authorise more tokens than Cloudflare will issue, so a hopeful 10,000 becomes 500
-    // rather than a promise that fails on the 501st user.
-    expect(userTokenBudget({ USER_TOKEN_BUDGET: "10000" } as Env, CF_ACCOUNT_TOKEN_QUOTA)).toBe(
-      CF_ACCOUNT_TOKEN_QUOTA,
-    );
-    expect(userTokenBudget({ USER_TOKEN_BUDGET: "50" } as Env, CF_ACCOUNT_TOKEN_QUOTA)).toBe(50);
+describe("perUserModeRequested", () => {
+  it("detects a leftover per-user config so wiring can refuse it", () => {
+    expect(perUserModeRequested({} as Env)).toBe(false);
+    expect(perUserModeRequested({ UPSTREAM_CREDENTIAL_MODE: "shared" } as Env)).toBe(false);
+    expect(perUserModeRequested({ UPSTREAM_CREDENTIAL_MODE: "per-user" } as Env)).toBe(true);
+    expect(perUserModeRequested({ UPSTREAM_CREDENTIAL_MODE: " Per-User " } as Env)).toBe(true);
   });
 });
 
@@ -74,51 +54,33 @@ describe("upstreamCredentialSource", () => {
   const store = new FakeStore();
   const now = () => 1_785_900_000;
 
-  it("builds the shared source by default", () => {
+  it("builds the shared source when CF_AIG_TOKEN is set", () => {
     const source = upstreamCredentialSource({ ...WIRED, CF_AIG_TOKEN: "shared-token" } as Env, store, now);
     expect(source?.mode).toBe("shared");
+    expect(source).toBeInstanceOf(SharedTokenSource);
   });
 
-  it("returns null rather than falling back when a mode's config is incomplete", () => {
-    // FALLING BACK WOULD BE THE WORST BEHAVIOUR IN BOTH DIRECTIONS: silently sharing one credential when the
-    // operator asked for per-user isolation, or silently minting against a finite quota when they asked for
-    // shared. A half-configured deploy closes the inference door instead.
+  it("returns null when CF_AIG_TOKEN is missing", () => {
     expect(upstreamCredentialSource({ ...WIRED } as Env, store, now)).toBeNull();
-    expect(
-      upstreamCredentialSource(
-        { ...WIRED, UPSTREAM_CREDENTIAL_MODE: "per-user", CF_AIG_TOKEN: "shared-token" } as Env,
-        store,
-        now,
-      ),
-    ).toBeNull();
+  });
+
+  it("refuses a leftover per-user config rather than minting", () => {
+    // Fully-specified per-user secrets used to be enough to open minting. That path is retired: even with
+    // every old secret present, wiring returns null so a misdeploy fails closed at the door.
     expect(
       upstreamCredentialSource(
         {
           ...WIRED,
           UPSTREAM_CREDENTIAL_MODE: "per-user",
+          CF_AIG_TOKEN: "shared-token",
           PCP_CF_API_TOKEN: "minting",
           USER_TOKEN_KEK: KEK,
+          USER_TOKEN_BUDGET: "50",
         } as Env,
         store,
         now,
       ),
-      "per-user without a budget must not build",
     ).toBeNull();
-  });
-
-  it("builds the per-user source only when all three secrets and a budget are present", () => {
-    const source = upstreamCredentialSource(
-      {
-        ...WIRED,
-        UPSTREAM_CREDENTIAL_MODE: "per-user",
-        PCP_CF_API_TOKEN: "minting",
-        USER_TOKEN_KEK: KEK,
-        USER_TOKEN_BUDGET: "50",
-      } as Env,
-      store,
-      now,
-    );
-    expect(source?.mode).toBe("per-user");
   });
 
   it("returns null with no gateway, whatever the credential config says", () => {

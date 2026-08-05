@@ -4,7 +4,7 @@ import { modelsForTiers, publicModel } from "../catalog";
 import { errorResponse, jsonResponse } from "../http";
 import { periodBounds } from "../period";
 import { planFromRow, publicPlan, type Plan } from "../plans";
-import { remainingMicroUsd } from "../balance";
+import { remainingAllowanceMicroUsd, remainingMicroUsd } from "../balance";
 import { resolvePrice } from "../meter";
 import type { Caller } from "../auth";
 import type { AccountRow, ControlPlaneStore } from "../store";
@@ -36,38 +36,44 @@ function resolvePlan(requestId: string, caller: Caller): { ok: true; plan: Plan 
 /**
  * The usage projection. Shared by /v1/me and /v1/usage so the two cannot drift.
  *
- * TWO DIFFERENT TIME SHAPES, on purpose. The prepaid position (credit, spend, remaining) is LIFETIME: that
- * is what the money gate reads and it does not reset. The month is a reporting window on top, so a client
- * can show "this month" without the numbers implying a monthly allowance that does not exist.
+ * TWO MONEY POOLS, different time shapes. Prepaid credit (credit, spent, remaining) is LIFETIME and
+ * never expires. Monthly allowance is period-scoped: included for this UTC month, spent first, unused
+ * expires at period roll and never becomes credit (issue #11).
  *
- * THE TRUE-UP FIELDS ARE PUBLISHED, not hidden as an internal detail, because without them the month does
- * not add up. `period_micro_usd` is the sum of what this plane's own meter estimated; reconciliation
- * (issue #12) later compares each request against AI Gateway's authoritative cost and moves the
- * difference. Publishing only the estimate would leave a client showing a monthly figure that disagrees
- * with the balance for no visible reason, and a support conversation with no way to explain the gap.
- * Publishing the estimate and both corrections separately means the client can show either number and
- * account for the difference.
+ * THE TRUE-UP FIELDS ARE PUBLISHED so the month adds up after reconciliation (issue #12).
  */
 export async function usageBody(
   store: ControlPlaneStore,
   account: AccountRow,
   now: Date,
+  plan: Plan,
 ): Promise<Record<string, unknown>> {
   const bounds = periodBounds(now);
   const period = await store.getPeriod(account.id, bounds.key);
+  const allowanceSpent = period?.allowance_spent_micro_usd ?? 0;
+  const allowanceRemaining = remainingAllowanceMicroUsd({
+    monthlyIncludedMicroUsd: plan.monthlyIncludedMicroUsd,
+    allowanceSpentMicroUsd: allowanceSpent,
+  });
+  const creditRemaining = remainingMicroUsd({
+    creditMicroUsd: account.credit_micro_usd,
+    spentMicroUsd: account.spent_micro_usd,
+  });
   // An ABSENT period row means no usage yet, which is genuinely zero: the row is created by the first
   // recorded request. That is the one place in this codebase where absent may be read as zero, and it
   // is safe because the row's existence is entirely under our control.
   return {
     credit_micro_usd: account.credit_micro_usd,
     spent_micro_usd: account.spent_micro_usd,
-    remaining_micro_usd: remainingMicroUsd({
-      creditMicroUsd: account.credit_micro_usd,
-      spentMicroUsd: account.spent_micro_usd,
-    }),
+    remaining_micro_usd: creditRemaining,
+    monthly_included_micro_usd: plan.monthlyIncludedMicroUsd,
+    allowance_spent_micro_usd: allowanceSpent,
+    allowance_remaining_micro_usd: allowanceRemaining,
+    // What the pre-flight gate actually checks: allowance left + credit left.
+    spendable_remaining_micro_usd: allowanceRemaining + creditRemaining,
     // No overage exists on this plane. Published as a fact rather than left to be inferred from the
     // absence of an overage field, because "what happens when I run out" is the first question a client
-    // implementer has and the answer is: 402, until someone tops up.
+    // implementer has and the answer is: 402, until the next period or a top-up.
     overage: false,
     period: bounds.key,
     period_start: bounds.start,
@@ -75,14 +81,8 @@ export async function usageBody(
     period_micro_usd: period?.micro_usd ?? 0,
     period_requests: period?.requests ?? 0,
     period_unmetered_requests: period?.unmetered_requests ?? 0,
-    // Both directions, both monotonic, and BOTH SHOWN EVEN WHEN ZERO. A field that appears only once
-    // there has been drift is a field no client implementer writes code for, and it would first show up
-    // in production on the day the numbers stopped matching.
     period_adjust_spend_micro_usd: period?.adjust_spend_micro_usd ?? 0,
     period_adjust_credit_micro_usd: period?.adjust_credit_micro_usd ?? 0,
-    // The month's charge after reconciliation: what a client should show as "spent this month" if it
-    // shows one number. Computed here rather than left to the client so every client agrees, and stated
-    // as its own field rather than folded into period_micro_usd so the estimate stays readable.
     period_reconciled_micro_usd:
       (period?.micro_usd ?? 0) +
       (period?.adjust_spend_micro_usd ?? 0) -
@@ -110,7 +110,7 @@ export async function handleMe(ctx: Ctx, request: Request): Promise<Response> {
       status: account.suspended_at ? "suspended" : "active",
     },
     plan: publicPlan(planResult.plan),
-    usage: await usageBody(ctx.store, account, ctx.now),
+    usage: await usageBody(ctx.store, account, ctx.now, planResult.plan),
   });
 }
 
@@ -147,5 +147,8 @@ export async function handleUsage(ctx: Ctx, request: Request): Promise<Response>
   const planResult = resolvePlan(ctx.requestId, authed.caller);
   if (!planResult.ok) return planResult.response;
 
-  return jsonResponse(ctx.requestId, await usageBody(ctx.store, authed.caller.account, ctx.now));
+  return jsonResponse(
+    ctx.requestId,
+    await usageBody(ctx.store, authed.caller.account, ctx.now, planResult.plan),
+  );
 }

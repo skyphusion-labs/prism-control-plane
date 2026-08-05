@@ -73,9 +73,8 @@ enrollment tokens, and revoke client keys. They are not part of the client contr
   token counts against a per-model rate pinned in `src/catalog.ts`. Cloudflare's own per-request cost
   figure is read back later, by `POST /admin/reconcile`, and used only to **true up** the estimate as an
   auditable adjustment; it never gates or delays a response. See `docs/ARCHITECTURE.md#pricing-and-why-it-needs-reconciliation`.
-- Today a plan is an entitlement set plus a one-time signup credit, not a monthly bucket: the flat plan's
-  **monthly included-token allowance is not built yet**
-  ([#11](https://github.com/skyphusion-labs/prism-control-plane/issues/11)).
+- **Monthly allowance then prepaid credit.** `plans.monthly_included_micro_usd` is spent first each
+  UTC month; unused expires (never becomes a cash grant). Zero means pure prepaid. Credit is lifetime.
 - **Unmetered is a first-class outcome.** A model that answers without usable token counts, or a
   request we stopped waiting for, records a ledger row with `metered = 0` and a reason, charges
   nothing, and increments a separate `unmetered_requests` counter that `GET /v1/usage` publishes.
@@ -127,15 +126,11 @@ store and a fake runner.
 
 ## Status
 
-**Deployed and live** at `play-proxy.skyphusion.org`. Built: the client contract, the Worker and its
-route table, the D1 schema, client-key auth with one-time enrollment, entitlement and rate gates, the
-prepaid balance gate, the priced usage ledger, SSE streaming with trailing-usage capture, and the AI
-Gateway cost reconciliation job (`POST /admin/reconcile`, operator-triggered, dry run by default; see
-[#12](https://github.com/skyphusion-labs/prism-control-plane/issues/12)). 260 tests. **Not built:** the
-flat plan's monthly included-token allowance (only the prepaid balance half exists;
-[#11](https://github.com/skyphusion-labs/prism-control-plane/issues/11)), a refresh of `src/catalog.ts`
-from `compat/models`, and a receipt-validated enrollment source. There is no overage billing and there
-never will be. No paid traffic has been served through it yet.
+**Deployed and live** at `play-proxy.skyphusion.org`. Built: the client contract, dual-pool metering
+(monthly allowance then prepaid credit), shared-token AI Gateway proxy with `cf-aig-metadata`
+attribution, priced catalog (44/45 chat models), SSE metering, and operator reconciliation
+(`POST /admin/reconcile`). **Not built:** auto catalog refresh from `compat/models`, store-receipt
+enrollment, reconcile cron. No overage billing, ever. No paid traffic yet.
 
 Full production wiring, the mermaid flowchart, and the reconciliation design are in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Agent-facing guidance, non-negotiables, and deploy /

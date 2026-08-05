@@ -1,86 +1,150 @@
-// The prepaid spend gate. PURE.
+// The spend gate: monthly allowance first, then prepaid credit. PURE.
 //
-// PREPAID ONLY, ruled 2026-08-04. There is no overage, no postpaid, no grace. An account may spend what
-// it has been granted and not one request more. When the balance is gone the door answers 402 and stays
-// shut until someone tops it up. This is the entire money model, and its simplicity is the feature: there
-// is no state in which this plane is owed money by a user.
+// PREPAID ONLY ON THE CREDIT SIDE, ruled 2026-08-04 and kept. There is no overage, no postpaid, no
+// grace. When both pools are gone the door answers 402 and stays shut until the next period
+// (allowance) or a top-up (credit).
 //
-// WHAT THIS GATE CAN AND CANNOT DO, stated up front because the limitation is inherent and pretending
-// otherwise would be the actual defect:
+// TWO POOLS (issue #11):
 //
-// The cost of a request is not known until the model answers. So the only thing checkable BEFORE spending
-// is what has already been recorded. An account sitting just under its balance will therefore be allowed
-// one more request, and that request can carry it negative. The overshoot is bounded by one request priced
-// at the plan's max_output_tokens against the most expensive entitled model, which is why plans.ts refuses
-// a plan whose output ceiling is not a positive integer: that number is what makes the bound real rather
-// than rhetorical.
+//   monthly allowance   plan.monthly_included_micro_usd for the current UTC month. Spent first.
+//                       Resets when the period_key rolls; unused expires, never becomes credit.
+//   prepaid credit      accounts.credit_micro_usd - accounts.spent_micro_usd. Lifetime. Never expires.
 //
-// The alternatives were considered and are worse. Reserving an estimate up front and refunding the
-// difference doubles the write path and makes every crashed request leak a reservation. A hard mid-request
-// abort would bill the tokens already generated and hand the client nothing. So: allow the overshoot,
-// bound it, and say so in the contract.
+// Spend order on every metered request: allowance first, then credit. A request can split across both.
 //
-// A NEGATIVE BALANCE IS NOT A DEBT. It is the recorded size of that single overshoot. Nobody is invoiced
-// for it; the account simply cannot spend again until credit covers it.
+// THE PRE-FLIGHT LIMITATION is the same as before: cost is unknown until the model answers, so the
+// gate checks what is already recorded. An account can overshoot the combined remaining pool by at
+// most one request, bounded by max_output_tokens against the most expensive entitled model.
+//
+// A NEGATIVE CREDIT BALANCE IS NOT A DEBT. It is the recorded size of that single overshoot. Nobody
+// is invoiced for it; the account simply cannot spend again until credit covers it (or a new period
+// restores allowance).
 
 export interface BalanceState {
   /** Integer micro-USD granted to this account, ever. Monotonic. */
   creditMicroUsd: number;
-  /** Integer micro-USD recorded as spent, ever. Monotonic. */
+  /** Integer micro-USD of prepaid credit recorded as spent, ever. Monotonic. */
   spentMicroUsd: number;
 }
 
+export interface SpendPools {
+  creditMicroUsd: number;
+  spentMicroUsd: number;
+  /** Plan's monthly included grant for this period. Zero = pure prepaid. */
+  monthlyIncludedMicroUsd: number;
+  /** Allowance already consumed in this period. */
+  allowanceSpentMicroUsd: number;
+}
+
 export type BalanceDecision =
-  | { outcome: "allow"; remainingMicroUsd: number }
-  | { outcome: "exhausted"; creditMicroUsd: number; spentMicroUsd: number }
+  | { outcome: "allow"; remainingMicroUsd: number; remainingAllowanceMicroUsd: number; remainingCreditMicroUsd: number }
+  | { outcome: "exhausted"; creditMicroUsd: number; spentMicroUsd: number; remainingAllowanceMicroUsd: number }
   /** We could not establish the account's position, so we do not spend on its behalf. */
   | { outcome: "indeterminate"; reason: string };
 
-/**
- * Decide whether one more request may be spent.
- *
- * `indeterminate` IS NOT `exhausted`, and the difference is load-bearing. Exhausted is a fact about the
- * account (402; the client should stop asking until it is topped up). Indeterminate is a fact about US
- * (503; it is a bug or a corrupted counter on this side). Mapping a broken counter to 402 would tell a
- * user who has paid that their credit is gone when it may be untouched -- the worst kind of wrong:
- * plausible, user-blaming, and invisible to us.
- *
- * Both refuse the request. Fail-closed either way: unmetered service is the one outcome this plane exists
- * to prevent.
- *
- * NOTE that spent is allowed to EXCEED credit here without being called indeterminate. That is the
- * bounded overshoot above, a normal state, not corruption. Only a value that cannot be money at all -- a
- * non-integer, or a negative -- is indeterminate.
- */
-export function decideBalance(state: BalanceState): BalanceDecision {
-  if (!Number.isInteger(state.creditMicroUsd) || state.creditMicroUsd < 0) {
-    return {
-      outcome: "indeterminate",
-      reason: `granted credit ${String(state.creditMicroUsd)} is not a non-negative integer micro-USD`,
-    };
-  }
-  if (!Number.isInteger(state.spentMicroUsd) || state.spentMicroUsd < 0) {
-    return {
-      outcome: "indeterminate",
-      reason: `recorded spend ${String(state.spentMicroUsd)} is not a non-negative integer micro-USD`,
-    };
-  }
-  if (state.spentMicroUsd >= state.creditMicroUsd) {
-    return {
-      outcome: "exhausted",
-      creditMicroUsd: state.creditMicroUsd,
-      spentMicroUsd: state.spentMicroUsd,
-    };
-  }
-  return { outcome: "allow", remainingMicroUsd: state.creditMicroUsd - state.spentMicroUsd };
+export interface ChargeAllocation {
+  fromAllowanceMicroUsd: number;
+  fromCreditMicroUsd: number;
 }
 
 /**
- * Clamped remaining balance, for display.
+ * Remaining monthly allowance for the current period. Clamped at zero.
  *
- * Never negative: an overshot account reads as 0 remaining rather than as a negative number a client would
- * have to interpret as a debt. The true signed position stays available to operators as credit minus spend.
+ * Overshoot (allowanceSpent > monthlyIncluded) is a normal single-request overshoot state, not corruption.
+ */
+export function remainingAllowanceMicroUsd(pools: Pick<SpendPools, "monthlyIncludedMicroUsd" | "allowanceSpentMicroUsd">): number {
+  if (!Number.isInteger(pools.monthlyIncludedMicroUsd) || pools.monthlyIncludedMicroUsd < 0) return 0;
+  if (!Number.isInteger(pools.allowanceSpentMicroUsd) || pools.allowanceSpentMicroUsd < 0) return 0;
+  return Math.max(0, pools.monthlyIncludedMicroUsd - pools.allowanceSpentMicroUsd);
+}
+
+/**
+ * Clamped remaining prepaid credit, for display and for the gate.
+ *
+ * Never negative: an overshot account reads as 0 remaining rather than as a negative number a client
+ * would have to interpret as a debt. The true signed position stays available to operators as credit
+ * minus spend.
  */
 export function remainingMicroUsd(state: BalanceState): number {
   return Math.max(0, state.creditMicroUsd - state.spentMicroUsd);
+}
+
+/**
+ * Decide whether one more request may be spent against the two pools.
+ *
+ * `indeterminate` IS NOT `exhausted`. Exhausted is a fact about the account (402). Indeterminate is a
+ * fact about US (503). Mapping a broken counter to 402 would tell a paying user their credit is gone
+ * when it may be untouched.
+ *
+ * Allow when EITHER pool still has room (remaining allowance > 0, or spent < credit). Exhausted only
+ * when both are gone.
+ */
+export function decideBalance(pools: SpendPools): BalanceDecision {
+  if (!Number.isInteger(pools.creditMicroUsd) || pools.creditMicroUsd < 0) {
+    return {
+      outcome: "indeterminate",
+      reason: `granted credit ${String(pools.creditMicroUsd)} is not a non-negative integer micro-USD`,
+    };
+  }
+  if (!Number.isInteger(pools.spentMicroUsd) || pools.spentMicroUsd < 0) {
+    return {
+      outcome: "indeterminate",
+      reason: `recorded spend ${String(pools.spentMicroUsd)} is not a non-negative integer micro-USD`,
+    };
+  }
+  if (!Number.isInteger(pools.monthlyIncludedMicroUsd) || pools.monthlyIncludedMicroUsd < 0) {
+    return {
+      outcome: "indeterminate",
+      reason: `monthly included ${String(pools.monthlyIncludedMicroUsd)} is not a non-negative integer micro-USD`,
+    };
+  }
+  if (!Number.isInteger(pools.allowanceSpentMicroUsd) || pools.allowanceSpentMicroUsd < 0) {
+    return {
+      outcome: "indeterminate",
+      reason: `allowance spent ${String(pools.allowanceSpentMicroUsd)} is not a non-negative integer micro-USD`,
+    };
+  }
+
+  const remainingAllowance = remainingAllowanceMicroUsd(pools);
+  const remainingCredit = remainingMicroUsd({
+    creditMicroUsd: pools.creditMicroUsd,
+    spentMicroUsd: pools.spentMicroUsd,
+  });
+
+  if (remainingAllowance === 0 && pools.spentMicroUsd >= pools.creditMicroUsd) {
+    return {
+      outcome: "exhausted",
+      creditMicroUsd: pools.creditMicroUsd,
+      spentMicroUsd: pools.spentMicroUsd,
+      remainingAllowanceMicroUsd: 0,
+    };
+  }
+
+  return {
+    outcome: "allow",
+    remainingMicroUsd: remainingAllowance + remainingCredit,
+    remainingAllowanceMicroUsd: remainingAllowance,
+    remainingCreditMicroUsd: remainingCredit,
+  };
+}
+
+/**
+ * Split one metered charge across allowance then credit.
+ *
+ * Allowance is taken first up to what remains; the rest is credit (which may overshoot). Unmetered
+ * charges never reach this function.
+ */
+export function allocateCharge(
+  microUsd: number,
+  pools: Pick<SpendPools, "monthlyIncludedMicroUsd" | "allowanceSpentMicroUsd">,
+): ChargeAllocation {
+  if (!Number.isInteger(microUsd) || microUsd <= 0) {
+    return { fromAllowanceMicroUsd: 0, fromCreditMicroUsd: 0 };
+  }
+  const remainingAllowance = remainingAllowanceMicroUsd(pools);
+  const fromAllowance = Math.min(microUsd, remainingAllowance);
+  return {
+    fromAllowanceMicroUsd: fromAllowance,
+    fromCreditMicroUsd: microUsd - fromAllowance,
+  };
 }
