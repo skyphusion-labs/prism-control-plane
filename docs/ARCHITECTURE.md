@@ -81,15 +81,16 @@ flowchart TB
     meter -->|"write ledger row,<br/>advance spend"| d1
 
     cred -->|"CF_AIG_TOKEN<br/>(shared, Worker secret)"| gw
-    meter -.->|"POST /ai/v1/chat/completions<br/>+ cf-aig-metadata<br/>+ cf-aig-collect-log-payload: false"| gw
+    meter -.->|"POST gateway.ai.cloudflare.com<br/>/v1/{acct}/{gw}/…/chat/completions<br/>+ cf-aig-metadata<br/>+ cf-aig-collect-log-payload: false"| gw
     gw --> wai
     gw --> prov
 
-    gw -.->|"cost + token counts<br/>(reconciliation, NOT yet automated)"| meter
+    gw -.->|"cost + token counts<br/>(POST /admin/reconcile,<br/>operator-triggered, no cron yet)"| meter
 ```
 
-The dashed gateway-to-meter edge is the honest part: Cloudflare's own per-request cost figure is
-available in the gateway logs, and nothing reads it back yet. See **Pricing** below.
+The dashed gateway-to-meter edge is deliberately non-continuous: `POST /admin/reconcile` reads
+Cloudflare's own per-request cost figure back from the gateway logs and trues up the D1 ledger, but
+nothing schedules it yet, only an operator call. See **Pricing** and **Reconciliation** below.
 
 ### Gate order
 
@@ -303,25 +304,107 @@ Editing a Cloudflare token's policies does **not** change its value, so the escr
 live Worker secret stayed valid. In per-user credential mode there is no shared token, so
 `POST /admin/reconcile` answers 503 rather than quietly doing nothing.
 
-### KNOWN BLOCKER: inference does not currently reach the gateway
+### Why the spend path addresses the gateway host, not the AI REST API
 
-**Measured 2026-08-05, and it means reconciliation will read an empty feed in production until it is
-fixed.** `src/upstream.ts` calls `POST /accounts/{id}/ai/v1/chat/completions` with a
-`cf-aig-gateway-id: prism-proxy` header, which is exactly what Cloudflare's own Workers AI and REST API
-docs prescribe. On this account it does not route through the gateway:
+Resolves [#15](https://github.com/skyphusion-labs/prism-control-plane/issues/15). This section records
+the measurement rather than the first diagnosis, because the first diagnosis was partly wrong and the
+correction is the interesting part.
 
-| Probe | Result |
-| --- | --- |
-| REST path + `cf-aig-gateway-id`, valid credentials | `200`, completion served, **no `cf-aig-*` response headers, no log row** |
-| REST path + `cf-aig-gateway-id`, **deliberately invalid** `cf-aig-authorization` | still `200` and a served completion |
-| `gateway.ai.cloudflare.com/v1/{acct}/prism-proxy/workers-ai/v1/chat/completions` | `200`, `cf-aig-log-id` header, log row with our full `cf-aig-metadata` and a `cost` |
-| Same canonical URL, invalid `cf-aig-authorization` | `401` `AiGatewayError` code 2009 |
+Eleven live probes on 2026-08-05, all `@cf/meta/llama-3.2-1b-instruct` at 8 output tokens, each tagged
+with a distinct `cf-aig-metadata.request_id` and then looked up in the gateway's own log feed:
 
-`prism-proxy` has `collect_logs: true`, `cache_ttl: 0`, `authentication: true`. A gateway with
-authentication ON that answers `200` to a garbage gateway credential is not in the request path at all,
-so the REST path is bypassing it: no attribution, no cost row, nothing to reconcile. The reconciliation
-code is correct and its live read is verified; what is missing is traffic in the feed. Tracked
-separately -- do not "fix" it by weakening a privacy or fail-closed path.
+| Probe | Status | `cf-aig-log-id` returned | Log row |
+| --- | --- | --- | --- |
+| REST `POST /ai/v1/chat/completions` + `cf-aig-gateway-id: prism-proxy` | `200` | no `cf-aig-*` headers at all | **yes, on `prism-proxy`**, full metadata, `cost` |
+| Same, `cf-aig-gateway-id: default` | `200` | none | yes, on `default` |
+| Same, `prism-proxy`, invalid `cf-aig-authorization`, **valid `Authorization`** | `200` | none | yes. Wrong slot; proves nothing, see below |
+| Same, headers byte-identical to the shipped `upstreamHeaders` | `200` | none | yes, on `prism-proxy` |
+| `.../prism-proxy/workers-ai/v1/chat/completions` | `200` | `01KZ8ER0NY...` | yes |
+| Same, invalid `cf-aig-authorization` | **`401`** `AiGatewayError` 2009 | -- | no |
+| Same, **keyless** (`cf-aig-authorization` only, no `authorization`) | `200` | `01KZ8EW3FE...` | yes |
+| Same, `stream: true` | `200` | `01KZ8EW4YM...` | yes, and the trailing usage frame arrived |
+| `.../prism-proxy/compat/chat/completions`, `workers-ai/@cf/...` | `200` | `01KZ8ER13P...` | yes |
+| Same, invalid `cf-aig-authorization` | **`401`** | -- | no |
+| Same, `anthropic/claude-haiku-4-5`, keyless | `200` | `01KZ8EXF6T...` | yes, `provider=anthropic`, `cost` |
+
+`prism-proxy`: `collect_logs: true`, `cache_ttl: 0`, `authentication: true`.
+
+**The REST path does route and does log**, contrary to the original #15 report. Nine of the eleven probes
+above are about a narrower defect than the one first reported, and the row that looked like an auth
+bypass was a probe error. Both corrections are below.
+
+#### What the move to the gateway host actually buys
+
+In descending order of how much it is worth:
+
+1. **A per-request transit receipt.** `cf-aig-log-id` comes back on every served response from the
+   gateway host, streamed or not. The REST path returns **no `cf-aig-*` response headers at all**, so
+   there transit could only be inferred. A plane that has quietly stopped going through its gateway
+   otherwise looks exactly like one that has not, and `src/upstream.ts` now logs at **error** level when
+   a served request carries no log id.
+2. **`usage_events.gateway_log_id` becomes populatable.** This is a **debugging join, not a
+   reconciliation prerequisite**, and conflating the two is how #15 was first misread. `src/reconcile.ts`
+   joins a gateway row to a ledger row on `cf-aig-metadata.request_id`, and the REST path emitted those
+   rows with metadata and `cost` intact. Reconciliation worked before this change and works after it.
+   What the log id adds is a direct row-level handle when one request needs chasing.
+3. **The credential can narrow.** The gateway host needs `AI Gateway Run`. The REST endpoint also wanted
+   `Workers AI Read`. One fewer permission on a token that can spend.
+4. **On `/compat`, the plain `authorization` header is the provider key slot**, so keeping the Cloudflare
+   token out of it is a constraint *of* this path rather than a flaw of the old one. See below.
+
+#### What this change is not: a security fix
+
+The REST path was authenticated. Cloudflare's
+[Authenticated Gateway doc](https://developers.cloudflare.com/ai-gateway/configuration/authentication/)
+is explicit that the credential slot differs by surface: the REST API on `api.cloudflare.com` reads the
+standard `Authorization` header, and only the provider-native endpoints on `gateway.ai.cloudflare.com`
+read `cf-aig-authorization`. The old `src/upstream.ts` sent a valid token in `Authorization` as well, so
+`prism-proxy` was authenticating that traffic the whole time.
+
+The probe row above marked *invalid `cf-aig-authorization`, valid `Authorization`* therefore proves
+nothing about the gate. It varied `cf-aig-authorization` while leaving a valid `Authorization` in place,
+which on that surface is the wrong slot: `200` is the **documented** outcome of a correctly authenticated
+request. The control probe that was missing from the original set has since been run, and it closes the
+question:
+
+| Control probe | Status | Body |
+| --- | --- | --- |
+| REST + `cf-aig-gateway-id: prism-proxy`, **no `Authorization`** | **`401`** | `code 10000`, `Authentication error` |
+| REST + `cf-aig-gateway-id: prism-proxy`, **invalid `Authorization`** | **`401`** | `code 10000`, `Authentication error` |
+| `.../prism-proxy/workers-ai/v1/chat/completions`, **no `cf-aig-authorization`** | **`401`** | `AiGatewayError` `2009`, `Unauthorized` |
+
+Run 2026-08-05, **$0.00**: no credential means no completion, so all three refuse before any inference.
+The REST surface validates the credential in `Authorization` and is not anonymously reachable, and the
+third row independently re-confirms `prism-proxy` still runs `authentication: true`. So gateway auth was
+enforced on the old path all along, in a header the code was already sending. **Do not re-file #15 as a
+security issue.**
+
+#### The trade
+
+Cloudflare **recommends the REST API for new integrations** and describes the `gateway.ai.cloudflare.com`
+endpoints as continuing to work. This plane deliberately sits on the softer-deprecated surface, and it
+does so to buy the receipt in (1). That is also where every sibling on this estate already is:
+common-thread, prism's third-party dispatch, and the vivijure tenant modules all address the gateway host
+with `cf-aig-authorization`. Revisit if Cloudflare either starts returning `cf-aig-*` receipts on the
+REST path or announces a sunset here.
+
+Two endpoints, selected from the catalog's `billing` field:
+
+| Billing surface | Endpoint | Model id sent |
+| --- | --- | --- |
+| `workers-ai` | `/workers-ai/v1/chat/completions` | `@cf/...` unchanged |
+| `unified-billing` | `/compat/chat/completions` | `provider/model` unchanged |
+
+**The credential goes in `cf-aig-authorization` and nowhere else.** On `/compat` the plain
+`authorization` header is the provider key slot: a value there is forwarded upstream as BYOK, which
+would both disclose a Cloudflare API token to Anthropic or OpenAI and switch the request off Unified
+Billing. Keyless is measurably sufficient on both endpoints, and it matches prism's own provider
+dispatch since v0.93.0.
+
+`tests/upstream.test.ts` pins the host, the per-surface endpoint, the absence of an `authorization`
+header, and a loud `console.error` when the gateway serves a request it did not log. A missing log id is
+**not** turned into a client error: the completion is already generated and already billed to us, so
+refusing it would throw money away and deny the caller a response we paid for.
 
 ## Code map
 
@@ -329,7 +412,7 @@ separately -- do not "fix" it by weakening a privacy or fail-closed path.
 | --- | --- |
 | `src/index.ts` | Worker entry plus the whole route table. `handleRequest` takes its dependencies, which is what makes tests hermetic. |
 | `src/env.ts` | Hand-authored `Env`, mirroring `wrangler.example.toml`. Never commit a generated `worker-configuration.d.ts`. |
-| `src/upstream.ts` | The one place Cloudflare's AI REST API is called, and the only place the privacy headers are set. |
+| `src/upstream.ts` | The one place a model is called, always at the AI Gateway host, and the only place the privacy headers are set. |
 | `src/aig-logs.ts` | The one place the gateway LOG API is read. GET only; refuses stored-payload endpoints. |
 | `src/reconcile.ts` | What one gateway row means for one ledger row. Pure. |
 | `src/reconcile-run.ts` | One reconciliation run: paging, applying, watermark, reverse check. |

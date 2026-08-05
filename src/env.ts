@@ -16,10 +16,10 @@ export interface Env {
    * THERE IS NO `AI` BINDING, and its absence is deliberate even though the default credential mode is now
    * a shared one.
    *
-   * The binding hard-codes ONE identity: the Worker's. Calling the AI REST API instead (src/upstream.ts)
-   * means the credential is an argument, which is what lets UPSTREAM_CREDENTIAL_MODE be a config switch
-   * rather than a rewrite. Adding the binding back would make the shared path the only possible path and
-   * quietly delete the choice.
+   * The binding hard-codes ONE identity: the Worker's. Calling the AI Gateway over HTTP instead
+   * (src/upstream.ts) means the credential is an argument, which is what lets UPSTREAM_CREDENTIAL_MODE be
+   * a config switch rather than a rewrite. Adding the binding back would make the shared path the only
+   * possible path and quietly delete the choice.
    */
 
   /** The Cloudflare account inference runs on. A plain var: an account id is not a secret. */
@@ -171,8 +171,9 @@ export function userTokenBudget(env: Env, accountQuota: number): number | null {
  * fail-closed seam: a function rather than an inline check, so there is exactly one answer to "are we
  * allowed to spend right now" and a test can assert the refusal without a Worker.
  *
- * BOTH the account id and the gateway slug are required. The REST API path is built from the account id,
- * so a missing one is not a degraded mode, it is no upstream at all.
+ * BOTH the account id and the gateway slug are required. The upstream URL is built from both
+ * (`gateway.ai.cloudflare.com/v1/{account}/{gateway}/...`), so a missing one is not a degraded mode, it is
+ * no upstream at all.
  */
 export function gatewayConfig(env: Env): GatewayConfig | null {
   const accountId = (env.CF_ACCOUNT_ID ?? "").trim();

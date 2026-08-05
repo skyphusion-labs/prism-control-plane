@@ -10,7 +10,7 @@
 //
 // Splitting them is what keeps "does the gate refuse" a unit test rather than an integration exercise.
 
-import { restRunner } from "./upstream";
+import { gatewayRunner } from "./upstream";
 import { errorResponse, newRequestId } from "./http";
 import { d1Store } from "./store-d1";
 import { CfApi } from "./cf-api";
@@ -159,7 +159,7 @@ export default {
       // `runner` or `credentials` null turns the inference route into a 503; `logs` null turns
       // POST /admin/reconcile into one. Every other route works normally, so a half-configured deploy
       // closes the door that costs money without taking the read surface down with it.
-      runner: restRunner(env),
+      runner: gatewayRunner(env),
       credentials: upstreamCredentialSource(env, store, () => Math.floor(now.getTime() / 1000)),
       logs: gatewayLogs(env),
       requestId,

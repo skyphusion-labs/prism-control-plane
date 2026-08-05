@@ -357,7 +357,9 @@ export async function runReconcile(args: ReconcileRunArgs): Promise<ReconcileRun
 }
 
 /**
- * The run as structured logs, for Workers observability and the Grafana panels built on it.
+ * The run as structured logs, for Cloudflare Workers Observability. Any Gatus check or Grafana panel
+ * reading these is future work, not built here; this function only guarantees the two lines exist and
+ * carry a stable shape for one to be built against later.
  *
  * TWO LINES WITH DIFFERENT LEVELS, because they answer different questions and only one of them should
  * ever wake anybody. The `info` line is the time series (rows, drift, skips) and is emitted every run.
