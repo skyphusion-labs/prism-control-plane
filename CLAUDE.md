@@ -23,17 +23,30 @@ operator-triggered, dry run by default). **Not built:** the flat plan's monthly 
 from `compat/models`, and a receipt-validated enrollment source. No paid traffic has been served through
 it yet. Aviation-grade `main` (PR + `ci` + `coverage` + CodeQL).
 
-**The spend path addresses the AI Gateway host, and that is load-bearing**
+**The spend path addresses the AI Gateway host**
 ([#15](https://github.com/skyphusion-labs/prism-control-plane/issues/15)). `src/upstream.ts` POSTs to
 `gateway.ai.cloudflare.com/v1/{account}/{gateway}/...`, never to the AI REST API on `api.cloudflare.com`.
-Measured 2026-08-05: the REST path does route and does log, but it returns **no `cf-aig-*` response
-headers** (no transit receipt, so `gateway_log_id` is always null) and it **ignores
-`cf-aig-authorization`** (a deliberately invalid gateway credential is still answered `200`, even though
-`prism-proxy` runs `authentication: true`). On the gateway host both hold structurally: the log id comes
-back on every served response including SSE, and a bad gateway credential is refused `401`. Full probe
-table in `docs/ARCHITECTURE.md`; the host and the keyless-credential posture are pinned by
-`tests/upstream.test.ts`. Do not move this back to a header-named gateway, and do not "fix" anything here
-by weakening a privacy or fail-closed path.
+Measured 2026-08-05, the REST path does route and does log; what it does not return is any `cf-aig-*`
+response header, so there is no per-request transit receipt and `gateway_log_id` can only be null. The
+gateway host returns `cf-aig-log-id` on every served response including SSE, which makes
+`gateway_log_id` populatable as a **debugging join** and lets a served-but-unlogged request be caught at
+error level. It is **not** a reconciliation prerequisite: `src/reconcile.ts` joins on
+`cf-aig-metadata.request_id`, which the REST path emitted intact. Secondary gains: the credential narrows
+to `AI Gateway Run`, and on `/compat` the plain `authorization` header is the provider key slot, so the
+Cloudflare token stays out of it.
+
+**This was not a security fix, and do not let anyone re-file it as one.** Authenticated Gateway reads
+`Authorization` on the REST surface and `cf-aig-authorization` only on the gateway host, per
+[Cloudflare's doc](https://developers.cloudflare.com/ai-gateway/configuration/authentication/). The old
+code sent a valid token in `Authorization`, so `prism-proxy` was authenticating it all along; the probe
+that looked like a bypass varied the wrong header. The control probe (2026-08-05, `$0.00`) closes it:
+REST with a bad or absent `Authorization` is refused `401` code 10000, and the gateway host with no
+`cf-aig-authorization` is refused `401` `AiGatewayError` 2009. The trade taken here is
+real and recorded: Cloudflare recommends REST for new integrations, and this plane chose the
+softer-deprecated gateway host for the receipt, matching common-thread, prism, and the vivijure tenant
+modules. Full probe table and reasoning in `docs/ARCHITECTURE.md`; the host and the keyless-credential
+posture are pinned by `tests/upstream.test.ts`. Do not "fix" anything here by weakening a privacy or
+fail-closed path.
 
 **There is no overage billing and there never will be.** Prepaid only; the plane answers `402` when
 the money is gone.

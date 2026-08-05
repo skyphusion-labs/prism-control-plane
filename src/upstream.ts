@@ -1,25 +1,52 @@
 // The one place a model is actually called.
 //
-// THE URL IS THE GATEWAY, AND THAT IS THE WHOLE POINT OF THIS FILE'S SHAPE. Every call goes to
-// `https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/...`, so "did this request go through
-// our gateway" is answered by the hostname rather than by a header the far end is free to ignore. That
-// distinction is not theoretical; it is issue #15. The previous version of this file called the AI REST
-// API on `api.cloudflare.com` and named the gateway in a `cf-aig-gateway-id` header, exactly as
-// Cloudflare documents. Measured on this account 2026-08-05, that path does route and does log, but it
-// returns NO `cf-aig-*` response headers at all and it IGNORES `cf-aig-authorization`: a deliberately
-// invalid gateway credential still answered 200 and still served a completion. So on the REST path
-// there is no receipt proving transit and no gateway-side authentication, and a plane that has quietly
-// stopped going through its gateway looks exactly like one that has not.
+// THE URL IS THE GATEWAY. Every call goes to
+// `https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/...`, never to the AI REST API on
+// `api.cloudflare.com` that the previous version of this file used. Issue #15. What that move buys, in
+// descending order of how much it is worth:
 //
-// On this path both of those hold structurally:
-//   * `cf-aig-log-id` comes back on EVERY served response, streamed or not (measured; the note in
-//     prism's README that the gateway does not surface it on SSE is stale for this endpoint).
-//   * `prism-proxy` runs with `authentication: true`, so a request carrying a bad gateway credential
-//     is refused 401 (`AiGatewayError` 2009) instead of being served. A bypass cannot succeed quietly.
+//   1. A PER-REQUEST TRANSIT RECEIPT. `cf-aig-log-id` comes back on EVERY served response from this
+//      host, streamed or not (measured 2026-08-05; the note in prism's README that the gateway does not
+//      surface it on SSE is stale for this endpoint). The REST path returns no `cf-aig-*` response
+//      headers at all, so "did this request go through our gateway" could only be inferred there. A
+//      plane that has quietly stopped going through its gateway otherwise looks exactly like one that
+//      has not, and the check below is what makes the gap visible.
+//   2. `usage_events.gateway_log_id` BECOMES POPULATABLE. This is a DEBUGGING JOIN, not a
+//      reconciliation prerequisite, and conflating the two is how #15 first got misread.
+//      `src/reconcile.ts` joins a gateway row to a ledger row on `cf-aig-metadata.request_id`, and the
+//      REST path emitted those rows with metadata and `cost` intact. Reconciliation worked before this
+//      change and works after it. What the log id adds is a direct row-level handle when a single
+//      request needs chasing.
+//   3. THE CREDENTIAL CAN NARROW. This endpoint needs `AI Gateway Run`; the REST endpoint also wanted
+//      `Workers AI Read` (see `CF_AIG_TOKEN` in src/env.ts). One fewer permission on a spendable token.
+//   4. ON `/compat`, THE PLAIN `authorization` HEADER IS THE PROVIDER KEY SLOT, so keeping the
+//      Cloudflare token out of it is a constraint OF this path rather than a flaw of the old one. See
+//      the credential note below.
+//
+// WHAT THIS CHANGE IS NOT: A SECURITY FIX. The REST path was authenticated. Cloudflare's Authenticated
+// Gateway doc is explicit that the credential slot differs by surface -- the REST API on
+// `api.cloudflare.com` reads the standard `Authorization` header, and only the provider-native
+// endpoints on `gateway.ai.cloudflare.com` read `cf-aig-authorization`. The old code sent a valid token
+// in `Authorization` as well, so `prism-proxy` (`authentication: true`) was authenticating it the whole
+// time. The 2026-08-05 probe that appeared to show a bypass varied `cf-aig-authorization` while leaving
+// a valid `Authorization` in place, which is the wrong slot: a 200 there is the DOCUMENTED outcome of a
+// correctly authenticated request, not an unenforced gate. The control probe confirms it -- REST with a
+// bad or absent `Authorization` is refused 401 (code 10000), and the gateway host with no
+// `cf-aig-authorization` is refused 401 (`AiGatewayError` 2009), so both surfaces authenticate and
+// neither is anonymously reachable. Do not re-file #15 as a security issue.
+// https://developers.cloudflare.com/ai-gateway/configuration/authentication/
+//
+// THE TRADE, STATED RATHER THAN OMITTED. Cloudflare recommends the REST API for NEW integrations and
+// describes the `gateway.ai.cloudflare.com` endpoints as continuing to work, so this file deliberately
+// sits on the softer-deprecated surface, and it does so to buy the receipt in (1). That is also where
+// every sibling on this estate already is: common-thread, prism's third-party dispatch, and the
+// vivijure tenant modules all address the gateway host with `cf-aig-authorization`. Revisit if
+// Cloudflare either starts returning `cf-aig-*` receipts on the REST path or announces a sunset here.
 //
 // WHY THE GATEWAY HTTP PATH AND NOT THE `env.AI` BINDING. The binding hard-codes one identity, the
-// Worker's. An HTTP call takes its credential as a per-request ARGUMENT, which is what lets this plane
-// run either a shared account credential or a per-user minted one without a second code path.
+// Worker's, and is pre-authenticated within the account. An HTTP call takes its credential as a
+// per-request ARGUMENT, which is what lets this plane run either a shared account credential or a
+// per-user minted one without a second code path.
 //
 // TWO ENDPOINTS, ONE PER BILLING SURFACE, chosen from the catalog's `billing` field rather than by
 // sniffing the model id:
