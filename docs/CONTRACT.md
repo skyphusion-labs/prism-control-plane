@@ -164,10 +164,13 @@ unspendable:
 Live mic STT via **Deepgram Flux** (`@cf/deepgram/flux`). Not a one-shot HTTP body.
 
 1. Upgrade with `Upgrade: websocket`.
-2. Authenticate: `Authorization: Bearer pcp_...` **or** query `?access_token=pcp_...`.
+2. Authenticate **without putting the key in the URL** (query tokens are rejected; they leak in logs):
+   - Prefer `Authorization: Bearer pcp_...` (native clients).
+   - Browsers: `new WebSocket(url, ["prism.v1", clientKey])` so the key rides
+     `Sec-WebSocket-Protocol` (the server echoes `prism.v1`).
 3. Send binary linear16 PCM at 16 kHz; receive Deepgram JSON events (including EndOfTurn).
-4. On close, the plane meters **ceil(duration/60)** audio minutes at the model unit rate (no transcript
-   is stored -- privacy invariant).
+4. On close (or after a **15-minute** hard cap), the plane meters **ceil(duration/60)** audio minutes
+   at the catalog unit rate (no transcript is stored -- privacy invariant).
 
 Requires Worker bindings: `AI` and Durable Object `STT_SESSION`.
 

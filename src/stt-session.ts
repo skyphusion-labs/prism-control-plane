@@ -15,9 +15,14 @@ import { newId } from "./crypto";
 import { periodKey } from "./period";
 import { allocateCharge } from "./balance";
 import { planFromRow } from "./plans";
-import { FLUX_DEFAULT_UNIT_MICRO, FLUX_STT_MODEL } from "./flux-stt";
+import { findModel } from "./catalog";
+import { resolveUnitPrice } from "./meter";
+import { FLUX_DEFAULT_UNIT_MICRO, FLUX_STT_MODEL, STT_WS_PROTOCOL } from "./flux-stt";
 
-export { FLUX_DEFAULT_UNIT_MICRO, FLUX_STT_MODEL } from "./flux-stt";
+export { FLUX_DEFAULT_UNIT_MICRO, FLUX_STT_MODEL, STT_WS_PROTOCOL } from "./flux-stt";
+
+/** Hard wall-clock cap so an idle open socket cannot bill forever (audit medium). */
+export const FLUX_MAX_SESSION_MS = 15 * 60 * 1000;
 
 interface FluxRunResult {
   webSocket?: WebSocket | null;
@@ -28,13 +33,14 @@ interface SessionMeta {
   client_id: string;
   plan_id: string;
   request_id: string;
-  unit_micro_usd: number;
+  model_id: string;
   started_ms: number;
 }
 
 export class SttSession extends DurableObject<Env> {
   private upstream: WebSocket | null = null;
   private finalized = false;
+  private maxTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -47,12 +53,13 @@ export class SttSession extends DurableObject<Env> {
 
   async fetch(request: Request): Promise<Response> {
     // Headers set by the Worker after client-key auth. Missing any is a wiring bug.
+    // Unit rate is NOT passed in headers (tamper surface); resolved from catalog at finalize.
     const accountId = request.headers.get("x-prism-account-id") ?? "";
     const clientId = request.headers.get("x-prism-client-id") ?? "";
     const planId = request.headers.get("x-prism-plan-id") ?? "";
     const requestId = request.headers.get("x-prism-request-id") ?? newId("req");
-    const unitRaw = request.headers.get("x-prism-unit-micro-usd");
-    const unitMicro = unitRaw && Number.isInteger(Number(unitRaw)) ? Number(unitRaw) : FLUX_DEFAULT_UNIT_MICRO;
+    const modelId = request.headers.get("x-prism-model-id") ?? FLUX_STT_MODEL;
+    const acceptProtocol = request.headers.get("x-prism-ws-protocol");
 
     if (!accountId || !clientId || !planId) {
       return Response.json(
@@ -60,16 +67,22 @@ export class SttSession extends DurableObject<Env> {
         { status: 500 },
       );
     }
+    if (modelId !== FLUX_STT_MODEL) {
+      return Response.json(
+        { error: { code: "invalid_request", message: "Only Deepgram Flux is supported on this door." } },
+        { status: 400 },
+      );
+    }
 
     this.ctx.storage.sql.exec(
       `INSERT OR REPLACE INTO meta (k, v) VALUES
          ('account_id', ?), ('client_id', ?), ('plan_id', ?),
-         ('request_id', ?), ('unit_micro_usd', ?), ('started_ms', ?)`,
+         ('request_id', ?), ('model_id', ?), ('started_ms', ?)`,
       accountId,
       clientId,
       planId,
       requestId,
-      String(unitMicro),
+      modelId,
       String(Date.now()),
     );
 
@@ -131,6 +144,23 @@ export class SttSession extends DurableObject<Env> {
     const server = pair[1];
     this.ctx.acceptWebSocket(server);
 
+    // Cap wall-clock session so an idle hold cannot bill unbounded minutes.
+    this.maxTimer = setTimeout(() => {
+      for (const ws of this.ctx.getWebSockets()) {
+        try {
+          ws.close(1000, "session max duration");
+        } catch {
+          /* */
+        }
+      }
+      try {
+        this.upstream?.close(1000, "session max duration");
+      } catch {
+        /* */
+      }
+      void this.finalize();
+    }, FLUX_MAX_SESSION_MS);
+
     upstream.addEventListener("message", (e: MessageEvent) => {
       for (const ws of this.ctx.getWebSockets()) {
         try {
@@ -159,7 +189,11 @@ export class SttSession extends DurableObject<Env> {
       }
     });
 
-    return new Response(null, { status: 101, webSocket: client });
+    const headers = new Headers();
+    if (acceptProtocol === STT_WS_PROTOCOL) {
+      headers.set("Sec-WebSocket-Protocol", STT_WS_PROTOCOL);
+    }
+    return new Response(null, { status: 101, webSocket: client, headers });
   }
 
   async webSocketMessage(_ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
@@ -208,7 +242,7 @@ export class SttSession extends DurableObject<Env> {
     const client_id = map.get("client_id");
     const plan_id = map.get("plan_id");
     const request_id = map.get("request_id");
-    const unit = Number(map.get("unit_micro_usd") ?? FLUX_DEFAULT_UNIT_MICRO);
+    const model_id = map.get("model_id") ?? FLUX_STT_MODEL;
     const started_ms = Number(map.get("started_ms") ?? Date.now());
     if (!account_id || !client_id || !plan_id || !request_id) return null;
     return {
@@ -216,7 +250,7 @@ export class SttSession extends DurableObject<Env> {
       client_id,
       plan_id,
       request_id,
-      unit_micro_usd: Number.isInteger(unit) && unit >= 0 ? unit : FLUX_DEFAULT_UNIT_MICRO,
+      model_id,
       started_ms: Number.isFinite(started_ms) ? started_ms : Date.now(),
     };
   }
@@ -224,10 +258,15 @@ export class SttSession extends DurableObject<Env> {
   /**
    * Charge audio minutes for the session. No transcript is written (privacy).
    * Idempotent: close + error can both fire.
+   * Duration is wall-clock capped at FLUX_MAX_SESSION_MS; unit rate from catalog, not headers.
    */
   private async finalize(): Promise<void> {
     if (this.finalized) return;
     this.finalized = true;
+    if (this.maxTimer) {
+      clearTimeout(this.maxTimer);
+      this.maxTimer = null;
+    }
 
     const meta = this.readMeta();
     if (!meta) {
@@ -235,9 +274,17 @@ export class SttSession extends DurableObject<Env> {
       return;
     }
 
-    const durationSec = Math.max(0, (Date.now() - meta.started_ms) / 1000);
+    const entry = findModel(meta.model_id);
+    const unitPrice = entry ? resolveUnitPrice(entry, null) : null;
+    const unitMicro =
+      unitPrice && unitPrice.unit === "audio_minute"
+        ? unitPrice.microUsdPerUnit
+        : FLUX_DEFAULT_UNIT_MICRO;
+
+    const rawSec = Math.max(0, (Date.now() - meta.started_ms) / 1000);
+    const durationSec = Math.min(rawSec, FLUX_MAX_SESSION_MS / 1000);
     const units = billableAudioMinutes(durationSec);
-    const microUsd = units * meta.unit_micro_usd;
+    const microUsd = units * unitMicro;
 
     try {
       const store = d1Store(this.env.DB);
@@ -269,7 +316,7 @@ export class SttSession extends DurableObject<Env> {
         request_id: meta.request_id,
         account_id: meta.account_id,
         client_id: meta.client_id,
-        model_id: FLUX_STT_MODEL,
+        model_id: meta.model_id,
         period_key: pkey,
         input_tokens: null,
         output_tokens: null,

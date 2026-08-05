@@ -46,6 +46,33 @@ function isCfModel(id: string): boolean {
   return id.startsWith("@cf/");
 }
 
+/**
+ * Workers AI model path segment. Rejects path traversal and characters that would
+ * rewrite the REST URL. Callers must already have resolved the id from the catalog;
+ * this is defense-in-depth, not a substitute for the allowlist.
+ */
+export function safeCfRunPath(modelId: string): string | null {
+  if (!isCfModel(modelId)) return null;
+  // @cf/vendor/name or @cf/vendor/name/variant — no ".." , no empty segments, no query/fragment.
+  if (
+    modelId.includes("..") ||
+    modelId.includes("//") ||
+    modelId.includes("\\") ||
+    modelId.includes("?") ||
+    modelId.includes("#") ||
+    modelId.includes("%") ||
+    !/^@cf\/[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)+$/.test(modelId)
+  ) {
+    return null;
+  }
+  // Encode each path segment; keep '/' separators. '@' stays unencoded in the first segment
+  // only via encodeURIComponent which encodes @ as %40 — CF accepts %40cf/ form.
+  return modelId
+    .split("/")
+    .map((seg) => encodeURIComponent(seg))
+    .join("/");
+}
+
 export function nonChatRunnerFor(deps: NonChatRunnerDeps): NonChatRunner {
   const doFetch = deps.fetchImpl ?? fetch;
 
@@ -72,7 +99,15 @@ async function runViaRest(
   deps: NonChatRunnerDeps,
   request: NonChatRunRequest,
 ): Promise<NonChatRunResult> {
-  const url = `${CF_API_HOST}/client/v4/accounts/${deps.accountId}/ai/run/${request.upstreamModel}`;
+  const pathModel = safeCfRunPath(request.upstreamModel);
+  if (!pathModel) {
+    return {
+      outcome: "upstream_error",
+      status: null,
+      detail: `Refusing REST run for model id that is not a safe Workers AI path: ${request.upstreamModel.slice(0, 80)}`,
+    };
+  }
+  const url = `${CF_API_HOST}/client/v4/accounts/${deps.accountId}/ai/run/${pathModel}`;
   const headers: Record<string, string> = {
     authorization: `Bearer ${request.auth.value}`,
     "cf-aig-gateway-id": deps.gatewayId,

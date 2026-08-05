@@ -30,8 +30,8 @@ import { checkRateLimit, inferenceBucket } from "../rate-limit";
 import type { UsageEvent } from "../store";
 import { requireCaller, type Ctx } from "./shared";
 
-/** Audio / multimodal JSON can exceed the chat body cap. 6 MiB covers ~4 MiB decoded audio/image. */
-const NONCHAT_MAX_BODY = 6 * 1024 * 1024;
+/** Audio / multimodal JSON. 4 MiB matches the LLaVA image decode cap (audit: lower than 6 MiB). */
+const NONCHAT_MAX_BODY = 4 * 1024 * 1024;
 
 interface NonChatGateOk {
   client: { id: string };

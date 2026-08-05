@@ -4,7 +4,7 @@
 // Clients may send the client key as Authorization: Bearer, or as ?access_token= for stacks that
 // cannot set upgrade headers (some browsers). Prefer Authorization on native clients.
 
-import { resolveClient } from "../auth";
+import { bearerFromRequest, resolveClient } from "../auth";
 import { decideBalance, remainingAllowanceMicroUsd, remainingMicroUsd } from "../balance";
 import { findModel } from "../catalog";
 import { newId } from "../crypto";
@@ -13,8 +13,10 @@ import { resolveUnitPrice } from "../meter";
 import { periodBounds } from "../period";
 import { entitlesTier, planFromRow } from "../plans";
 import { checkRateLimit, inferenceBucket } from "../rate-limit";
-import { FLUX_DEFAULT_UNIT_MICRO, FLUX_STT_MODEL } from "../flux-stt";
+import { FLUX_STT_MODEL, STT_WS_PROTOCOL } from "../flux-stt";
 import type { Ctx } from "./shared";
+
+export { STT_WS_PROTOCOL };
 
 export function isSttStreamUpgrade(request: Request, path: string): boolean {
   return (
@@ -22,6 +24,33 @@ export function isSttStreamUpgrade(request: Request, path: string): boolean {
     request.method === "GET" &&
     request.headers.get("Upgrade")?.toLowerCase() === "websocket"
   );
+}
+
+/**
+ * Extract the client key without putting it in the URL.
+ *
+ * Order: Authorization Bearer (preferred, native clients) → Sec-WebSocket-Protocol
+ * `prism.v1, <key>` (browsers cannot set Authorization on WebSocket).
+ *
+ * Query-string tokens are deliberately NOT accepted: access_token in the URL is
+ * logged by proxies, CDNs, and browser history (adversarial-audit high on PR #22).
+ */
+export function bearerFromSttUpgrade(request: Request): {
+  bearer: string | null;
+  /** When auth came from Sec-WebSocket-Protocol, echo this on the 101 response. */
+  acceptProtocol: string | null;
+} {
+  const headerBearer = bearerFromRequest(request);
+  if (headerBearer) return { bearer: headerBearer, acceptProtocol: null };
+
+  const proto = request.headers.get("sec-websocket-protocol");
+  if (!proto) return { bearer: null, acceptProtocol: null };
+  const parts = proto.split(",").map((p) => p.trim()).filter(Boolean);
+  // new WebSocket(url, ["prism.v1", clientKey])
+  if (parts[0] === STT_WS_PROTOCOL && parts[1] && parts[1].startsWith("pcp_")) {
+    return { bearer: parts[1], acceptProtocol: STT_WS_PROTOCOL };
+  }
+  return { bearer: null, acceptProtocol: null };
 }
 
 /**
@@ -43,17 +72,20 @@ export async function handleSttStreamUpgrade(ctx: Ctx, request: Request): Promis
     );
   }
 
-  // Bearer header, or access_token query (WebSocket clients that cannot set Authorization).
-  let authRequest = request;
-  if (!request.headers.get("authorization")) {
-    const url = new URL(request.url);
-    const token = url.searchParams.get("access_token") ?? url.searchParams.get("key");
-    if (token) {
-      const headers = new Headers(request.headers);
-      headers.set("authorization", `Bearer ${token}`);
-      authRequest = new Request(request.url, { method: request.method, headers });
-    }
+  const { bearer, acceptProtocol } = bearerFromSttUpgrade(request);
+  if (!bearer) {
+    return errorResponse(
+      ctx.requestId,
+      "unauthenticated",
+      "A valid client key is required: Authorization: Bearer pcp_… " +
+        `or Sec-WebSocket-Protocol: ${STT_WS_PROTOCOL}, <key>. Query tokens are not accepted.`,
+    );
   }
+  const authHeaders = new Headers(request.headers);
+  authHeaders.set("authorization", `Bearer ${bearer}`);
+  // Do not forward Sec-WebSocket-Protocol list with the secret to resolveClient; only Authorization.
+  authHeaders.delete("sec-websocket-protocol");
+  const authRequest = new Request(request.url, { method: request.method, headers: authHeaders });
 
   const resolved = await resolveClient(ctx.store, authRequest);
   if (!resolved.ok) {
@@ -72,7 +104,7 @@ export async function handleSttStreamUpgrade(ctx: Ctx, request: Request): Promis
           ? "This account is suspended."
           : resolved.failure === "misconfigured"
             ? "Account or plan is misconfigured."
-            : "A valid client key is required (Authorization Bearer or access_token query).",
+            : "A valid client key is required (Authorization Bearer or Sec-WebSocket-Protocol).",
     );
   }
 
@@ -159,22 +191,24 @@ export async function handleSttStreamUpgrade(ctx: Ctx, request: Request): Promis
   }
 
   const requestId = ctx.requestId || newId("req");
-  const headers = new Headers(request.headers);
+  // Pass opaque attribution only. The DO resolves the unit rate from the catalog
+  // by model id (not a price header an intermediate could tamper with).
+  const headers = new Headers();
+  headers.set("upgrade", "websocket");
   headers.set("x-prism-account-id", account.id);
   headers.set("x-prism-client-id", client.id);
   headers.set("x-prism-plan-id", account.plan_id);
   headers.set("x-prism-request-id", requestId);
-  headers.set(
-    "x-prism-unit-micro-usd",
-    String(unitPrice.microUsdPerUnit >= 0 ? unitPrice.microUsdPerUnit : FLUX_DEFAULT_UNIT_MICRO),
-  );
+  headers.set("x-prism-model-id", FLUX_STT_MODEL);
+  if (acceptProtocol) {
+    headers.set("x-prism-ws-protocol", acceptProtocol);
+  }
 
   const stub = ctx.env.STT_SESSION.get(ctx.env.STT_SESSION.newUniqueId());
   return stub.fetch(
     new Request(request.url, {
       method: request.method,
       headers,
-      // body unused on WS upgrade
     }),
   );
 }
