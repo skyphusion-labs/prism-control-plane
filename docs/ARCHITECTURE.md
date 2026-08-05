@@ -211,12 +211,117 @@ Short version, all measured rather than assumed:
 
 Those last two together are the argument for a **reconciliation job**: read the authoritative `cost`
 from the AI Gateway logs, attribute it with `cf-aig-metadata`, and true up the D1 ledger, rather than
-trusting a local computation against a table that can be stale. That job does not exist yet
-([#12](https://github.com/skyphusion-labs/prism-control-plane/issues/12)). Until it does, the ledger is
-the plane's best estimate and the gateway is the biller's truth. `/health/deep`
-reports how many chat models still have no rate; an unpriced model is refused individually
-(`model_unpriced`) rather than failing readiness, because unpriced is the expected state for much of
-the catalog.
+trusting a local computation against a table that can be stale. That job is now in the tree
+([#12](https://github.com/skyphusion-labs/prism-control-plane/issues/12)); see the next section. The
+ledger remains the plane's best **estimate** and the gateway remains the biller's truth; reconciliation
+is what makes the difference between them visible instead of permanent. `/health/deep` reports how many
+chat models still have no rate; an unpriced model is refused individually (`model_unpriced`) rather than
+failing readiness, because unpriced is the expected state for much of the catalog.
+
+Refreshing `src/catalog.ts` from `compat/models` is deliberately **not** part of #12. It attacks the same
+staleness from the other end and deserves its own decision about runtime reads versus a committed table.
+
+## Reconciliation: truing the ledger up against the biller
+
+`POST /admin/reconcile`, operator-triggered. **There is no cron**, and that is a decision rather than an
+omission: this is a robot with write access to a money column, driven by another system's telemetry, so
+the first live runs happen with a human reading the report. A `scheduled` handler can call
+`runReconcile` later; nothing in the run path assumes a request.
+
+**Dry run is the default and it is absent-means-true.** Only a literal `"dry_run": false` writes money. A
+dry run does every read, join and decision and reports exactly what it would move, while writing
+nothing at all -- including the watermark, because a dry run that advanced the watermark would be a live
+run that forgot to pay.
+
+| File | Role |
+| --- | --- |
+| `src/aig-logs.ts` | The only place the gateway LOG API is read. GET only, and `guardLogPath` refuses the two stored-payload endpoints by throwing. |
+| `src/reconcile.ts` | The decision for one row. Pure: no clock, no I/O. |
+| `src/reconcile-run.ts` | The run: paging, applying, the watermark, the reverse check, the structured logs. |
+| `src/routes/reconcile.ts` | The operator door and its input validation. |
+| `migrations/0003_reconcile_gateway_cost.sql` | `usage_adjustments`, `reconcile_state`, and two period counters. |
+
+### Seven outcomes, five of which move nothing
+
+`adjust` (spend or credit), `in_agreement`, and five refusals: `no_request_id` (not our traffic),
+`cached` (the gateway runs `cache_ttl=0`, so a cached row means the cache was enabled without teaching
+the ledger to read `cf-aig-cache-status`; its cost of 0 would otherwise refund the whole estimate),
+`unknown_cost` (**absent is unknown, never zero** -- reading it as free turns a gap in Cloudflare's
+telemetry into a credit refund), `no_ledger_row` (spend we were billed and never recorded: the one skip
+that should page someone), and `account_mismatch`. Every outcome has its own counter, so the alarming one
+cannot hide inside a total.
+
+### Up is spend, down is a credit grant
+
+Both money columns on `accounts` are monotonic by construction (migration 0002) so each can be re-summed
+against its own audit trail. A downward correction is therefore a **`credit_grants` row**, not a
+decrement of `spent_micro_usd`: it reaches the same balance and keeps both trails re-summable. The
+original `usage_events` row is **never rewritten** -- the drift is the finding, and overwriting it
+destroys the only evidence the meter and the biller ever disagreed. Adjustments land in the period the
+**request** belongs to, not the period the run happened in.
+
+`idempotency_key` is `aig:<gateway log id>` and is UNIQUE. That is what makes the job safe to re-run:
+rows arrive late, page boundaries get crossed twice, runs die halfway, and every retry must be a no-op.
+
+### The watermark is deliberately behind the present
+
+The feed is filtered on `created_at`, so a row that appears with a timestamp already behind the watermark
+is invisible forever. The advance is clamped to `now - 15min` (`SETTLE_MS`) and never moves backwards, so
+the trailing edge is re-read every run and the idempotency key makes that free. A run is capped at 2000
+rows so a backlog makes progress and reports `truncated` instead of dying and redoing the same prefix.
+
+### Cost is a decimal USD float on the wire, and stops being one immediately
+
+Cloudflare reports e.g. `2.8220000000000003e-06` and `0.000019416000000000002` (both observed live).
+`microUsdFromUsd` converts through the decimal digits with `BigInt` and **rounds up**, matching
+`src/meter.ts`: `Math.round(cost * 1e6)` and `toFixed(6)` both lose fractions of a micro-USD in the
+direction a cost-recovery product cannot afford.
+
+### Both directions are checked
+
+The forward check reads gateway rows and joins to the ledger. The **reverse check** lists ledger rows in
+the same window and reports any whose `request_id` no gateway row carried: a request this plane metered
+that the gateway never recorded. It is approximate at the window edges (a ledger row is written after the
+response, so its timestamp is later than the gateway's) and it moves no money, so it runs on a dry run
+too. Treat a persistent count as the finding.
+
+### Observability
+
+Every run emits `reconcile.run` at info level (rows, drift, each skip counter, watermark) as the time
+series, and `reconcile.alert` at **error** level only when something needs a human: unrecorded spend, an
+account mismatch, an unmatched ledger row, or drift past `DRIFT_ALERT_RATIO` (5% of the biller's total,
+counting both directions so an over-charge cannot cancel an under-charge). An alert rule can be "this
+event exists" rather than a threshold somebody has to re-tune. Nothing in either payload carries prompt
+text, completion text, or a bearer.
+
+### Credential
+
+The runtime `CF_AIG_TOKEN` was **widened** with `AI Gateway Read` rather than joined by a second token
+(2026-08-05, verified live against `prism-proxy`). A separate read token would be another secret to
+escrow, rotate and lose, buying no isolation that matters: the token can already spend on this gateway.
+Editing a Cloudflare token's policies does **not** change its value, so the escrowed ciphertext and the
+live Worker secret stayed valid. In per-user credential mode there is no shared token, so
+`POST /admin/reconcile` answers 503 rather than quietly doing nothing.
+
+### KNOWN BLOCKER: inference does not currently reach the gateway
+
+**Measured 2026-08-05, and it means reconciliation will read an empty feed in production until it is
+fixed.** `src/upstream.ts` calls `POST /accounts/{id}/ai/v1/chat/completions` with a
+`cf-aig-gateway-id: prism-proxy` header, which is exactly what Cloudflare's own Workers AI and REST API
+docs prescribe. On this account it does not route through the gateway:
+
+| Probe | Result |
+| --- | --- |
+| REST path + `cf-aig-gateway-id`, valid credentials | `200`, completion served, **no `cf-aig-*` response headers, no log row** |
+| REST path + `cf-aig-gateway-id`, **deliberately invalid** `cf-aig-authorization` | still `200` and a served completion |
+| `gateway.ai.cloudflare.com/v1/{acct}/prism-proxy/workers-ai/v1/chat/completions` | `200`, `cf-aig-log-id` header, log row with our full `cf-aig-metadata` and a `cost` |
+| Same canonical URL, invalid `cf-aig-authorization` | `401` `AiGatewayError` code 2009 |
+
+`prism-proxy` has `collect_logs: true`, `cache_ttl: 0`, `authentication: true`. A gateway with
+authentication ON that answers `200` to a garbage gateway credential is not in the request path at all,
+so the REST path is bypassing it: no attribution, no cost row, nothing to reconcile. The reconciliation
+code is correct and its live read is verified; what is missing is traffic in the feed. Tracked
+separately -- do not "fix" it by weakening a privacy or fail-closed path.
 
 ## Code map
 
@@ -225,6 +330,9 @@ the catalog.
 | `src/index.ts` | Worker entry plus the whole route table. `handleRequest` takes its dependencies, which is what makes tests hermetic. |
 | `src/env.ts` | Hand-authored `Env`, mirroring `wrangler.example.toml`. Never commit a generated `worker-configuration.d.ts`. |
 | `src/upstream.ts` | The one place Cloudflare's AI REST API is called, and the only place the privacy headers are set. |
+| `src/aig-logs.ts` | The one place the gateway LOG API is read. GET only; refuses stored-payload endpoints. |
+| `src/reconcile.ts` | What one gateway row means for one ledger row. Pure. |
+| `src/reconcile-run.ts` | One reconciliation run: paging, applying, watermark, reverse check. |
 | `src/token-minter.ts` | `UpstreamCredentialSource`: `SharedTokenSource` and the opt-in `CfUserTokenProvider`. |
 | `src/balance.ts` | The pre-flight prepaid decision. Pure. |
 | `src/meter.ts` | Pricing one request, or declining to. Pure. |

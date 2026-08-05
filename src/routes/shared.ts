@@ -3,6 +3,7 @@
 
 import { errorResponse } from "../http";
 import type { Env } from "../env";
+import type { GatewayLogSource } from "../aig-logs";
 import type { InferenceRunner } from "../inference";
 import type { Caller, ResolveFailure } from "../auth";
 import { resolveClient } from "../auth";
@@ -26,6 +27,11 @@ import type { UpstreamCredentialSource } from "../token-minter";
  * The routes never learn WHICH credential mode answered, and must not branch on it. That is what makes the
  * mode a config decision rather than a second code path with its own gates to get wrong.
  *
+ * `logs` is a THIRD null, and it is deliberately not folded into either of the other two. It is the read
+ * side of the same gateway (src/aig-logs.ts): absent, POST /admin/reconcile answers 503 while inference
+ * keeps working normally, because a deployment that can spend but cannot yet read its bill is a real and
+ * recoverable state, not a reason to stop serving. It cannot reach a model and cannot read a payload.
+ *
  * `waitUntil` is passed rather than reached for, so a test can assert that the ledger write was
  * scheduled without running inside workerd.
  */
@@ -34,6 +40,7 @@ export interface Ctx {
   store: ControlPlaneStore;
   runner: InferenceRunner | null;
   credentials: UpstreamCredentialSource | null;
+  logs: GatewayLogSource | null;
   requestId: string;
   now: Date;
   waitUntil: (promise: Promise<unknown>) => void;

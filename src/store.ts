@@ -76,6 +76,15 @@ export interface PeriodRow {
   micro_usd: number;
   requests: number;
   unmetered_requests: number;
+  /**
+   * Reconciliation true-ups for this month, in two monotonic counters. Migration 0003.
+   *
+   * SEPARATE FROM `micro_usd` ON PURPOSE. `micro_usd` is the sum of what our own meter ESTIMATED, and
+   * keeping it that way is what makes estimate-versus-billed a readable comparison a month later. Folding
+   * the drift into it would leave one number that is neither.
+   */
+  adjust_spend_micro_usd: number;
+  adjust_credit_micro_usd: number;
 }
 
 /** One ledger write. Counts only; see the migration header for why there is no text field here. */
@@ -93,6 +102,54 @@ export interface UsageEvent {
   unmetered_reason: string | null;
   upstream_status: number | null;
   gateway_log_id: string | null;
+}
+
+/**
+ * One true-up of a ledger row against AI Gateway's own cost figure. Mirrors migration 0003.
+ *
+ * `direction` names which monotonic column on `accounts` this row advanced, and `applied_micro_usd` is
+ * always positive. Both are stored rather than derived from the sign of `delta_micro_usd` so a reader
+ * never has to re-derive the rule that upward drift is spend and downward drift is credit.
+ */
+export interface UsageAdjustmentRow {
+  id: string;
+  account_id: string;
+  /** The ledger row this trues up, or null when the gateway row matched nothing we recorded. */
+  usage_event_id: string | null;
+  request_id: string;
+  gateway_log_id: string;
+  period_key: string;
+  model_id: string | null;
+  estimate_micro_usd: number;
+  gateway_micro_usd: number;
+  /** gateway minus estimate. Signed. */
+  delta_micro_usd: number;
+  direction: "spend" | "credit";
+  applied_micro_usd: number;
+  /** `aig:<gateway log id>`. Unique, and what makes a re-run of the job a no-op. */
+  idempotency_key: string;
+  note: string | null;
+}
+
+/** Where reconciliation got to for one gateway. One row per gateway; see migration 0003. */
+export interface ReconcileStateRow {
+  gateway_id: string;
+  /** ISO 8601. Null means the job has never run against this gateway. */
+  watermark: string | null;
+  last_log_id: string | null;
+  last_run_at: string | null;
+  runs: number;
+  rows_seen: number;
+  rows_adjusted: number;
+}
+
+/** The ledger fields the reverse check needs. Deliberately not the whole row. */
+export interface UsageEventKey {
+  id: string;
+  request_id: string;
+  micro_usd: number;
+  metered: boolean;
+  created_at: string;
 }
 
 export interface RateBucket {
@@ -177,6 +234,58 @@ export interface ControlPlaneStore {
    * double-increment there is a user being denied service for a request they made once.
    */
   recordUsage(event: UsageEvent): Promise<void>;
+
+  /**
+   * The ledger row for one correlation id, or null.
+   *
+   * `request_id` alone is not the ledger's unique index -- (client_id, request_id) is -- but a request id
+   * is minted per request by this plane, so at most one row can carry it. The lookup is by request id
+   * because that is the only handle the gateway log carries: `cf-aig-metadata` has no room for a sixth
+   * entry (Cloudflare keeps the first five), so the client id is not in it.
+   */
+  getUsageEventByRequestId(requestId: string): Promise<UsageEvent | null>;
+
+  /**
+   * Write one true-up and move the money it implies. Idempotent on `idempotency_key`.
+   *
+   * MUST BE GATED ON THE AUDIT INSERT, exactly like recordUsage and grantCredit: the money moves only
+   * when the adjustment row was actually new, so a re-run of the reconciliation job over rows it has
+   * already seen cannot charge or credit twice. `applied: false` means "already trued up", which is a
+   * success.
+   *
+   * A `credit` direction MUST also write a `credit_grants` row, because `accounts.credit_micro_usd` is
+   * a running total whose audit trail is that table; advancing the column without a grant row would
+   * make the two unreconcilable, which is the state migration 0002 exists to prevent.
+   */
+  applyUsageAdjustment(row: UsageAdjustmentRow): Promise<{ applied: boolean }>;
+
+  /** Reconciliation's watermark for one gateway, or null when it has never run. */
+  getReconcileState(gatewayId: string): Promise<ReconcileStateRow | null>;
+  /**
+   * Record a completed run: advance the watermark and add to the run counters.
+   *
+   * `watermark` is null when the run decided not to advance it (see `nextWatermark`), and a null MUST
+   * leave the stored value alone rather than clearing it. Clearing would send the next run back to the
+   * beginning of the gateway's history.
+   */
+  advanceReconcileState(args: {
+    gateway_id: string;
+    watermark: string | null;
+    last_log_id: string | null;
+    rows_seen: number;
+    rows_adjusted: number;
+    at: string;
+  }): Promise<void>;
+
+  /**
+   * Ledger rows created inside a window, for the reverse check.
+   *
+   * This is how "a request we metered but never actually made" becomes visible: the reconciliation run
+   * already holds every gateway request id in the window, so a ledger row whose id is absent from that
+   * set is either a call that never reached the gateway or a gateway row that has not landed yet.
+   * Bounded by `limit` because an unbounded scan of the ledger is not something a request path may do.
+   */
+  listUsageEventsBetween(args: { fromIso: string; toIso: string; limit: number }): Promise<UsageEventKey[]>;
 
   /** This account's minted upstream credential, live or revoked, or null when it never had one. */
   getUserToken(accountId: string): Promise<UserTokenRow | null>;

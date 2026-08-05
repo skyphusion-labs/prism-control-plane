@@ -14,6 +14,7 @@ import { restRunner } from "./upstream";
 import { errorResponse, newRequestId } from "./http";
 import { d1Store } from "./store-d1";
 import { CfApi } from "./cf-api";
+import { gatewayLogSource, type GatewayLogSource } from "./aig-logs";
 import {
   CF_ACCOUNT_TOKEN_QUOTA,
   CfUserTokenProvider,
@@ -38,6 +39,7 @@ import {
   handleSetModelPrice,
 } from "./routes/admin";
 import { handleMe, handleModels, handleUsage } from "./routes/account";
+import { handleReconcile } from "./routes/reconcile";
 import { handleChatCompletions } from "./routes/chat";
 import { handleEnroll } from "./routes/clients";
 import { handleDeepHealth, handleHealth, SERVICE_NAME } from "./routes/health";
@@ -84,6 +86,25 @@ export function upstreamCredentialSource(
 }
 
 /**
+ * The AI Gateway log feed, or null when this deployment cannot read its own bill.
+ *
+ * DELIBERATELY THE SAME TOKEN AS THE ONE THAT SPENDS, widened with AI Gateway Read rather than replaced by
+ * a second credential. A separate read token would be a second secret to escrow, rotate and lose, buying
+ * no isolation that matters: `CF_AIG_TOKEN` can already spend on this gateway, so adding the ability to
+ * read the resulting cost rows does not widen the blast radius in any direction an attacker cares about.
+ *
+ * NULL IS A CLOSED RECONCILIATION DOOR, never a silent skip. In per-user credential mode there is no
+ * shared token at all, so this is null and POST /admin/reconcile answers 503. A reconciliation job that
+ * quietly did nothing would look exactly like a healthy one that found no drift.
+ */
+export function gatewayLogs(env: Env): GatewayLogSource | null {
+  const gateway = gatewayConfig(env);
+  const token = (env.CF_AIG_TOKEN ?? "").trim();
+  if (!gateway || !token) return null;
+  return gatewayLogSource({ accountId: gateway.accountId, gatewayId: gateway.id, token });
+}
+
+/**
  * The route table.
  *
  * METHOD IS MATCHED, not just path: a POST to a GET-only route answers 404 rather than falling through to
@@ -114,6 +135,7 @@ export async function handleRequest(ctx: Ctx, request: Request): Promise<Respons
   if (method === "POST" && path === "/admin/model-prices") {
     return await handleSetModelPrice(ctx, request);
   }
+  if (method === "POST" && path === "/admin/reconcile") return await handleReconcile(ctx, request);
   const revokeClient = method === "POST" ? REVOKE_CLIENT_PATH.exec(path) : null;
   if (revokeClient) return await handleRevokeClient(ctx, request, revokeClient[1]);
   const credit = method === "POST" ? CREDIT_PATH.exec(path) : null;
@@ -132,12 +154,14 @@ export default {
     const ctx: Ctx = {
       env,
       store,
-      // BOTH NULLS ARE DECIDED HERE, at wiring time rather than mid-request. A plane that discovers it has
-      // no gateway or no minting credential in the middle of a request has already decided to spend. The
-      // inference route turns either null into 503; every other route works normally, so a half-configured
-      // deploy closes the door that costs money without taking the read surface down with it.
+      // ALL THREE NULLS ARE DECIDED HERE, at wiring time rather than mid-request. A plane that discovers it
+      // has no gateway or no minting credential in the middle of a request has already decided to spend.
+      // `runner` or `credentials` null turns the inference route into a 503; `logs` null turns
+      // POST /admin/reconcile into one. Every other route works normally, so a half-configured deploy
+      // closes the door that costs money without taking the read surface down with it.
       runner: restRunner(env),
       credentials: upstreamCredentialSource(env, store, () => Math.floor(now.getTime() / 1000)),
+      logs: gatewayLogs(env),
       requestId,
       // ONE clock per request. Threaded rather than read at each use so the period key, the completion's
       // `created`, and an enrollment's expiry cannot land either side of a period boundary within a single

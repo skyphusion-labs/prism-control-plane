@@ -13,6 +13,9 @@
 //   - revokeClient is idempotent and reports whether THIS call revoked a live client
 //   - grantCredit is idempotent on the operator's key and reports whether THIS call granted
 //   - a metered event advances accounts.spent_micro_usd, which is the column the money gate reads
+//   - applyUsageAdjustment is idempotent on its key, moves money ONLY when the audit row was new, and
+//     writes a credit_grants row on a downward true-up rather than decrementing spend
+//   - advanceReconcileState treats a null watermark as "leave it alone", never as "clear it"
 
 import type {
   AccountRow,
@@ -23,6 +26,8 @@ import type {
   PeriodRow,
   PlanRow,
   RateBucket,
+  ReconcileStateRow,
+  UsageAdjustmentRow,
   UsageEvent,
   UserTokenRow,
 } from "../src/store";
@@ -46,6 +51,10 @@ export class FakeStore implements ControlPlaneStore {
   userTokens = new Map<string, UserTokenRow>();
   modelPrices = new Map<string, ModelPriceRow>();
   grants = new Map<string, { account_id: string; micro_usd: number }>();
+  adjustments: UsageAdjustmentRow[] = [];
+  reconcileState = new Map<string, ReconcileStateRow>();
+  /** Mirrors the D1 column that has no equivalent on `UsageEvent`, for the reverse check's window. */
+  eventCreatedAt = new Map<string, string>();
   nowSeconds: number;
   /** Set to make the next recordUsage throw, exercising the ledger-write-failure path. */
   failNextRecordUsage = false;
@@ -194,6 +203,10 @@ export class FakeStore implements ControlPlaneStore {
     );
     if (duplicate) return;
     this.events.push(event);
+    // The D1 table stamps `created_at` itself and `UsageEvent` has no field for it, so the fake keeps it
+    // beside the row. The reverse check queries on it, and a test that could not set it could not exercise
+    // the window boundaries at all.
+    if (!this.eventCreatedAt.has(event.id)) this.eventCreatedAt.set(event.id, this.iso());
 
     const key = `${event.account_id}|${event.period_key}`;
     const row =
@@ -204,6 +217,8 @@ export class FakeStore implements ControlPlaneStore {
         micro_usd: 0,
         requests: 0,
         unmetered_requests: 0,
+        adjust_spend_micro_usd: 0,
+        adjust_credit_micro_usd: 0,
       } satisfies PeriodRow);
     row.requests += 1;
     if (event.metered) row.micro_usd += event.micro_usd;
@@ -216,6 +231,100 @@ export class FakeStore implements ControlPlaneStore {
       const account = this.accounts.get(event.account_id);
       if (account) account.spent_micro_usd += event.micro_usd;
     }
+  }
+
+  async getUsageEventByRequestId(requestId: string) {
+    return this.events.find((event) => event.request_id === requestId) ?? null;
+  }
+
+  /**
+   * Idempotent on the key, and the money moves ONLY when the audit row was new.
+   *
+   * That conditional is the entire safety property of the reconciliation job, so the fake reproduces it
+   * rather than approximating it: a test that re-runs a reconciliation against this store must see the
+   * second pass change no balance, exactly as production does through `INSERT OR IGNORE`.
+   *
+   * A `credit` direction also writes a `credit_grants` row under the SAME key, because
+   * `accounts.credit_micro_usd` is a running total whose audit trail is that table.
+   */
+  async applyUsageAdjustment(row: UsageAdjustmentRow) {
+    if (this.adjustments.some((existing) => existing.idempotency_key === row.idempotency_key)) {
+      return { applied: false };
+    }
+    this.adjustments.push({ ...row });
+
+    const account = this.accounts.get(row.account_id);
+    if (row.direction === "spend") {
+      if (account) account.spent_micro_usd += row.applied_micro_usd;
+    } else {
+      this.grants.set(row.idempotency_key, {
+        account_id: row.account_id,
+        micro_usd: row.applied_micro_usd,
+      });
+      if (account) account.credit_micro_usd += row.applied_micro_usd;
+    }
+
+    const key = `${row.account_id}|${row.period_key}`;
+    const period =
+      this.periods.get(key) ??
+      ({
+        account_id: row.account_id,
+        period_key: row.period_key,
+        micro_usd: 0,
+        requests: 0,
+        unmetered_requests: 0,
+        adjust_spend_micro_usd: 0,
+        adjust_credit_micro_usd: 0,
+      } satisfies PeriodRow);
+    if (row.direction === "spend") period.adjust_spend_micro_usd += row.applied_micro_usd;
+    else period.adjust_credit_micro_usd += row.applied_micro_usd;
+    this.periods.set(key, period);
+
+    return { applied: true };
+  }
+
+  async getReconcileState(gatewayId: string) {
+    return this.reconcileState.get(gatewayId) ?? null;
+  }
+
+  /** A null watermark LEAVES THE STORED VALUE ALONE, mirroring the D1 `COALESCE(?, watermark)`. */
+  async advanceReconcileState(args: {
+    gateway_id: string;
+    watermark: string | null;
+    last_log_id: string | null;
+    rows_seen: number;
+    rows_adjusted: number;
+    at: string;
+  }) {
+    const existing = this.reconcileState.get(args.gateway_id);
+    this.reconcileState.set(args.gateway_id, {
+      gateway_id: args.gateway_id,
+      watermark: args.watermark ?? existing?.watermark ?? null,
+      last_log_id: args.last_log_id ?? existing?.last_log_id ?? null,
+      last_run_at: args.at,
+      runs: (existing?.runs ?? 0) + 1,
+      rows_seen: (existing?.rows_seen ?? 0) + args.rows_seen,
+      rows_adjusted: (existing?.rows_adjusted ?? 0) + args.rows_adjusted,
+    });
+  }
+
+  async listUsageEventsBetween(args: { fromIso: string; toIso: string; limit: number }) {
+    const from = Date.parse(args.fromIso);
+    const to = Date.parse(args.toIso);
+    return this.events
+      .map((event) => ({
+        id: event.id,
+        request_id: event.request_id,
+        micro_usd: event.micro_usd,
+        metered: event.metered,
+        created_at: this.eventCreatedAt.get(event.id) ?? this.iso(),
+      }))
+      .filter((row) => {
+        const at = Date.parse(row.created_at);
+        return at > from && at <= to;
+      })
+      .sort((a, b) => a.created_at.localeCompare(b.created_at))
+      .slice(0, Math.max(0, args.limit));
   }
 
   async getUserToken(accountId: string) {

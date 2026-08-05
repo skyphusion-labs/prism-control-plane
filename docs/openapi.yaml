@@ -526,11 +526,22 @@ components:
         - period_micro_usd
         - period_requests
         - period_unmetered_requests
+        - period_adjust_spend_micro_usd
+        - period_adjust_credit_micro_usd
+        - period_reconciled_micro_usd
       description: >-
         The first three fields are LIFETIME totals, not per-period: prepaid credit is cumulative and
         never expires. The period_* fields are a reporting rollup that resets monthly; the BALANCE does
         not. A client that treats the period figures as an allowance will be wrong about when service
         resumes, which is never, until a top-up.
+
+
+        THE MONTH IS PUBLISHED TWICE, and the difference between the two figures is the point.
+        period_micro_usd is what this plane's own meter ESTIMATED from token counts.
+        period_reconciled_micro_usd is that estimate corrected against AI Gateway's authoritative
+        per-request cost. A client showing one number should show the reconciled one; the estimate and
+        both corrections are published alongside it so the difference can always be accounted for
+        rather than looking like an error.
       properties:
         credit_micro_usd:
           type: integer
@@ -552,13 +563,34 @@ components:
         period: { type: string, examples: ["2026-08"] }
         period_start: { type: string, format: date-time }
         period_end: { type: string, format: date-time }
-        period_micro_usd: { type: integer }
+        period_micro_usd:
+          type: integer
+          description: >-
+            This plane's own ESTIMATE for the month, summed from token counts against its rate table.
+            Never rewritten by reconciliation, so estimate-versus-billed stays readable.
         period_requests: { type: integer }
         period_unmetered_requests:
           type: integer
           description: >-
             Calls this plane could not price. Should be 0. Exposed rather than hidden so a gap in the
-            meter is observable from both ends.
+            meter is observable from both ends. Reconciliation is how such a call later acquires its real
+            cost, which lands in period_adjust_spend_micro_usd.
+        period_adjust_spend_micro_usd:
+          type: integer
+          description: >-
+            Extra charged this month after reconciliation found the biller charged MORE than the
+            estimate. Monotonic.
+        period_adjust_credit_micro_usd:
+          type: integer
+          description: >-
+            Credit granted back this month after reconciliation found the biller charged LESS than the
+            estimate. Monotonic: a downward correction is a credit grant, never a decrement of spend, so
+            both money columns can be re-summed against their own audit trails.
+        period_reconciled_micro_usd:
+          type: integer
+          description: >-
+            period_micro_usd + period_adjust_spend_micro_usd - period_adjust_credit_micro_usd. The
+            month's charge after reconciliation, computed here so every client agrees on it.
 
     ChatMessage:
       type: object
