@@ -78,7 +78,7 @@
 // own arithmetic against the biller's is trusting itself for no reason.
 // https://developers.cloudflare.com/ai-gateway/observability/logging/
 
-import type { Billing } from "./catalog";
+import { findModel, type Billing } from "./catalog";
 import { LLAVA_MODEL_ID } from "./chat-request";
 import { gatewayConfig, upstreamTimeoutMs, type Env } from "./env";
 import type { InferenceRequest, InferenceResult, InferenceRunner } from "./inference";
@@ -199,6 +199,15 @@ export function bindingChatBody(request: InferenceRequest): Record<string, unkno
   return body;
 }
 
+/**
+ * Binding chat is only for catalog entries flagged `binding: true`.
+ * The public `id` is the allowlist key (what env.AI.run expects); never a client string.
+ */
+export function isAllowedBindingChatModel(bindingModel: string): boolean {
+  const entry = findModel(bindingModel);
+  return !!entry && entry.modality === "chat" && entry.binding === true && entry.id === bindingModel;
+}
+
 async function runViaBinding(
   deps: GatewayRunnerDeps,
   request: InferenceRequest,
@@ -215,12 +224,26 @@ async function runViaBinding(
     };
   }
 
+  // Defense in depth: chat.ts only sets bindingModel from the catalog, but the runner
+  // refuses any other string so a future caller cannot point env.AI.run at an arbitrary id.
+  if (!isAllowedBindingChatModel(bindingModel)) {
+    return {
+      outcome: "upstream_error",
+      status: null,
+      detail: `Model is not allowlisted for AI binding dispatch: ${bindingModel.slice(0, 80)}`,
+    };
+  }
+
   type RunFn = (
     model: string,
     params: unknown,
     opts?: { gateway?: { id: string } },
   ) => Promise<unknown>;
 
+  // INTENTIONAL: not HTTP + cf-aig-authorization. Cloudflare injects Unified Billing only via
+  // env.AI.run for these ids (legacy /compat allowlist is frozen). gateway: { id } still routes
+  // the call through AI_GATEWAY_ID for logs/reconcile. Money authority remains the D1 ledger after
+  // the call (same posture as non-chat UB binding). See docs/security-false-positives.md.
   try {
     const result = await Promise.race([
       (ai as unknown as { run: RunFn }).run(bindingModel, bindingChatBody(request), {
@@ -252,10 +275,11 @@ async function runViaBinding(
   } catch (err) {
     const aborted = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
     if (aborted) return { outcome: "timeout", waitedMs: deps.timeoutMs };
+    // Do not echo raw provider/body dumps to the client path; keep a short operator-safe string.
     return {
       outcome: "upstream_error",
       status: null,
-      detail: String(err instanceof Error ? err.message : err).slice(0, 400),
+      detail: String(err instanceof Error ? err.message : err).slice(0, 200),
     };
   }
 }

@@ -9,6 +9,8 @@
   - **Grok 4.5** and **Claude Fable 5** still fail keyless `/compat` (no credentials / Invalid Anthropic API Key). Same as prism: dispatch via **`env.AI.run` binding** with `gateway: { id }` (catalog `binding: true`).
   - `outputTokenField` treats `grok/*` like OpenAI/xAI (`max_completion_tokens`).
   - `extractText` accepts Anthropic Messages `content[]` blocks from the binding path.
+  - Runner re-allowlists `bindingModel` (`isAllowedBindingChatModel`); security FP notes for
+    binding + `/compat` Authorization posture in `docs/security-false-positives.md`.
 
 ### Fixed (prior)
 

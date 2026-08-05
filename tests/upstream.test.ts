@@ -14,6 +14,7 @@ import {
   GATEWAY_HOST,
   bindingChatBody,
   endpointFor,
+  isAllowedBindingChatModel,
   runnerFor,
   upstreamBody,
   upstreamHeaders,
@@ -259,6 +260,27 @@ describe("runnerFor binding path", () => {
     if (result.outcome === "upstream_error") {
       expect(result.detail).toMatch(/AI binding/i);
     }
+  });
+
+  it("refuses bindingModel ids that are not catalog binding:true", async () => {
+    const run = vi.fn(async () => ({ choices: [{ message: { content: "nope" } }] }));
+    const result = await runnerFor({
+      ...DEPS,
+      ai: { run } as unknown as Ai,
+    }).run(request({ bindingModel: "anthropic/claude-sonnet-5" }));
+    expect(result.outcome).toBe("upstream_error");
+    if (result.outcome === "upstream_error") {
+      expect(result.detail).toMatch(/not allowlisted/i);
+    }
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("allowlists only catalog binding:true chat ids", () => {
+    expect(isAllowedBindingChatModel("anthropic/claude-fable-5")).toBe(true);
+    expect(isAllowedBindingChatModel("xai/grok-4.5")).toBe(true);
+    expect(isAllowedBindingChatModel("anthropic/claude-sonnet-5")).toBe(false);
+    expect(isAllowedBindingChatModel("xai/grok-4.3")).toBe(false);
+    expect(isAllowedBindingChatModel("evil/model")).toBe(false);
   });
 });
 

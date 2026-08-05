@@ -100,13 +100,14 @@ export function extractText(body: unknown): string | null {
     if (typeof first?.text === "string") return first.text;
   }
 
-  // Anthropic Messages API (env.AI.run binding for Fable etc.): top-level content blocks.
+  // Anthropic Messages API (env.AI.run binding for Fable etc.): only type:"text" blocks.
+  // Thinking / tool blocks are ignored (same discipline as prism extractOutput).
   const content = asRecord.content;
   if (Array.isArray(content)) {
     const text = content
       .filter((b): b is { type?: string; text?: string } => !!b && typeof b === "object")
-      .filter((b) => b.type === "text" || typeof b.text === "string")
-      .map((b) => (typeof b.text === "string" ? b.text : ""))
+      .filter((b) => b.type === "text" && typeof b.text === "string")
+      .map((b) => b.text as string)
       .join("");
     if (text) return text;
   }
