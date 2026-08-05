@@ -281,6 +281,7 @@ describe("runnerFor binding path", () => {
     expect(isAllowedBindingChatModel("anthropic/claude-fable-5")).toBe(true);
     expect(isAllowedBindingChatModel("xai/grok-4.5")).toBe(true);
     expect(isAllowedBindingChatModel("google/gemini-3.1-pro")).toBe(true);
+    // multi-agent: Responses body via env.AI.run (HTTP responses is 401 keyless)
     expect(isAllowedBindingChatModel("xai/grok-4.20-multi-agent-0309")).toBe(true);
     expect(isAllowedBindingChatModel("anthropic/claude-sonnet-5")).toBe(false);
     expect(isAllowedBindingChatModel("xai/grok-4.3")).toBe(false);
@@ -293,6 +294,15 @@ describe("responsesBody / responsesUrl", () => {
     expect(responsesUrl(DEPS)).toBe(
       `${GATEWAY_HOST}/v1/acct_1/prism-proxy/openai/v1/responses`,
     );
+  });
+
+  it("targets grok/v1/responses for multi-agent models", () => {
+    expect(
+      responsesUrl(
+        DEPS,
+        request({ upstreamModel: "grok/grok-4.20-multi-agent-0309", api: "responses" }),
+      ),
+    ).toBe(`${GATEWAY_HOST}/v1/acct_1/prism-proxy/grok/v1/responses`);
   });
 
   it("strips openai/ prefix and maps system to instructions", () => {
@@ -314,6 +324,24 @@ describe("responsesBody / responsesUrl", () => {
       max_output_tokens: 64,
       input: [{ role: "user", content: "hi" }],
     });
+  });
+
+  it("builds multi-agent Responses body without max_output_tokens", () => {
+    const body = responsesBody(
+      request({
+        upstreamModel: "grok/grok-4.20-multi-agent-0309",
+        api: "responses",
+        billing: "unified-billing",
+        messages: [{ role: "user", content: "research ok" }],
+        maxTokens: 64,
+      }),
+    );
+    expect(body).toMatchObject({
+      model: "grok-4.20-multi-agent-0309",
+      input: [{ role: "user", content: "research ok" }],
+      reasoning: { effort: "low" },
+    });
+    expect(body).not.toHaveProperty("max_output_tokens");
   });
 
   it("POSTs to responses URL when api is responses", async () => {
@@ -338,6 +366,26 @@ describe("responsesBody / responsesUrl", () => {
     const sent = JSON.parse(String(calls[0]?.init.body));
     expect(sent.model).toBe("gpt-5.5-pro");
     expect(sent.max_output_tokens).toBe(16);
+  });
+
+  it("POSTs multi-agent to grok/v1/responses", async () => {
+    const { impl, calls } = fakeFetch(
+      new Response(
+        JSON.stringify({
+          output: [{ type: "message", content: [{ type: "output_text", text: "ok" }] }],
+        }),
+        { status: 200, headers: { "content-type": "application/json", "cf-aig-log-id": "01M" } },
+      ),
+    );
+    await runnerFor({ ...DEPS, fetchImpl: impl }).run(
+      request({
+        upstreamModel: "grok/grok-4.20-multi-agent-0309",
+        api: "responses",
+        billing: "unified-billing",
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    );
+    expect(calls[0]?.url).toBe(`${GATEWAY_HOST}/v1/acct_1/prism-proxy/grok/v1/responses`);
   });
 });
 

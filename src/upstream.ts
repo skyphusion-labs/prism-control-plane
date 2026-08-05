@@ -159,6 +159,13 @@ export function outputTokenField(upstreamModel: string): "max_tokens" | "max_com
  */
 export function bindingChatBody(request: InferenceRequest): Record<string, unknown> {
   const modelId = request.bindingModel ?? request.upstreamModel;
+  // Multi-agent (and any binding model with api:responses) needs Responses shape, not messages.
+  if (request.api === "responses" || isMultiAgentModel(modelId)) {
+    return responsesBody({
+      ...request,
+      upstreamModel: modelId.replace(/^xai\//, "grok/"),
+    });
+  }
   if (modelId.startsWith("anthropic/")) {
     const systemParts: string[] = [];
     const messages: Array<{ role: "user" | "assistant"; content: Array<{ type: "text"; text: string }> }> =
@@ -304,8 +311,12 @@ export function upstreamBody(request: InferenceRequest): Record<string, unknown>
 }
 
 /**
- * OpenAI Responses API body for models that reject chat/completions (gpt-5.5-pro).
- * Gateway path: `/openai/v1/responses`. Model id is the unprefixed OpenAI name.
+ * Responses API body for models that reject chat/completions:
+ * - openai/gpt-5.5-pro → OpenAI Responses
+ * - xai multi-agent → xAI Responses (not chat; measured "Multi Agent requests are not allowed")
+ *
+ * Model id is unprefixed for the provider-native path (measured: "gpt-5.5-pro",
+ * "grok-4.20-multi-agent-0309"). Multi-agent does not support max_tokens (xAI docs).
  */
 export function responsesBody(request: InferenceRequest): Record<string, unknown> {
   let instructions: string | undefined;
@@ -320,21 +331,39 @@ export function responsesBody(request: InferenceRequest): Record<string, unknown
     if (m.role !== "user" && m.role !== "assistant") continue;
     input.push({ role: m.role, content: m.content });
   }
-  // Gateway expects unprefixed model (measured: "gpt-5.5-pro" not "openai/gpt-5.5-pro").
-  const model = request.upstreamModel.replace(/^openai\//, "");
+  const multiAgent = isMultiAgentModel(request.upstreamModel);
+  const model = request.upstreamModel
+    .replace(/^openai\//, "")
+    .replace(/^grok\//, "")
+    .replace(/^xai\//, "");
   const body: Record<string, unknown> = {
     model,
     input,
-    max_output_tokens: request.maxTokens,
   };
+  // Multi-agent: max_tokens / max_output_tokens not supported (xAI multi-agent docs).
+  if (!multiAgent) body.max_output_tokens = request.maxTokens;
   if (instructions) body.instructions = instructions;
   if (request.stream) body.stream = true;
+  // Default to a light multi-agent effort when not streaming a long research job.
+  if (multiAgent) body.reasoning = { effort: "low" };
   return body;
 }
 
-/** Provider-native OpenAI Responses URL on the AI Gateway host. */
-export function responsesUrl(deps: GatewayRunnerDeps): string {
-  return `${GATEWAY_HOST}/v1/${deps.accountId}/${encodeURIComponent(deps.gatewayId)}/openai/v1/responses`;
+export function isMultiAgentModel(modelId: string): boolean {
+  return modelId.includes("multi-agent");
+}
+
+/**
+ * Responses URL on the AI Gateway host.
+ * OpenAI Responses: /openai/v1/responses
+ * xAI multi-agent:  /grok/v1/responses (chat completions always 400)
+ */
+export function responsesUrl(deps: GatewayRunnerDeps, request?: InferenceRequest): string {
+  const base = `${GATEWAY_HOST}/v1/${deps.accountId}/${encodeURIComponent(deps.gatewayId)}`;
+  if (request && isMultiAgentModel(request.upstreamModel)) {
+    return `${base}/grok/v1/responses`;
+  }
+  return `${base}/openai/v1/responses`;
 }
 
 const VISION_AGREE_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct";
@@ -533,7 +562,7 @@ export function runnerFor(deps: GatewayRunnerDeps): InferenceRunner {
       const url = isLlava
         ? llavaUrl(deps)
         : useResponses
-          ? responsesUrl(deps)
+          ? responsesUrl(deps, request)
           : upstreamUrl(deps, request.billing);
       const headers = isLlava ? llavaHeaders(request, deps) : upstreamHeaders(request, deps);
       const body = isLlava

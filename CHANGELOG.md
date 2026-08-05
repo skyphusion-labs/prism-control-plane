@@ -2,14 +2,20 @@
 
 ## [Unreleased]
 
-## [0.4.1] - 2026-08-05
+### Fixed
+
+- **Grok multi-agent:** xAI forbids chat completions (and binding chat body returns 400). Dispatch via
+  **Responses API** on gateway `/grok/v1/responses` (`api: "responses"`, unprefixed model, no
+  max_output_tokens, default `reasoning.effort: low`). See xAI multi-agent docs.
+
+## [0.4.2] - 2026-08-05
 
 ### Fixed
 
 - **Hard-fail chat models (smoke 2026-08-05):**
   - **Gemini 3.x:** `binding: true` (compat `google/*` = Invalid provider; several `google-ai-studio/*` fail keyless Authorization).
   - **gpt-5.5-pro:** `api: "responses"` → gateway `/openai/v1/responses` (chat completions 404 "not a chat model").
-  - **Grok multi-agent:** `binding: true` (chat completions: "Multi Agent requests are not allowed").
+  - **Grok multi-agent:** first attempt used binding (still 400); fixed in follow-up.
   - **extractText:** reasoning_content / reasoning fallback, Responses `output_text`, Gemini candidates (fixes "unreadable" 502 for gpt-oss / qwen3 / glm reasoning bodies).
   - **llama-3.2-11b-vision:** on 403 model-agreement, REST `ai/run` with `{"prompt":"agree"}` then retry.
 
