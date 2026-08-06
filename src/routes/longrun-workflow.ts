@@ -1,4 +1,4 @@
-// Durable long-run video/music generation via Cloudflare Workflows.
+// Durable long-run video / music / speech via Cloudflare Workflows.
 //
 // Why not ctx.waitUntil (see prism README + CLAUDE.md):
 //   waitUntil has ~30s after the HTTP response. MiniMax music and UB video
@@ -7,10 +7,11 @@
 //
 // Pattern mirrors prism LongRunWorkflow: step.do("invoke-model") holds the
 // blocking AI call; later steps rehost + meter + finalize D1.
+// Image gens stay sync (usually seconds).
 
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { allocateCharge, decideBalance } from "../balance";
-import { findModel } from "../catalog";
+import { findModel, type MeterUnit } from "../catalog";
 import { newId } from "../crypto";
 import type { Env } from "../env";
 import { gatewayConfig, nonChatUpstreamTimeoutMs } from "../env";
@@ -25,7 +26,9 @@ import {
 } from "../media";
 import {
   buildMusicParams,
+  buildTtsParams,
   buildVideoParams,
+  extractAudioBase64,
   extractMusicAsset,
   extractVideoAsset,
   nonChatRunnerFor,
@@ -35,21 +38,23 @@ import { periodBounds } from "../period";
 import { priceUnits } from "../meter";
 import { d1Store } from "../store-d1";
 import type { UsageEvent } from "../store";
-import type { MeterUnit } from "../catalog";
 
-export type PlaneLongRunKind = "video" | "music";
+export type PlaneLongRunKind = "video" | "music" | "speech";
 
 /**
- * Workflow event payload. Prompt/lyrics live ONLY here for the job lifetime
- * (privacy: never written to async_jobs / usage_events).
+ * Workflow event payload. Prompt/lyrics/speech text live ONLY here for the job
+ * lifetime (privacy: never written to async_jobs / usage_events).
  */
 export interface PlaneLongRunParams extends Record<string, unknown> {
   jobId: string;
   kind: PlaneLongRunKind;
   modelId: string;
   upstreamModel: string;
+  /** Music/video prompt, or TTS input text. */
   prompt: string;
   lyrics?: string;
+  /** TTS voice override (Aura speaker). */
+  voice?: string;
   /** https URL or omitted; data: images staged to imageObjectKey first. */
   imageUrl?: string;
   /** MEDIA R2 key for a staged i2v still (optional). */
@@ -60,6 +65,8 @@ export interface PlaneLongRunParams extends Record<string, unknown> {
   requestId: string;
   unitMicroUsd: number;
   unit: string;
+  /** TTS k_characters billable units (default 1). */
+  billableUnits?: number;
   monthlyIncludedMicroUsd: number;
   /** Origin for signed media URLs (e.g. https://play-proxy.skyphusion.org). */
   origin: string;
@@ -134,7 +141,9 @@ export class PlaneLongRunWorkflow extends WorkflowEntrypoint<Env, PlaneLongRunPa
           const params =
             p.kind === "music"
               ? buildMusicParams(p.prompt, p.lyrics)
-              : buildVideoParams(p.modelId, p.prompt, image, { uploadUrl });
+              : p.kind === "speech"
+                ? buildTtsParams(p.modelId, p.prompt, { voice: p.voice })
+                : buildVideoParams(p.modelId, p.prompt, image, { uploadUrl });
 
           const entry = findModel(p.modelId);
           if (!entry) throw new Error(`Model not in catalog: ${p.modelId}`);
@@ -168,6 +177,14 @@ export class PlaneLongRunWorkflow extends WorkflowEntrypoint<Env, PlaneLongRunPa
           const fail = providerStateFailed(result.body);
           if (fail) throw new Error(fail);
 
+          // Speech: base64 → put MEDIA, return signed URL (keeps result_json small).
+          if (p.kind === "speech") {
+            const b64 = extractAudioBase64(result.body);
+            if (!b64) throw new Error("TTS returned no audio payload.");
+            const url = await putSpeechAudio(this.env, p, b64);
+            return { url, gatewayLogId: result.gatewayLogId };
+          }
+
           let url: string | null =
             p.kind === "music" ? extractMusicAsset(result.body) : extractVideoAsset(result.body);
 
@@ -187,7 +204,7 @@ export class PlaneLongRunWorkflow extends WorkflowEntrypoint<Env, PlaneLongRunPa
         },
       );
 
-      // Step 2: rehost provider HTTPS audio/video onto MEDIA when possible.
+      // Step 2: rehost provider HTTPS music onto MEDIA when possible.
       const finalAsset = await step.do(
         "rehost-asset",
         { retries: { limit: 2, delay: "5 seconds", backoff: "exponential" } },
@@ -196,7 +213,8 @@ export class PlaneLongRunWorkflow extends WorkflowEntrypoint<Env, PlaneLongRunPa
             const hosted = await rehostMusic(this.env, p, asset.url);
             if (hosted) return { url: hosted, rehosted: true };
           }
-          return { url: asset.url, rehosted: false };
+          // speech already on MEDIA; video usually already a URL or our media path
+          return { url: asset.url, rehosted: p.kind === "speech" };
         },
       );
 
@@ -206,14 +224,22 @@ export class PlaneLongRunWorkflow extends WorkflowEntrypoint<Env, PlaneLongRunPa
         { retries: { limit: 3, delay: "5 seconds", backoff: "exponential" } },
         async (): Promise<void> => {
           await meterJob(this.env, p, asset.gatewayLogId);
-          const resultJson =
-            p.kind === "music"
-              ? JSON.stringify({
-                  audio: finalAsset.url,
-                  rehosted: finalAsset.rehosted,
-                  model: p.modelId,
-                })
-              : JSON.stringify({ video: finalAsset.url, model: p.modelId });
+          let resultJson: string;
+          if (p.kind === "music") {
+            resultJson = JSON.stringify({
+              audio: finalAsset.url,
+              rehosted: finalAsset.rehosted,
+              model: p.modelId,
+            });
+          } else if (p.kind === "speech") {
+            resultJson = JSON.stringify({
+              audio: finalAsset.url,
+              format: "mp3",
+              model: p.modelId,
+            });
+          } else {
+            resultJson = JSON.stringify({ video: finalAsset.url, model: p.modelId });
+          }
           await store.updateAsyncJob({
             id: p.jobId,
             status: "succeeded",
@@ -242,7 +268,8 @@ async function meterJob(
   if (!account) throw new Error("Account missing at meter time");
   const bounds = periodBounds(new Date());
   const periodBefore = await store.getPeriod(p.accountId, bounds.key);
-  const priced = priceUnits(1, {
+  const units = Math.max(1, Math.floor(p.billableUnits ?? 1));
+  const priced = priceUnits(units, {
     microUsdPerUnit: p.unitMicroUsd,
     unit: p.unit as MeterUnit,
     pricedAt: "workflow",
@@ -281,6 +308,33 @@ async function meterJob(
     gateway_log_id: gatewayLogId,
   };
   await store.recordUsage(event);
+}
+
+/** Decode TTS base64 and store under music/ for signed download (same path as rehosted songs). */
+async function putSpeechAudio(
+  env: Env,
+  p: PlaneLongRunParams,
+  audioBase64: string,
+): Promise<string> {
+  const secret = mediaSigningSecret(env);
+  if (!env.MEDIA || !secret) {
+    throw new Error("MEDIA R2 + signing required to store TTS audio for mobile playback.");
+  }
+  let raw = audioBase64;
+  const dataUrl = /^data:audio\/[^;]+;base64,(.+)$/i.exec(raw);
+  if (dataUrl) raw = dataUrl[1];
+  const bin = atob(raw);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  if (bytes.byteLength === 0 || bytes.byteLength > MEDIA_MAX_BYTES) {
+    throw new Error(`TTS audio size ${bytes.byteLength} is empty or over MEDIA cap.`);
+  }
+  const objectKey = newMusicObjectKey(p.accountId, p.requestId);
+  await env.MEDIA.put(objectKey, bytes, {
+    httpMetadata: { contentType: "audio/mpeg" },
+  });
+  const downTok = await mintDownloadToken(secret, objectKey);
+  return mediaPublicUrl(p.origin, `/v1/media/${downTok.token}`);
 }
 
 async function rehostMusic(
