@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.4.26] - 2026-08-06
+
+### Fixed
+
+- **Music/video 3-minute cutoffs:** non-chat upstream default timeout raised **180s → 300s**,
+  and the hard max for non-chat is now **360s** (chat remains max 180s). MiniMax full songs
+  were hitting the plane Promise.race at exactly ~3 min → client "Generation timed out".
+
 ## [0.4.25] - 2026-08-06
 
 ### Fixed

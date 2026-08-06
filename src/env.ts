@@ -98,7 +98,7 @@ export interface Env {
 
   /** Milliseconds to wait for a model before answering 504. Blank falls back to the default below. */
   UPSTREAM_TIMEOUT_MS?: string;
-  /** Optional longer timeout for image/video/music/STT doors (default 120s, max 180s). */
+  /** Optional longer timeout for image/video/music/STT doors (default 300s, max 360s). */
   NONCHAT_UPSTREAM_TIMEOUT_MS?: string;
 
   /** Operator bearer. UNSET = no operator surface at all (every /admin/* route answers 503). */
@@ -135,12 +135,15 @@ export interface Env {
  * a mobile client is not held open past the point a user has given up. */
 export const DEFAULT_UPSTREAM_TIMEOUT_MS = 60_000;
 
-/** Video/music unit doors need longer waits than chat first-token (Seedance full can exceed 2 min). */
-export const DEFAULT_NONCHAT_UPSTREAM_TIMEOUT_MS = 180_000;
+/** Video/music unit doors need longer waits than chat first-token.
+ * MiniMax music + rehost regularly approaches 3 min; 180s was cutting songs off mid-gen. */
+export const DEFAULT_NONCHAT_UPSTREAM_TIMEOUT_MS = 300_000;
 
-/** Hard ceiling on the configurable timeout. A misconfigured 10-minute wait would pin a Worker
- * invocation and a phone socket on a request nobody is still waiting for. */
+/** Hard ceiling for chat first-token waits. */
 const MAX_UPSTREAM_TIMEOUT_MS = 180_000;
+
+/** Hard ceiling for non-chat (music/video/image). Separate so music can run past chat's 180s cap. */
+const MAX_NONCHAT_UPSTREAM_TIMEOUT_MS = 360_000;
 
 export function upstreamTimeoutMs(env: Env): number {
   const raw = (env.UPSTREAM_TIMEOUT_MS ?? "").trim();
@@ -157,14 +160,14 @@ export function upstreamTimeoutMs(env: Env): number {
  *
  * Intentionally does **not** fall back to UPSTREAM_TIMEOUT_MS: production often sets that to 60s
  * for chat first-token, which is too short for Seedance/Veo and re-introduced 60s timeouts after
- * v0.4.10. Only NONCHAT_UPSTREAM_TIMEOUT_MS (or the 120s default) applies here.
+ * v0.4.10. Only NONCHAT_UPSTREAM_TIMEOUT_MS (or the non-chat default) applies here.
  */
 export function nonChatUpstreamTimeoutMs(env: Env): number {
   const raw = (env.NONCHAT_UPSTREAM_TIMEOUT_MS ?? "").trim();
   if (!raw) return DEFAULT_NONCHAT_UPSTREAM_TIMEOUT_MS;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_NONCHAT_UPSTREAM_TIMEOUT_MS;
-  return Math.min(Math.floor(parsed), MAX_UPSTREAM_TIMEOUT_MS);
+  return Math.min(Math.floor(parsed), MAX_NONCHAT_UPSTREAM_TIMEOUT_MS);
 }
 
 export interface GatewayConfig {
