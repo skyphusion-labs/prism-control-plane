@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+## [0.4.28] - 2026-08-06
+
+### Fixed
+
+- **Music long-run Internal Server Error:** after MiniMax returns, the plane was including the full
+  provider `result` in the JSON body. Large/non-JSON-safe envelopes after multi-minute gens could
+  throw in `JSON.stringify` → bare CF 500. Response is now slim (`model`, `audio`, `rehosted`).
+  Rehost streams into R2 when possible; handler is try/caught with structured `internal` errors.
+
+## [0.4.27] - 2026-08-06
+
+### Fixed
+
+- **Aura-2 TTS empty audio:** REST `ai/run` returns raw `audio/mpeg` for Aura-2. Plane was
+  `res.text()` + JSON parse, so `extractAudioBase64` always missed and clients saw
+  "TTS returned no audio payload" / no playable audio despite gateway 200. Binary audio
+  bodies (and binding ReadableStream/ArrayBuffer) are now base64-wrapped as `{ audio }`.
+
+## [0.4.26] - 2026-08-06
+
+### Fixed
+
+- **Music/video 3-minute cutoffs:** non-chat upstream default timeout raised **180s → 300s**,
+  and the hard max for non-chat is now **360s** (chat remains max 180s). MiniMax full songs
+  were hitting the plane Promise.race at exactly ~3 min → client "Generation timed out".
+
 ## [0.4.25] - 2026-08-06
 
 ### Fixed

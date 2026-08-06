@@ -666,6 +666,27 @@ export async function handleVideoGenerations(ctx: Ctx, request: Request): Promis
 }
 
 export async function handleMusicGenerations(ctx: Ctx, request: Request): Promise<Response> {
+  try {
+    return await handleMusicGenerationsInner(ctx, request);
+  } catch (err) {
+    // Catch OOM / JSON / unexpected throws after a long MiniMax wait so the client gets a
+    // structured error + request id instead of a bare CF "Internal Server Error".
+    console.error("music handler crash", {
+      requestId: ctx.requestId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return errorResponse(
+      ctx.requestId,
+      "internal",
+      `Music handler failed after upstream: ${err instanceof Error ? err.message : String(err)}`.slice(
+        0,
+        280,
+      ),
+    );
+  }
+}
+
+async function handleMusicGenerationsInner(ctx: Ctx, request: Request): Promise<Response> {
   const gate = await gateNonChat(ctx, request, "music");
   if (!gate.ok) return gate.response;
   const raw = ((ctx as Ctx & { _nonchatBody?: unknown })._nonchatBody ?? {}) as Record<string, unknown>;
@@ -699,15 +720,25 @@ export async function handleMusicGenerations(ctx: Ctx, request: Request): Promis
   // Re-host provider HTTPS audio on our MEDIA R2 + signed download (same shape as Grok video).
   // MiniMax returns short-lived Aliyun OSS URLs that Safari/UIApplication often cannot open;
   // play-proxy /v1/media/{token} is stable for 24h and works in-app.
+  let rehosted = false;
   if (looksLikeHttpUrl(asset)) {
-    const rehosted = await rehostMusicAudio(ctx, request, gate.account.id, asset);
-    if (rehosted) asset = rehosted;
+    const hosted = await rehostMusicAudio(ctx, request, gate.account.id, asset);
+    if (hosted) {
+      asset = hosted;
+      rehosted = true;
+    }
   }
+  // Never echo full provider body: MiniMax envelopes can be large / non-JSON-safe and
+  // JSON.stringify in meterAndRespond has crashed long runs into CF 500 Internal Server Error.
   return meterAndRespond(
     ctx,
     gate,
     1,
-    { model: gate.model.id, audio: asset, result: up.body },
+    {
+      model: gate.model.id,
+      audio: asset,
+      rehosted,
+    },
     200,
     up.gatewayLogId,
   );
@@ -735,18 +766,40 @@ async function rehostMusicAudio(
       headers: { accept: "audio/*,application/octet-stream,*/*" },
       redirect: "follow",
     });
-    if (!res.ok) return null;
-    const buf = await res.arrayBuffer();
-    if (buf.byteLength === 0 || buf.byteLength > MEDIA_MAX_BYTES) return null;
-    const objectKey = newMusicObjectKey(accountId, ctx.requestId);
+    if (!res.ok) {
+      console.error("music rehost fetch failed", {
+        requestId: ctx.requestId,
+        status: res.status,
+      });
+      return null;
+    }
+    // Prefer streaming into R2 when possible (lower peak memory after a long MiniMax wait).
     const contentType = res.headers.get("content-type") ?? "audio/mpeg";
-    await ctx.env.MEDIA.put(objectKey, buf, {
-      httpMetadata: { contentType: contentType.split(";")[0]?.trim() || "audio/mpeg" },
-    });
+    const objectKey = newMusicObjectKey(accountId, ctx.requestId);
+    const len = Number(res.headers.get("content-length") ?? "0");
+    if (len > MEDIA_MAX_BYTES) {
+      console.error("music rehost too large", { requestId: ctx.requestId, len });
+      return null;
+    }
+    if (res.body) {
+      await ctx.env.MEDIA.put(objectKey, res.body, {
+        httpMetadata: { contentType: contentType.split(";")[0]?.trim() || "audio/mpeg" },
+      });
+    } else {
+      const buf = await res.arrayBuffer();
+      if (buf.byteLength === 0 || buf.byteLength > MEDIA_MAX_BYTES) return null;
+      await ctx.env.MEDIA.put(objectKey, buf, {
+        httpMetadata: { contentType: contentType.split(";")[0]?.trim() || "audio/mpeg" },
+      });
+    }
     const downTok = await mintDownloadToken(secret, objectKey);
     const origin = new URL(request.url).origin;
     return mediaPublicUrl(origin, `/v1/media/${downTok.token}`);
-  } catch {
+  } catch (err) {
+    console.error("music rehost error", {
+      requestId: ctx.requestId,
+      error: err instanceof Error ? err.message : String(err),
+    });
     return null;
   }
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  extractAudioBase64,
   extractImageAsset,
   extractMusicAsset,
   extractVideoAsset,
@@ -32,6 +33,14 @@ describe("extractMusicAsset", () => {
     );
     expect(extractMusicAsset({ audio: "base64blob" })).toBe("base64blob");
     expect(extractMusicAsset({ state: "Completed", result: {} })).toBeNull();
+  });
+});
+
+describe("extractAudioBase64", () => {
+  it("reads flat or nested audio strings", () => {
+    expect(extractAudioBase64({ audio: "YmFzZTY0" })).toBe("YmFzZTY0");
+    expect(extractAudioBase64({ result: { audio: "abc" } })).toBe("abc");
+    expect(extractAudioBase64({ state: "Completed" })).toBeNull();
   });
 });
 
