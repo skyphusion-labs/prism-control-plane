@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.4.23] - 2026-08-06
+
+### Added
+
+- **Vision multiparty chat content:** `messages[].content` may be a string or an OpenAI-style
+  array of `{type:text|image_url}` parts. Images become Anthropic image blocks on the binding
+  path and `image_url` parts on OpenAI-compatible upstreams. Caps: data-URL images ≤ 4 MiB;
+  image parts only on user turns.
+
 ## [0.4.22] - 2026-08-06
 
 ### Fixed

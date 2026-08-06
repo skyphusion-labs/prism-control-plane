@@ -7,10 +7,15 @@
 
 import type { Billing } from "./catalog";
 
-/** One turn. Content is a plain string; image bytes for vision models ride on InferenceRequest.image. */
+/** One turn. Text is always a string; optional image data/https URLs for vision models. */
 export interface ChatTurn {
   role: "system" | "user" | "assistant";
   content: string;
+  /**
+   * Vision parts on this turn (user only). data:image/...;base64,... or https URL.
+   * Built from OpenAI multiparty content arrays on /v1/chat/completions.
+   */
+  images?: string[];
 }
 
 /** The credential the call is made WITH. Per user, never the plane's own minting token. */
