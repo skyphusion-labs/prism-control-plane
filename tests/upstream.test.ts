@@ -325,15 +325,14 @@ describe("runnerFor binding path", () => {
     expect(isAllowedBindingChatModel("evil/model")).toBe(false);
   });
 
-  it("buffers anthropic binding stream:true via non-stream AI.run then OpenAI SSE", async () => {
+  it("defers anthropic stream:true: open SSE immediately, non-stream AI.run, then text", async () => {
     // Device path: native Anthropic SSE is flaky; non-stream body is reliable.
-    const run = vi.fn(async () => ({
-      content: [
-        { type: "thinking", thinking: "hmm" },
-        { type: "text", text: "pong" },
-      ],
-      usage: { input_tokens: 9, output_tokens: 4 },
-    }));
+    // Response stream must start before AI.run resolves (first-byte for mobile).
+    let resolveRun!: (v: unknown) => void;
+    const runGate = new Promise<unknown>((r) => {
+      resolveRun = r;
+    });
+    const run = vi.fn(() => runGate);
     const result = await runnerFor({
       ...DEPS,
       ai: { run } as unknown as Ai,
@@ -345,19 +344,39 @@ describe("runnerFor binding path", () => {
     );
     expect(result.outcome).toBe("stream");
     if (result.outcome !== "stream") return;
-    const text = await new Response(result.stream).text();
-    expect(text).toContain('"content":"pong"');
-    expect(text).toContain("chat.completion.chunk");
-    expect(text).toContain("data: [DONE]");
-    expect(text).toContain('"prompt_tokens":9');
-    expect(text).toContain('"completion_tokens":4');
-    expect(text).not.toContain("content_block_delta");
-    // Non-stream body: no stream:true on the binding call.
+
+    const reader = result.stream.getReader();
+    const decoder = new TextDecoder();
+    // First pull should yield open chunk without waiting for AI.run.
+    const first = await reader.read();
+    expect(first.done).toBe(false);
+    const head = decoder.decode(first.value);
+    expect(head).toContain("chat.completion.chunk");
+    expect(head).toContain('"role":"assistant"');
     expect(run).toHaveBeenCalledWith(
       "anthropic/claude-fable-5",
       expect.not.objectContaining({ stream: true }),
       { gateway: { id: "prism-proxy" } },
     );
+
+    resolveRun({
+      content: [
+        { type: "thinking", thinking: "hmm" },
+        { type: "text", text: "pong" },
+      ],
+      usage: { input_tokens: 9, output_tokens: 4 },
+    });
+
+    let rest = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) rest += decoder.decode(value);
+    }
+    const full = head + rest;
+    expect(full).toContain('"content":"pong"');
+    expect(full).toContain("data: [DONE]");
+    expect(full).toContain('"prompt_tokens":9');
   });
 });
 

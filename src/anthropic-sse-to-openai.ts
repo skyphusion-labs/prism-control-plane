@@ -288,6 +288,98 @@ export function openAIStreamFromCompletion(opts: {
   });
 }
 
+export type DeferredCompletionResult = {
+  text: string;
+  promptTokens?: number | null;
+  completionTokens?: number | null;
+};
+
+/**
+ * OpenAI SSE stream that **returns Response bytes immediately** (open chunk + keepalives)
+ * while `run()` awaits the non-stream binding call.
+ *
+ * WHY. Holding the Worker until AI.run finishes means no HTTP headers/body for many seconds.
+ * Mobile URLSession often treats that as a failed or empty stream (Empty stream completion)
+ * even when curl (long patient wait) succeeds. Emitting the open frame first keeps the
+ * connection alive; text frames follow when run() resolves.
+ */
+export function openAIStreamFromDeferredCompletion(opts: {
+  model: string;
+  run: () => Promise<DeferredCompletionResult>;
+  keepaliveMs?: number;
+}): ReadableStream<Uint8Array> {
+  const state = newAnthropicToOpenAIState({ model: opts.model });
+  const encoder = new TextEncoder();
+  const keepaliveMs = opts.keepaliveMs ?? 10_000;
+
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      let closed = false;
+      const enqueue = (s: string): void => {
+        if (closed || !s) return;
+        try {
+          controller.enqueue(encoder.encode(s));
+        } catch {
+          closed = true;
+        }
+      };
+      // First byte immediately so clients leave "waiting for response".
+      enqueue(openChunk(state));
+
+      const timer = setInterval(() => {
+        if (closed) return;
+        enqueue(KEEPALIVE);
+      }, keepaliveMs);
+
+      const finish = (): void => {
+        if (closed) return;
+        closed = true;
+        clearInterval(timer);
+        try {
+          controller.close();
+        } catch {
+          /* already closed */
+        }
+      };
+
+      void (async () => {
+        try {
+          const result = await opts.run();
+          if (result.promptTokens != null && Number.isInteger(result.promptTokens)) {
+            state.inputTokens = result.promptTokens;
+          }
+          if (result.completionTokens != null && Number.isInteger(result.completionTokens)) {
+            state.outputTokens = result.completionTokens;
+          }
+          const text = result.text ?? "";
+          const chunkSize = 48;
+          for (let i = 0; i < text.length; i += chunkSize) {
+            enqueue(textChunk(state, text.slice(i, i + chunkSize)));
+          }
+          enqueue(finishAndUsage(state));
+          finish();
+        } catch (err) {
+          // Surface a client-visible SSE error rather than a silent empty close.
+          const msg = err instanceof Error ? err.message : String(err);
+          enqueue(
+            encodeFrame({
+              error: {
+                message: msg.slice(0, 200),
+                type: "upstream_error",
+              },
+            }),
+          );
+          if (!state.finished) enqueue(finishAndUsage(state));
+          finish();
+        }
+      })();
+    },
+    cancel() {
+      // Client hung up; run() may still complete (ledger via settlement if any).
+    },
+  });
+}
+
 /**
  * Transform a ReadableStream of Anthropic SSE bytes into OpenAI chat.completion.chunk SSE.
  *
