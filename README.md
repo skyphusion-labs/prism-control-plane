@@ -2,7 +2,7 @@
 
 **License:** AGPL-3.0-only  
 **Sibling:** [prism](https://github.com/skyphusion-labs/prism) (playground + inference Worker)  
-**Future clients:** [prism-ios](https://github.com/skyphusion-labs/prism-ios), [prism-android](https://github.com/skyphusion-labs/prism-android)
+**Native clients:** [prism-ios](https://github.com/skyphusion-labs/prism-ios), [prism-android](https://github.com/skyphusion-labs/prism-android) (build against this plane's contract)
 
 ## What this is
 
@@ -25,14 +25,18 @@ model, and the mermaid flowchart are in [`docs/ARCHITECTURE.md`](docs/ARCHITECTU
 
 ## The client contract comes first
 
-The mobile apps do not exist yet, and they will be written against a contract defined here rather
-than against whatever this Worker happens to return:
+Native clients ([prism-ios](https://github.com/skyphusion-labs/prism-ios),
+[prism-android](https://github.com/skyphusion-labs/prism-android)) and any future SDK are written
+against a contract defined here, not against whatever the Worker happens to return today:
 
 - **[`docs/CONTRACT.md`](docs/CONTRACT.md)** -- the normative contract. Auth, enrollment, error codes
   and their retry semantics, quota behaviour, limits, and the open decisions still owed.
 - **[`docs/openapi.yaml`](docs/openapi.yaml)** -- the same surface, machine-readable.
 
 `tests/contract.test.ts` fails the build if the router and the contract drift apart.
+
+Conversation history and compact live on the **playground** Worker ([prism](https://github.com/skyphusion-labs/prism)),
+not here. This plane never stores prompts or completions.
 
 ## Privacy invariant
 
@@ -46,9 +50,10 @@ only copy of what they sent.
 
 ## Endpoints
 
-Full non-chat surface (images, speech, transcriptions, videos, music, STT sessions) is in `docs/CONTRACT.md` / OpenAPI. README table may list only the core paths.
-
-## Endpoints
+The table below is the **core client surface only** (health, enroll, me, models, usage, chat). The full
+non-chat surface (images, speech, transcriptions, videos, music, STT sessions) and every error code is
+normative in [`docs/CONTRACT.md`](docs/CONTRACT.md) and [`docs/openapi.yaml`](docs/openapi.yaml). Prefer
+those files when wiring a client.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
