@@ -238,22 +238,41 @@ export function anthropicSseToOpenAIStream(
 ): ReadableStream<Uint8Array> {
   const transformer = new AnthropicSseToOpenAI(opts);
   const reader = source.getReader();
+  /** Always close OpenAI-compat (finish + optional usage + [DONE]) so clients do not hang
+   * when the binding aborts mid-thinking or the edge cuts the stream without message_stop. */
+  const closeOpenAI = (controller: ReadableStreamDefaultController<Uint8Array>): void => {
+    try {
+      const tail = transformer.end();
+      if (tail.byteLength > 0) controller.enqueue(tail);
+    } catch {
+      // ignore double-end
+    }
+    try {
+      controller.close();
+    } catch {
+      // already closed
+    }
+  };
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
       try {
         const { done, value } = await reader.read();
         if (done) {
-          const tail = transformer.end();
-          if (tail.byteLength > 0) controller.enqueue(tail);
-          controller.close();
+          closeOpenAI(controller);
           return;
         }
         if (value) {
-          const out = transformer.push(value);
+          // Binding may yield string chunks in some runtimes; normalize to bytes.
+          const bytes =
+            value instanceof Uint8Array
+              ? value
+              : new TextEncoder().encode(typeof value === "string" ? value : String(value));
+          const out = transformer.push(bytes);
           if (out.byteLength > 0) controller.enqueue(out);
         }
-      } catch (err) {
-        controller.error(err);
+      } catch {
+        // Prefer a clean OpenAI end over an error mid-body when we already streamed deltas.
+        closeOpenAI(controller);
       }
     },
     cancel(reason) {

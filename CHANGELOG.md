@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.4.18] - 2026-08-06
+
+### Fixed
+
+- **Anthropic binding stream close:** always emit finish + usage + `[DONE]` when the
+  binding stream ends or aborts (edge/idle cut without `message_stop`), so clients
+  do not hang after partial text deltas. Accept string chunks if the runtime yields them.
+
 ## [0.4.17] - 2026-08-06
 
 ### Fixed
