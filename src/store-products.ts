@@ -1,9 +1,12 @@
-// App Store product id → prepaid credit (micro-USD).
-// Keep in lockstep with prism-ios StoreProducts.packs.
+// App Store + Play Billing product id → prepaid credit (micro-USD).
+// Keep in lockstep with prism-ios StoreProducts.packs and prism-android StoreProducts.
 
 export const APPLE_BUNDLE_ID = "org.skyphusion.prism";
 
-/** Whole USD credit per product id. */
+/** Android applicationId / Play package name (same as Apple bundle id today). */
+export const ANDROID_PACKAGE_NAME = "org.skyphusion.prism";
+
+/** Whole USD credit per product id (shared Apple + Google SKUs). */
 export const STORE_PRODUCT_CREDIT_USD: Record<string, number> = {
   "org.skyphusion.prism.credit.5": 5,
   "org.skyphusion.prism.credit.20": 20,

@@ -53,3 +53,10 @@ describe("apple JWS decode", () => {
     expect(isXcodeStoreEnvironment("Sandbox")).toBe(false);
   });
 });
+
+describe("android package", () => {
+  it("shares product map with Apple and names the Android package", async () => {
+    const { ANDROID_PACKAGE_NAME } = await import("../src/store-products");
+    expect(ANDROID_PACKAGE_NAME).toBe("org.skyphusion.prism");
+  });
+});

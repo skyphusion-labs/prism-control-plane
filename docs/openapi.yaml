@@ -353,11 +353,12 @@ paths:
   /v1/store/redeem:
     post:
       tags: [billing]
-      summary: Redeem App Store / StoreKit purchase for prepaid credit
+      summary: Redeem App Store or Google Play purchase for prepaid credit
       description: >-
-        Device-key authenticated. Accepts StoreKit 2 signed_transaction JWS. Maps
-        org.skyphusion.prism.credit.{5,20,50} to prepaid micro-USD. Idempotent on
-        appstore:&lt;transactionId&gt;.
+        Device-key authenticated. App Store: StoreKit 2 signed_transaction JWS (idempotent
+        appstore:&lt;transactionId&gt;). Google Play: platform=google_play + purchase_token +
+        product_id (idempotent playstore:&lt;orderId|token&gt;); verifies via Android Publisher when
+        GOOGLE_PLAY_SERVICE_ACCOUNT_JSON is set. Maps org.skyphusion.prism.credit.{5,20,50}.
       requestBody:
         required: true
         content:
@@ -366,8 +367,11 @@ paths:
               type: object
               properties:
                 signed_transaction: { type: string, description: StoreKit 2 JWS }
+                platform: { type: string, description: "google_play for Play Billing" }
+                purchase_token: { type: string, description: Play Billing purchase token }
+                product_id: { type: string }
+                package_name: { type: string, description: Defaults to org.skyphusion.prism }
                 transaction_id: { type: string, description: Test-only with trust flag }
-                product_id: { type: string, description: Test-only with trust flag }
       responses:
         "200":
           description: Credit applied or already applied (applied false)

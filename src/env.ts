@@ -123,6 +123,12 @@ export interface Env {
    * Leave unset in production (Xcode environment claims still redeem without this flag).
    */
   STORE_REDEEM_TRUST_DECODE?: string;
+
+  /**
+   * Optional Google Play service account JSON for verifying Play Billing tokens on
+   * POST /v1/store/redeem (platform=google_play). UNSET = lab trust_decode only.
+   */
+  GOOGLE_PLAY_SERVICE_ACCOUNT_JSON?: string;
 }
 
 /** Documented default for UPSTREAM_TIMEOUT_MS: long enough for a slow first token, short enough that

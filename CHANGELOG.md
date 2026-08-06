@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.4.16] - 2026-08-06
+
+### Added
+
+- **Google Play redeem** on `POST /v1/store/redeem` (`platform=google_play`,
+  `purchase_token`, `product_id`). Verifies via Android Publisher when
+  `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON` is set; lab field path via `STORE_REDEEM_TRUST_DECODE`.
+
+
 ## [0.4.15] - 2026-08-06
 
 ### Added
