@@ -384,9 +384,9 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
     // only, `prism-metered` is deliberately absent rather than guessed, and the ledger row is written when
     // the stream settles.
     //
-    // The relay does not touch the bytes -- an OpenAI-compatible SDK sees Cloudflare's own frames, including
-    // the trailing usage frame it asked for. If the usage never arrives the request lands in the ledger
-    // UNMETERED with a reason, which is the honest outcome and not a zero charge.
+    // The relay does not touch the bytes further -- the runner already produced OpenAI-compatible
+    // frames (or transformed Anthropic binding SSE). If usage never arrives the request lands in the
+    // ledger UNMETERED with a reason, which is the honest outcome and not a zero charge.
     const stream = meteredRelay(result.stream, (settlement) => {
       const metered =
         settlement.usage === null ? null : meterUsageObject(settlement.usage, price);

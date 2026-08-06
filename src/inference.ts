@@ -127,16 +127,26 @@ export function extractText(body: unknown): string | null {
     if (content === "") return "";
   }
 
-  // Anthropic Messages API (env.AI.run binding for Fable etc.): only type:"text" blocks.
-  // Thinking / tool blocks are ignored (same discipline as prism extractOutput).
+  // Anthropic Messages API (env.AI.run binding for Fable etc.): prefer type:"text" blocks.
+  // Thinking / tool blocks are ignored when any text exists (same as prism extractOutput).
+  // When the model spent the whole max_tokens budget on thinking and emitted no text block,
+  // fall back to thinking so the plane does not 502 "could not read as text" on a 200 body.
   const content = asRecord.content;
   if (Array.isArray(content)) {
-    const text = content
-      .filter((b): b is { type?: string; text?: string } => !!b && typeof b === "object")
+    const blocks = content.filter(
+      (b): b is { type?: string; text?: string; thinking?: string } =>
+        !!b && typeof b === "object",
+    );
+    const text = blocks
       .filter((b) => b.type === "text" && typeof b.text === "string")
       .map((b) => b.text as string)
       .join("");
     if (text) return text;
+    const thinking = blocks
+      .filter((b) => b.type === "thinking" && typeof b.thinking === "string")
+      .map((b) => b.thinking as string)
+      .join("");
+    if (thinking) return thinking;
   }
 
   // OpenAI Responses API: output[] with type message / output_text blocks.

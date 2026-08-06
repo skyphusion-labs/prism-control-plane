@@ -62,6 +62,16 @@ describe("extractText", () => {
     ).toBe("hello");
   });
 
+  it("falls back to Anthropic thinking when no text block", () => {
+    // Fable can burn max_tokens on thinking and omit type:text; prefer 200 + text over unreadable.
+    expect(
+      extractText({
+        content: [{ type: "thinking", thinking: "only reasoning left" }],
+        stop_reason: "max_tokens",
+      }),
+    ).toBe("only reasoning left");
+  });
+
   it("reads OpenAI Responses API output_text blocks", () => {
     expect(
       extractText({

@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [0.4.17] - 2026-08-06
+
+### Fixed
+
+- **Claude Fable 5 streaming (Empty stream completion):** Anthropic `binding: true` models
+  return native Messages SSE (`content_block_delta` / `text_delta`). OpenAI-compatible clients
+  (prism-ios, SDKs) only read `choices[].delta.content`, so stream-on looked empty. Plane now
+  transforms Anthropic binding streams to OpenAI `chat.completion.chunk` frames + trailing usage
+  + `[DONE]` before relay/meter (`src/anthropic-sse-to-openai.ts`). Non-Anthropic streams still
+  pass through unmodified.
+- **Anthropic non-stream extractText:** when the body has only `type:thinking` blocks (budget
+  exhausted before text), fall back to thinking text instead of 502 "could not read as text".
+
 ## [0.4.16] - 2026-08-06
 
 ### Added
