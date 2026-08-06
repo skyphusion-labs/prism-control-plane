@@ -206,6 +206,43 @@ describe("bindingChatBody", () => {
     expect(body).not.toHaveProperty("max_completion_tokens");
   });
 
+  it("merges consecutive same-role turns for Anthropic (device filters error shells)", () => {
+    const body = bindingChatBody(
+      request({
+        bindingModel: "anthropic/claude-fable-5",
+        messages: [
+          { role: "user", content: "first" },
+          { role: "user", content: "second after failed assistant" },
+          { role: "assistant", content: "ok" },
+          { role: "assistant", content: "also ok" },
+          { role: "user", content: "Hello buddy" },
+        ],
+        maxTokens: 64,
+      }),
+    );
+    expect(body.messages).toEqual([
+      { role: "user", content: [{ type: "text", text: "first\n\nsecond after failed assistant" }] },
+      { role: "assistant", content: [{ type: "text", text: "ok\n\nalso ok" }] },
+      { role: "user", content: [{ type: "text", text: "Hello buddy" }] },
+    ]);
+  });
+
+  it("drops leading assistant for Anthropic after client filters", () => {
+    const body = bindingChatBody(
+      request({
+        bindingModel: "anthropic/claude-fable-5",
+        messages: [
+          { role: "assistant", content: "orphan" },
+          { role: "user", content: "hi" },
+        ],
+        maxTokens: 32,
+      }),
+    );
+    expect(body.messages).toEqual([
+      { role: "user", content: [{ type: "text", text: "hi" }] },
+    ]);
+  });
+
   it("builds Chat Completions shape for xai/* binding models", () => {
     const body = bindingChatBody(
       request({

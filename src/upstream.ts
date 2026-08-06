@@ -177,11 +177,24 @@ export function bindingChatBody(request: InferenceRequest): Record<string, unkno
         continue;
       }
       if (m.role !== "user" && m.role !== "assistant") continue;
+      const text = m.content;
+      // Anthropic requires strict user/assistant alternation and a user-first list.
+      // Clients (prism-ios) drop failed assistant shells, which leaves consecutive user
+      // turns → provider 400 → "model or gateway failed". Merge same-role neighbors.
+      const prev = messages[messages.length - 1];
+      if (prev && prev.role === m.role) {
+        const block = prev.content[0];
+        if (block) block.text = block.text ? `${block.text}\n\n${text}` : text;
+        continue;
+      }
       messages.push({
         role: m.role,
-        content: [{ type: "text", text: m.content }],
+        content: [{ type: "text", text }],
       });
     }
+    // Leading assistant is invalid; drop (orphan from a filtered prior user).
+    while (messages.length > 0 && messages[0].role === "assistant") messages.shift();
+    // Empty after filter: leave as-is; runner will fail closed upstream.
     const body: Record<string, unknown> = {
       max_tokens: request.maxTokens,
       messages,
