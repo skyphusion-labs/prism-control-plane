@@ -296,8 +296,11 @@ is **allowance first, then prepaid credit**.
 ### Streaming
 
 `stream: true` returns `200` with `content-type: text/event-stream` and `prism-stream: true`. The
-frames are Cloudflare's own, relayed **unmodified**, so an OpenAI-compatible SDK consumes them
-unchanged. The stream ends with a usage frame and then `data: [DONE]`.
+client always sees **OpenAI-compatible** `chat.completion.chunk` frames (`choices[].delta.content`)
+ending with a usage frame and `data: [DONE]`. Most upstreams already emit that shape and are relayed
+byte-for-byte. Anthropic **binding** models (`env.AI.run`, e.g. `anthropic/claude-fable-5`) emit
+native Messages SSE (`content_block_delta` / `text_delta`); the plane transforms those to the OpenAI
+chunk shape before the client so prism-ios and OpenAI SDKs need no Anthropic dialect.
 
 **The money headers are absent on a stream, and that absence is deliberate.** `prism-usage-micro-usd`
 and `prism-metered` describe what a request cost, and the token counts only arrive in the final frame,

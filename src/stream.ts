@@ -6,10 +6,11 @@
 // meter it -- which defeats the point of streaming and holds a Worker open on the full response -- or it
 // watches the bytes go past and settles up at the end. This file does the second.
 //
-// WHAT IT IS NOT. It is not a parser of the client's stream. The bytes are relayed UNCHANGED, so an
-// OpenAI-compatible SDK sees exactly what Cloudflare sent, including the trailing usage frame. The scanner
-// is a passive reader: if it understands nothing, the client still gets a correct stream and the request
-// lands in the ledger unmetered. A metering bug must never be able to corrupt a paid-for answer.
+// WHAT IT IS NOT. It is not a parser of the client's stream. The bytes are relayed UNCHANGED from
+// whatever the runner already produced (OpenAI-shaped upstreams, or Anthropic binding streams after
+// anthropic-sse-to-openai). The scanner is a passive reader: if it understands nothing, the client
+// still gets a correct stream and the request lands in the ledger unmetered. A metering bug must
+// never be able to corrupt a paid-for answer.
 //
 // THE UNMETERED CASE IS FIRST-CLASS, not an error. `stream_options: { include_usage: true }` is sent on
 // every streamed call, but a provider that ignores it, a client that disconnects mid-stream, or a frame

@@ -287,6 +287,46 @@ describe("runnerFor binding path", () => {
     expect(isAllowedBindingChatModel("xai/grok-4.3")).toBe(false);
     expect(isAllowedBindingChatModel("evil/model")).toBe(false);
   });
+
+  it("transforms anthropic binding streams to OpenAI chat.completion.chunk SSE", async () => {
+    const anthropicBytes = new TextEncoder().encode(
+      [
+        'data: {"type":"message_start","message":{"usage":{"input_tokens":9,"output_tokens":1}}}\n\n',
+        'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"pong"}}\n\n',
+        'data: {"type":"message_delta","usage":{"output_tokens":1}}\n\n',
+        'data: {"type":"message_stop"}\n\n',
+      ].join(""),
+    );
+    const run = vi.fn(async () => {
+      return new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(anthropicBytes);
+          controller.close();
+        },
+      });
+    });
+    const result = await runnerFor({
+      ...DEPS,
+      ai: { run } as unknown as Ai,
+    }).run(
+      request({
+        bindingModel: "anthropic/claude-fable-5",
+        stream: true,
+      }),
+    );
+    expect(result.outcome).toBe("stream");
+    if (result.outcome !== "stream") return;
+    const text = await new Response(result.stream).text();
+    expect(text).toContain('"content":"pong"');
+    expect(text).toContain("chat.completion.chunk");
+    expect(text).toContain("data: [DONE]");
+    expect(text).not.toContain("content_block_delta");
+    expect(run).toHaveBeenCalledWith(
+      "anthropic/claude-fable-5",
+      expect.objectContaining({ stream: true }),
+      { gateway: { id: "prism-proxy" } },
+    );
+  });
 });
 
 describe("responsesBody / responsesUrl", () => {

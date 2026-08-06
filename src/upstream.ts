@@ -78,6 +78,7 @@
 // own arithmetic against the biller's is trusting itself for no reason.
 // https://developers.cloudflare.com/ai-gateway/observability/logging/
 
+import { anthropicSseToOpenAIStream } from "./anthropic-sse-to-openai";
 import { findModel, type Billing } from "./catalog";
 import { gatewayConfig, upstreamTimeoutMs, type Env } from "./env";
 import type { InferenceRequest, InferenceResult, InferenceRunner } from "./inference";
@@ -274,7 +275,15 @@ async function runViaBinding(
           detail: `binding stream expected ReadableStream, got ${typeof result}`,
         };
       }
-      return { outcome: "stream", stream: result as ReadableStream<Uint8Array>, gatewayLogId: logId };
+      let stream = result as ReadableStream<Uint8Array>;
+      // Anthropic binding returns native Messages SSE (text_delta / thinking_delta). The
+      // plane door is OpenAI-compatible; transform so prism-ios and OpenAI SDKs see
+      // choices[].delta.content + trailing usage + [DONE]. Grok/OpenAI bindings already
+      // emit that shape and pass through unchanged.
+      if (bindingModel.startsWith("anthropic/")) {
+        stream = anthropicSseToOpenAIStream(stream, { model: bindingModel });
+      }
+      return { outcome: "stream", stream, gatewayLogId: logId };
     }
 
     return { outcome: "ok", body: result, gatewayLogId: logId };
