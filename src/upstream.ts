@@ -78,7 +78,7 @@
 // own arithmetic against the biller's is trusting itself for no reason.
 // https://developers.cloudflare.com/ai-gateway/observability/logging/
 
-import { openAIStreamFromCompletion } from "./anthropic-sse-to-openai";
+import { openAIStreamFromDeferredCompletion } from "./anthropic-sse-to-openai";
 import { findModel, type Billing } from "./catalog";
 import { gatewayConfig, upstreamTimeoutMs, type Env } from "./env";
 import { extractText, type InferenceRequest, type InferenceResult, type InferenceRunner } from "./inference";
@@ -267,22 +267,52 @@ async function runViaBinding(
   // the call (same posture as non-chat UB binding). See docs/security-false-positives.md.
   //
   // Anthropic binding + client stream:true: DO NOT use native Messages SSE. Non-stream AI.run
-  // is the path that reliably returns text (Fable thinking works there). Native SSE still loses
-  // device clients to idle cuts / empty assembly even with keepalives. Buffer, then synthesize
-  // OpenAI chat.completion.chunk frames. Grok/OpenAI bindings already stream OpenAI-shaped.
+  // is the path that reliably returns text. Return an SSE Response **immediately** (open chunk
+  // + keepalives), run non-stream inside the stream, then emit text. Awaiting AI.run before
+  // Response left mobile clients with no first-byte for the whole think window → Empty stream.
   const anthropicBufferedStream =
     request.stream === true && bindingModel.startsWith("anthropic/");
-  const runRequest: InferenceRequest = anthropicBufferedStream
-    ? { ...request, stream: false }
-    : request;
   // Fable thinking regularly exceeds the 60s chat default; cap at plane max (180s).
   const timeoutMs = bindingModel.startsWith("anthropic/")
     ? Math.max(deps.timeoutMs, 180_000)
     : deps.timeoutMs;
 
+  if (anthropicBufferedStream) {
+    const nonStreamReq: InferenceRequest = { ...request, stream: false };
+    const stream = openAIStreamFromDeferredCompletion({
+      model: bindingModel,
+      keepaliveMs: 10_000,
+      run: async () => {
+        const result = await Promise.race([
+          (ai as unknown as { run: RunFn }).run(bindingModel, bindingChatBody(nonStreamReq), {
+            gateway: { id: deps.gatewayId },
+          }),
+          new Promise<never>((_, reject) => {
+            setTimeout(
+              () => reject(Object.assign(new Error("timeout"), { name: "TimeoutError" })),
+              timeoutMs,
+            );
+          }),
+        ]);
+        const text = extractText(result);
+        if (text === null) {
+          throw new Error("Anthropic binding returned no extractable text");
+        }
+        const usage = extractUsage(result);
+        return {
+          text,
+          promptTokens: usage?.inputTokens ?? null,
+          completionTokens: usage?.outputTokens ?? null,
+        };
+      },
+    });
+    // logId only known after run; stream settlement may be unmetered until reconcile.
+    return { outcome: "stream", stream, gatewayLogId: null };
+  }
+
   try {
     const result = await Promise.race([
-      (ai as unknown as { run: RunFn }).run(bindingModel, bindingChatBody(runRequest), {
+      (ai as unknown as { run: RunFn }).run(bindingModel, bindingChatBody(request), {
         gateway: { id: deps.gatewayId },
       }),
       new Promise<never>((_, reject) => {
@@ -295,25 +325,6 @@ async function runViaBinding(
 
     const logId =
       (ai as unknown as { aiGatewayLogId?: string }).aiGatewayLogId ?? null;
-
-    if (anthropicBufferedStream) {
-      const text = extractText(result);
-      if (text === null) {
-        return {
-          outcome: "upstream_error",
-          status: null,
-          detail: "Anthropic binding returned no extractable text (buffered stream path)",
-        };
-      }
-      const usage = extractUsage(result);
-      const stream = openAIStreamFromCompletion({
-        model: bindingModel,
-        text,
-        promptTokens: usage?.inputTokens ?? null,
-        completionTokens: usage?.outputTokens ?? null,
-      });
-      return { outcome: "stream", stream, gatewayLogId: logId };
-    }
 
     if (request.stream) {
       if (!(result instanceof ReadableStream)) {

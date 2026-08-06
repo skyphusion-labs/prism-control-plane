@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.4.22] - 2026-08-06
+
+### Fixed
+
+- **Fable Empty stream on device (buffered path first-byte):** non-stream AI.run no longer
+  blocks the HTTP Response. Plane returns SSE immediately (open chunk + keepalives), runs
+  the binding call inside the stream, then emits text + usage + `[DONE]`. Holding the
+  Worker until completion left mobile clients with no first byte for the whole think
+  window → Empty stream completion while curl succeeded.
+
 ## [0.4.21] - 2026-08-06
 
 ### Fixed
