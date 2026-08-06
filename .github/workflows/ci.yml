@@ -4,7 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
 
 # Public repo: GitHub-hosted only (fork-safe). Never fleet self-hosted.
 permissions:
