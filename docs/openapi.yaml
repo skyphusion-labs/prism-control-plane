@@ -310,7 +310,8 @@ paths:
       summary: Metered video generation
       description: >-
         Unit-metered video door. Requires the Worker AI binding for Unified Billing providers.
-        Long-running models may time out at UPSTREAM_TIMEOUT_MS.
+        Pass `"async": true` (or Prefer: respond-async) for a 202 job that clients poll via
+        GET /v1/jobs/{job_id} so mobile can survive lock. Sync (default) holds the connection.
       requestBody:
         required: true
         content:
@@ -321,9 +322,14 @@ paths:
                 model: { type: string }
                 prompt: { type: string }
                 image: { type: string }
+                async:
+                  type: boolean
+                  description: When true, return 202 + job id; poll GET /v1/jobs/{job_id}.
       responses:
         "200":
-          description: Provider result (opaque)
+          description: Sync completion with video URL
+        "202":
+          description: Async job accepted (poll GET /v1/jobs/{job_id})
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "402": { $ref: "#/components/responses/QuotaExhausted" }
         "409": { $ref: "#/components/responses/ModelUnpriced" }
@@ -332,6 +338,8 @@ paths:
     post:
       tags: [inference]
       summary: Metered music generation
+      description: >-
+        Unit-metered music door. `"async": true` or Prefer: respond-async returns 202 job for poll.
       requestBody:
         required: true
         content:
@@ -343,6 +351,9 @@ paths:
                 model: { type: string }
                 prompt: { type: string }
                 lyrics: { type: string }
+                async:
+                  type: boolean
+                  description: When true, return 202 + job id; poll GET /v1/jobs/{job_id}.
                 is_instrumental:
                   type: boolean
                   description: >-
@@ -353,10 +364,31 @@ paths:
                     Auto-generate lyrics when is_instrumental is false and lyrics omitted.
       responses:
         "200":
-          description: Provider result (opaque)
+          description: Sync completion with audio URL
+        "202":
+          description: Async job accepted (poll GET /v1/jobs/{job_id})
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "402": { $ref: "#/components/responses/QuotaExhausted" }
         "409": { $ref: "#/components/responses/ModelUnpriced" }
+
+  /v1/jobs/{job_id}:
+    get:
+      tags: [inference]
+      summary: Poll an async video or music job
+      description: >-
+        Client-key auth. Returns status queued|running|succeeded|failed. On succeeded,
+        result holds {video} or {audio} asset URL. Prompt text is never stored on the job row.
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Job status
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404":
+          description: Unknown or other-client job
 
   /v1/store/redeem:
     post:

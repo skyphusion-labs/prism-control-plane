@@ -30,7 +30,7 @@ import {
 import { periodBounds } from "../period";
 import { entitlesTier, planFromRow, type Plan } from "../plans";
 import { checkRateLimit, inferenceBucket } from "../rate-limit";
-import type { UsageEvent } from "../store";
+import type { AsyncJobRow, UsageEvent } from "../store";
 import {
   MEDIA_MAX_BYTES,
   mediaPublicUrl,
@@ -40,6 +40,8 @@ import {
   newMusicObjectKey,
   newVideoObjectKey,
 } from "../media";
+import { waitForMediaObject } from "./media";
+import { jobToWire, wantsAsync } from "./jobs";
 import { requireCaller, type Ctx } from "./shared";
 
 /** Audio / multimodal JSON. 4 MiB matches the LLaVA image decode cap (audit: lower than 6 MiB). */
@@ -607,6 +609,113 @@ export async function handleVideoGenerations(ctx: Ctx, request: Request): Promis
     );
   }
 
+  if (wantsAsync(request, raw)) {
+    return startAsyncVideoJob(ctx, request, gate, prompt, imageUrl);
+  }
+
+  const produced = await produceVideo(ctx, request, gate, prompt, imageUrl);
+  if (!produced.ok) return produced.response;
+  return meterAndRespond(
+    ctx,
+    gate,
+    1,
+    { model: gate.model.id, video: produced.video, result: produced.upstreamBody },
+    200,
+    produced.gatewayLogId,
+  );
+}
+
+async function startAsyncVideoJob(
+  ctx: Ctx,
+  request: Request,
+  gate: NonChatGateOk,
+  prompt: string,
+  imageUrl: string | undefined,
+): Promise<Response> {
+  const now = ctx.now.toISOString();
+  const jobId = newId("job");
+  const row: AsyncJobRow = {
+    id: jobId,
+    account_id: gate.account.id,
+    client_id: gate.client.id,
+    kind: "video",
+    model_id: gate.model.id,
+    status: "running",
+    result_json: null,
+    error_code: null,
+    error_detail: null,
+    request_id: ctx.requestId,
+    created_at: now,
+    updated_at: now,
+  };
+  await ctx.store.createAsyncJob(row);
+
+  // Prompt stays in this closure only (privacy: never written to D1).
+  ctx.waitUntil(
+    (async () => {
+      try {
+        const produced = await produceVideo(ctx, request, gate, prompt, imageUrl);
+        if (!produced.ok) {
+          const msg = await errorMessageFromResponse(produced.response);
+          await ctx.store.updateAsyncJob({
+            id: jobId,
+            status: "failed",
+            error_code: "upstream_error",
+            error_detail: msg,
+            updated_at: new Date().toISOString(),
+          });
+          return;
+        }
+        await meterAndRespond(
+          ctx,
+          gate,
+          1,
+          { model: gate.model.id, video: produced.video },
+          200,
+          produced.gatewayLogId,
+        );
+        await ctx.store.updateAsyncJob({
+          id: jobId,
+          status: "succeeded",
+          result_json: JSON.stringify({ video: produced.video, model: gate.model.id }),
+          error_code: null,
+          error_detail: null,
+          updated_at: new Date().toISOString(),
+        });
+      } catch (err) {
+        console.error("async video job failed", {
+          jobId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        await ctx.store
+          .updateAsyncJob({
+            id: jobId,
+            status: "failed",
+            error_code: "internal",
+            error_detail: (err instanceof Error ? err.message : String(err)).slice(0, 280),
+            updated_at: new Date().toISOString(),
+          })
+          .catch(() => undefined);
+      }
+    })(),
+  );
+
+  return jsonResponse(ctx.requestId, jobToWire(row), { status: 202 });
+}
+
+/**
+ * Run upstream video + Grok ZDR rehost wait. Returns asset URL or an error Response.
+ */
+async function produceVideo(
+  ctx: Ctx,
+  request: Request,
+  gate: NonChatGateOk,
+  prompt: string,
+  imageUrl: string | undefined,
+): Promise<
+  | { ok: true; video: string; gatewayLogId: string | null; upstreamBody: unknown }
+  | { ok: false; response: Response }
+> {
   // Grok video on CF UB: managed xAI credentials are ZDR. Must supply output.upload_url
   // (xAI PUTs the mp4 to us). See src/media.ts.
   let uploadUrl: string | undefined;
@@ -615,11 +724,14 @@ export async function handleVideoGenerations(ctx: Ctx, request: Request): Promis
   if (gate.model.id.startsWith("xai/grok-imagine-video")) {
     const secret = mediaSigningSecret(ctx.env);
     if (!ctx.env.MEDIA || !secret) {
-      return errorResponse(
-        ctx.requestId,
-        "unavailable",
-        "Grok video requires the MEDIA R2 binding and CF_AIG_TOKEN (ZDR-managed xAI needs output.upload_url). Use Veo or Seedance Fast until configured.",
-      );
+      return {
+        ok: false,
+        response: errorResponse(
+          ctx.requestId,
+          "unavailable",
+          "Grok video requires the MEDIA R2 binding and CF_AIG_TOKEN (ZDR-managed xAI needs output.upload_url). Use Veo or Seedance Fast until configured.",
+        ),
+      };
     }
     objectKey = newVideoObjectKey(gate.account.id, ctx.requestId);
     const origin = new URL(request.url).origin;
@@ -631,38 +743,49 @@ export async function handleVideoGenerations(ctx: Ctx, request: Request): Promis
 
   const params = buildVideoParams(gate.model.id, prompt, imageUrl, { uploadUrl });
   const up = await runUpstream(ctx, gate, params);
-  if (!up.ok) return up.response;
+  if (!up.ok) return { ok: false, response: up.response };
   const fail = providerStateFailed(up.body);
   if (fail) {
     await recordUnmetered(ctx, gate, "provider_failed", 200);
-    return errorResponse(ctx.requestId, "upstream_error", fail);
+    return { ok: false, response: errorResponse(ctx.requestId, "upstream_error", fail) };
   }
   let asset = extractVideoAsset(up.body);
-  // ZDR path: provider may return Completed with no hosted URL; bytes are in our R2 via ingress.
-  if (!asset && downloadUrl && objectKey && ctx.env.MEDIA) {
-    const head = await ctx.env.MEDIA.head(objectKey);
-    if (head) asset = downloadUrl;
+  // ZDR: wait for xAI PUT into our R2 before handing the client a URL (AVPlayer 404 otherwise).
+  if (downloadUrl && objectKey && ctx.env.MEDIA) {
+    const ready = await waitForMediaObject(ctx.env.MEDIA, objectKey, 45_000, 1_000);
+    if (ready) {
+      asset = downloadUrl;
+    } else if (!asset) {
+      // Prefer our signed URL even if head is slow; client can retry GET.
+      asset = downloadUrl;
+    } else {
+      // Prefer playable rehost over provider URL when object landed late mid-wait.
+      const late = await ctx.env.MEDIA.head(objectKey);
+      if (late) asset = downloadUrl;
+    }
   }
-  if (!asset && downloadUrl) {
-    // Some providers ack before the PUT finishes; still hand back the signed URL and let the client retry GET.
-    asset = downloadUrl;
-  }
+  if (!asset && downloadUrl) asset = downloadUrl;
   if (!asset) {
     await recordUnmetered(ctx, gate, "no_video_payload", 200);
-    return errorResponse(
-      ctx.requestId,
-      "upstream_error",
-      "Video generation returned no video payload.",
-    );
+    return {
+      ok: false,
+      response: errorResponse(
+        ctx.requestId,
+        "upstream_error",
+        "Video generation returned no video payload.",
+      ),
+    };
   }
-  return meterAndRespond(
-    ctx,
-    gate,
-    1,
-    { model: gate.model.id, video: asset, result: up.body },
-    200,
-    up.gatewayLogId,
-  );
+  return { ok: true, video: asset, gatewayLogId: up.gatewayLogId, upstreamBody: up.body };
+}
+
+async function errorMessageFromResponse(res: Response): Promise<string> {
+  try {
+    const body = (await res.clone().json()) as { error?: { message?: string } };
+    return (body.error?.message ?? `HTTP ${res.status}`).slice(0, 280);
+  } catch {
+    return `HTTP ${res.status}`;
+  }
 }
 
 export async function handleMusicGenerations(ctx: Ctx, request: Request): Promise<Response> {
@@ -695,31 +818,150 @@ async function handleMusicGenerationsInner(ctx: Ctx, request: Request): Promise<
     return errorResponse(ctx.requestId, "invalid_request", '"prompt" is required.');
   }
   const lyrics = requireString(raw, "lyrics") ?? undefined;
-  // Optional client overrides (plane defaults: instrumental when no lyrics).
   const isInstrumental =
     typeof raw.is_instrumental === "boolean" ? raw.is_instrumental : undefined;
   const lyricsOptimizer =
     typeof raw.lyrics_optimizer === "boolean" ? raw.lyrics_optimizer : undefined;
+
+  if (wantsAsync(request, raw)) {
+    return startAsyncMusicJob(ctx, request, gate, prompt, lyrics, isInstrumental, lyricsOptimizer);
+  }
+
+  const produced = await produceMusic(ctx, request, gate, prompt, lyrics, isInstrumental, lyricsOptimizer);
+  if (!produced.ok) return produced.response;
+  return meterAndRespond(
+    ctx,
+    gate,
+    1,
+    { model: gate.model.id, audio: produced.audio, rehosted: produced.rehosted },
+    200,
+    produced.gatewayLogId,
+  );
+}
+
+async function startAsyncMusicJob(
+  ctx: Ctx,
+  request: Request,
+  gate: NonChatGateOk,
+  prompt: string,
+  lyrics: string | undefined,
+  isInstrumental: boolean | undefined,
+  lyricsOptimizer: boolean | undefined,
+): Promise<Response> {
+  const now = ctx.now.toISOString();
+  const jobId = newId("job");
+  const row: AsyncJobRow = {
+    id: jobId,
+    account_id: gate.account.id,
+    client_id: gate.client.id,
+    kind: "music",
+    model_id: gate.model.id,
+    status: "running",
+    result_json: null,
+    error_code: null,
+    error_detail: null,
+    request_id: ctx.requestId,
+    created_at: now,
+    updated_at: now,
+  };
+  await ctx.store.createAsyncJob(row);
+
+  ctx.waitUntil(
+    (async () => {
+      try {
+        const produced = await produceMusic(
+          ctx,
+          request,
+          gate,
+          prompt,
+          lyrics,
+          isInstrumental,
+          lyricsOptimizer,
+        );
+        if (!produced.ok) {
+          const msg = await errorMessageFromResponse(produced.response);
+          await ctx.store.updateAsyncJob({
+            id: jobId,
+            status: "failed",
+            error_code: "upstream_error",
+            error_detail: msg,
+            updated_at: new Date().toISOString(),
+          });
+          return;
+        }
+        await meterAndRespond(
+          ctx,
+          gate,
+          1,
+          { model: gate.model.id, audio: produced.audio, rehosted: produced.rehosted },
+          200,
+          produced.gatewayLogId,
+        );
+        await ctx.store.updateAsyncJob({
+          id: jobId,
+          status: "succeeded",
+          result_json: JSON.stringify({
+            audio: produced.audio,
+            rehosted: produced.rehosted,
+            model: gate.model.id,
+          }),
+          error_code: null,
+          error_detail: null,
+          updated_at: new Date().toISOString(),
+        });
+      } catch (err) {
+        console.error("async music job failed", {
+          jobId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        await ctx.store
+          .updateAsyncJob({
+            id: jobId,
+            status: "failed",
+            error_code: "internal",
+            error_detail: (err instanceof Error ? err.message : String(err)).slice(0, 280),
+            updated_at: new Date().toISOString(),
+          })
+          .catch(() => undefined);
+      }
+    })(),
+  );
+
+  return jsonResponse(ctx.requestId, jobToWire(row), { status: 202 });
+}
+
+async function produceMusic(
+  ctx: Ctx,
+  request: Request,
+  gate: NonChatGateOk,
+  prompt: string,
+  lyrics: string | undefined,
+  isInstrumental: boolean | undefined,
+  lyricsOptimizer: boolean | undefined,
+): Promise<
+  | { ok: true; audio: string; rehosted: boolean; gatewayLogId: string | null }
+  | { ok: false; response: Response }
+> {
   const params = buildMusicParams(prompt, lyrics, { isInstrumental, lyricsOptimizer });
   const up = await runUpstream(ctx, gate, params);
-  if (!up.ok) return up.response;
+  if (!up.ok) return { ok: false, response: up.response };
   const fail = providerStateFailed(up.body);
   if (fail) {
     await recordUnmetered(ctx, gate, "provider_failed", 200);
-    return errorResponse(ctx.requestId, "upstream_error", fail);
+    return { ok: false, response: errorResponse(ctx.requestId, "upstream_error", fail) };
   }
   let asset = extractMusicAsset(up.body);
   if (!asset) {
     await recordUnmetered(ctx, gate, "no_music_payload", 200);
-    return errorResponse(
-      ctx.requestId,
-      "upstream_error",
-      "Music generation returned no audio payload.",
-    );
+    return {
+      ok: false,
+      response: errorResponse(
+        ctx.requestId,
+        "upstream_error",
+        "Music generation returned no audio payload.",
+      ),
+    };
   }
-  // Re-host provider HTTPS audio on our MEDIA R2 + signed download (same shape as Grok video).
-  // MiniMax returns short-lived Aliyun OSS URLs that Safari/UIApplication often cannot open;
-  // play-proxy /v1/media/{token} is stable for 24h and works in-app.
   let rehosted = false;
   if (looksLikeHttpUrl(asset)) {
     const hosted = await rehostMusicAudio(ctx, request, gate.account.id, asset);
@@ -728,20 +970,7 @@ async function handleMusicGenerationsInner(ctx: Ctx, request: Request): Promise<
       rehosted = true;
     }
   }
-  // Never echo full provider body: MiniMax envelopes can be large / non-JSON-safe and
-  // JSON.stringify in meterAndRespond has crashed long runs into CF 500 Internal Server Error.
-  return meterAndRespond(
-    ctx,
-    gate,
-    1,
-    {
-      model: gate.model.id,
-      audio: asset,
-      rehosted,
-    },
-    200,
-    up.gatewayLogId,
-  );
+  return { ok: true, audio: asset, rehosted, gatewayLogId: up.gatewayLogId };
 }
 
 function looksLikeHttpUrl(s: string): boolean {

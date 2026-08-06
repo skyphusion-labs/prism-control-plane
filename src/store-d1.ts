@@ -719,6 +719,71 @@ export function d1Store(db: D1Database): ControlPlaneStore {
       await db.prepare(`SELECT COUNT(*) AS n FROM user_tokens`).first<{ n: number }>();
       await db.prepare(`SELECT COUNT(*) AS n FROM credit_grants`).first<{ n: number }>();
       await db.prepare(`SELECT COUNT(*) AS n FROM model_prices`).first<{ n: number }>();
+      // Migration 0009 async jobs (video/music poll).
+      await db.prepare(`SELECT COUNT(*) AS n FROM async_jobs`).first<{ n: number }>();
+    },
+
+    async createAsyncJob(row) {
+      await db
+        .prepare(
+          `INSERT INTO async_jobs (
+             id, account_id, client_id, kind, model_id, status,
+             result_json, error_code, error_detail, request_id, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          row.id,
+          row.account_id,
+          row.client_id,
+          row.kind,
+          row.model_id,
+          row.status,
+          row.result_json,
+          row.error_code,
+          row.error_detail,
+          row.request_id,
+          row.created_at,
+          row.updated_at,
+        )
+        .run();
+    },
+
+    async getAsyncJob(id) {
+      return await db
+        .prepare(
+          `SELECT id, account_id, client_id, kind, model_id, status,
+                  result_json, error_code, error_detail, request_id, created_at, updated_at
+             FROM async_jobs WHERE id = ?`,
+        )
+        .bind(id)
+        .first();
+    },
+
+    async updateAsyncJob(args) {
+      const existing = await db
+        .prepare(`SELECT result_json, error_code, error_detail FROM async_jobs WHERE id = ?`)
+        .bind(args.id)
+        .first<{ result_json: string | null; error_code: string | null; error_detail: string | null }>();
+      if (!existing) return;
+      await db
+        .prepare(
+          `UPDATE async_jobs
+              SET status = ?,
+                  result_json = ?,
+                  error_code = ?,
+                  error_detail = ?,
+                  updated_at = ?
+            WHERE id = ?`,
+        )
+        .bind(
+          args.status,
+          args.result_json !== undefined ? args.result_json : existing.result_json,
+          args.error_code !== undefined ? args.error_code : existing.error_code,
+          args.error_detail !== undefined ? args.error_detail : existing.error_detail,
+          args.updated_at,
+          args.id,
+        )
+        .run();
     },
   };
 }

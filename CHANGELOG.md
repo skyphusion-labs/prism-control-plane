@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [0.4.29] - 2026-08-06
+
+### Added
+
+- **Async video/music jobs:** `POST /v1/videos/generations` and `POST /v1/music/generations`
+  accept `"async": true` (or `Prefer: respond-async`) and return **202** with a job id.
+  Poll `GET /v1/jobs/{job_id}` for `status` + `result.video` / `result.audio`. Prompt/lyrics
+  stay in the Worker waitUntil closure only (never written to D1). Lets mobile unlock/poll
+  without holding a multi-minute HTTP connection across lock.
+- Migration `0009_async_jobs.sql`.
+
+### Fixed
+
+- **Grok video playback on iOS:** `GET /v1/media/{token}` now supports **HTTP Range**
+  (`Accept-Ranges: bytes`, 206 Partial Content). AVPlayer requires Range for progressive mp4.
+- **Grok ZDR race:** after Completing, wait up to 45s for the xAI PUT into R2 before returning
+  the signed download URL (avoids immediate 404 / unplayable URL).
+
 ## [0.4.28] - 2026-08-06
 
 ### Fixed

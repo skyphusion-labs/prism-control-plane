@@ -366,4 +366,44 @@ export interface ControlPlaneStore {
 
   /** Cheap probe for GET /health/deep. Resolves when the schema this code expects is present. */
   probeSchema(): Promise<void>;
+
+  // ---- async long-run jobs (video / music poll) ----
+
+  createAsyncJob(row: AsyncJobRow): Promise<void>;
+  getAsyncJob(id: string): Promise<AsyncJobRow | null>;
+  /**
+   * Update status / result / error. `result_json` is asset URLs only (no prompts).
+   */
+  updateAsyncJob(args: {
+    id: string;
+    status: AsyncJobStatus;
+    result_json?: string | null;
+    error_code?: string | null;
+    error_detail?: string | null;
+    updated_at: string;
+  }): Promise<void>;
+}
+
+/** Status for long-run video/music jobs (mobile poll). */
+export type AsyncJobStatus = "queued" | "running" | "succeeded" | "failed";
+
+export type AsyncJobKind = "video" | "music";
+
+/**
+ * One long-run job. `result_json` is JSON like `{ "video": "https://..." }` or
+ * `{ "audio": "https://..." }` — never prompts or lyrics (privacy).
+ */
+export interface AsyncJobRow {
+  id: string;
+  account_id: string;
+  client_id: string;
+  kind: AsyncJobKind;
+  model_id: string;
+  status: AsyncJobStatus;
+  result_json: string | null;
+  error_code: string | null;
+  error_detail: string | null;
+  request_id: string;
+  created_at: string;
+  updated_at: string;
 }

@@ -88,6 +88,58 @@ export async function handleMediaIngress(
   return new Response(null, { status: 204 });
 }
 
+/**
+ * Poll R2 until the object appears or `maxMs` elapses.
+ * Grok ZDR often Completes before the PUT to output.upload_url finishes;
+ * returning the signed URL too early leaves clients with 404 / unplayable AVPlayer.
+ */
+export async function waitForMediaObject(
+  bucket: R2Bucket,
+  objectKey: string,
+  maxMs: number = 45_000,
+  stepMs: number = 1_000,
+): Promise<R2Object | null> {
+  const deadline = Date.now() + maxMs;
+  while (Date.now() < deadline) {
+    const head = await bucket.head(objectKey);
+    if (head) return head;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    await new Promise((r) => setTimeout(r, Math.min(stepMs, remaining)));
+  }
+  return bucket.head(objectKey);
+}
+
+/** Parse `Range: bytes=start-end` (single range only). */
+export function parseBytesRange(
+  header: string | null,
+  size: number,
+): { offset: number; length: number; start: number; end: number } | "unsatisfiable" | null {
+  if (!header) return null;
+  const m = /^bytes=(\d*)-(\d*)$/i.exec(header.trim());
+  if (!m) return null;
+  const startRaw = m[1];
+  const endRaw = m[2];
+  if (startRaw === "" && endRaw === "") return null;
+  let start: number;
+  let end: number;
+  if (startRaw === "") {
+    // suffix: last N bytes
+    const suffix = Number(endRaw);
+    if (!Number.isFinite(suffix) || suffix <= 0) return "unsatisfiable";
+    start = Math.max(0, size - suffix);
+    end = size - 1;
+  } else {
+    start = Number(startRaw);
+    end = endRaw === "" ? size - 1 : Number(endRaw);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0) return "unsatisfiable";
+    if (start >= size) return "unsatisfiable";
+    end = Math.min(end, size - 1);
+    if (end < start) return "unsatisfiable";
+  }
+  return { offset: start, length: end - start + 1, start, end };
+}
+
 export async function handleMediaDownload(
   env: Env,
   request: Request,
@@ -109,26 +161,55 @@ export async function handleMediaDownload(
     return errorResponse(requestId, "unauthenticated", "Invalid or expired media download token.");
   }
 
+  // Head first so we know size for Range (AVPlayer requires Accept-Ranges + 206).
+  const head = await env.MEDIA.head(parsed.objectKey);
+  if (!head) {
+    return errorResponse(requestId, "not_found", "Media object not found.");
+  }
+
+  const size = head.size;
+  const isMusic = parsed.objectKey.startsWith("music/");
+  const contentType =
+    head.httpMetadata?.contentType ?? (isMusic ? "audio/mpeg" : "video/mp4");
+  const disposition = isMusic
+    ? 'inline; filename="prism-music.mp3"'
+    : 'inline; filename="video.mp4"';
+
+  const baseHeaders = new Headers();
+  baseHeaders.set("content-type", contentType);
+  baseHeaders.set("cache-control", "private, max-age=3600");
+  baseHeaders.set("accept-ranges", "bytes");
+  baseHeaders.set("content-disposition", disposition);
+
+  const range = parseBytesRange(request.headers.get("range"), size);
+
+  if (range === "unsatisfiable") {
+    baseHeaders.set("content-range", `bytes */${size}`);
+    return new Response(null, { status: 416, headers: baseHeaders });
+  }
+
+  if (range) {
+    const obj = await env.MEDIA.get(parsed.objectKey, {
+      range: { offset: range.offset, length: range.length },
+    });
+    if (!obj) {
+      return errorResponse(requestId, "not_found", "Media object not found.");
+    }
+    baseHeaders.set("content-range", `bytes ${range.start}-${range.end}/${size}`);
+    baseHeaders.set("content-length", String(range.length));
+    if (request.method === "HEAD") {
+      return new Response(null, { status: 206, headers: baseHeaders });
+    }
+    return new Response(obj.body, { status: 206, headers: baseHeaders });
+  }
+
+  baseHeaders.set("content-length", String(size));
+  if (request.method === "HEAD") {
+    return new Response(null, { status: 200, headers: baseHeaders });
+  }
   const obj = await env.MEDIA.get(parsed.objectKey);
   if (!obj) {
     return errorResponse(requestId, "not_found", "Media object not found.");
   }
-
-  const isMusic = parsed.objectKey.startsWith("music/");
-  const headers = new Headers();
-  headers.set(
-    "content-type",
-    obj.httpMetadata?.contentType ?? (isMusic ? "audio/mpeg" : "video/mp4"),
-  );
-  headers.set("cache-control", "private, max-age=3600");
-  if (obj.size != null) headers.set("content-length", String(obj.size));
-  headers.set(
-    "content-disposition",
-    isMusic ? 'inline; filename="prism-music.mp3"' : 'inline; filename="video.mp4"',
-  );
-
-  if (request.method === "HEAD") {
-    return new Response(null, { status: 200, headers });
-  }
-  return new Response(obj.body, { status: 200, headers });
+  return new Response(obj.body, { status: 200, headers: baseHeaders });
 }

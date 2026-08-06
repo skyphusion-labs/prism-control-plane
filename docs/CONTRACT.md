@@ -114,8 +114,9 @@ All paths are relative to the deployment origin. All request and response bodies
 | POST | `/v1/images/generations` | client key | Metered image generation (unit-priced). |
 | POST | `/v1/audio/speech` | client key | Metered text-to-speech (unit-priced). |
 | POST | `/v1/audio/transcriptions` | client key | Metered speech-to-text (unit-priced). |
-| POST | `/v1/videos/generations` | client key | Metered video generation (unit-priced). |
-| POST | `/v1/music/generations` | client key | Metered music generation (unit-priced). |
+| POST | `/v1/videos/generations` | client key | Metered video generation (unit-priced). Optional `async: true` → 202 job. |
+| POST | `/v1/music/generations` | client key | Metered music generation (unit-priced). Optional `async: true` → 202 job. |
+| GET | `/v1/jobs/{job_id}` | client key | Poll async video/music job (`status`, `result.video` / `result.audio`). |
 | POST | `/v1/stt/sessions` | client key | Mint a single-use short-lived STT ticket (browser WS auth). |
 | GET/WS | `/v1/stt/stream` | client key or STT ticket | Live voice STT (Deepgram Flux). WebSocket upgrade. |
 | POST | `/admin/catalog/refresh` | admin | Pull chat token rates from AI Gateway `compat/models` into `model_prices`. Dry-run default. |

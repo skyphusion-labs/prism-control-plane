@@ -20,6 +20,7 @@
 
 import type {
   AccountRow,
+  AsyncJobRow,
   ClientRow,
   ControlPlaneStore,
   ModelPriceRow,
@@ -63,6 +64,7 @@ export class FakeStore implements ControlPlaneStore {
   grants = new Map<string, { account_id: string; micro_usd: number }>();
   adjustments: UsageAdjustmentRow[] = [];
   reconcileState = new Map<string, ReconcileStateRow>();
+  asyncJobs = new Map<string, AsyncJobRow>();
   /** Mirrors the D1 column that has no equivalent on `UsageEvent`, for the reverse check's window. */
   eventCreatedAt = new Map<string, string>();
   nowSeconds: number;
@@ -427,6 +429,35 @@ export class FakeStore implements ControlPlaneStore {
 
   async probeSchema() {
     if (this.probeFails) throw new Error("simulated schema probe failure");
+  }
+
+  async createAsyncJob(row: AsyncJobRow) {
+    this.asyncJobs.set(row.id, { ...row });
+  }
+
+  async getAsyncJob(id: string) {
+    const row = this.asyncJobs.get(id);
+    return row ? { ...row } : null;
+  }
+
+  async updateAsyncJob(args: {
+    id: string;
+    status: AsyncJobRow["status"];
+    result_json?: string | null;
+    error_code?: string | null;
+    error_detail?: string | null;
+    updated_at: string;
+  }) {
+    const row = this.asyncJobs.get(args.id);
+    if (!row) return;
+    this.asyncJobs.set(args.id, {
+      ...row,
+      status: args.status,
+      result_json: args.result_json !== undefined ? args.result_json : row.result_json,
+      error_code: args.error_code !== undefined ? args.error_code : row.error_code,
+      error_detail: args.error_detail !== undefined ? args.error_detail : row.error_detail,
+      updated_at: args.updated_at,
+    });
   }
 }
 

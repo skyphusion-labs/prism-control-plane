@@ -44,6 +44,7 @@ import {
   handleMusicGenerations,
   handleVideoGenerations,
 } from "./routes/nonchat";
+import { handleGetJob, matchJobPath } from "./routes/jobs";
 import { handleStoreRedeem } from "./routes/store";
 import {
   handleMediaDownload,
@@ -169,6 +170,11 @@ export async function handleRequest(ctx: Ctx, request: Request): Promise<Respons
   }
   if (method === "POST" && path === "/v1/music/generations") {
     return await handleMusicGenerations(ctx, request);
+  }
+  // Poll long-run video/music jobs (async: true on the generation POST).
+  const jobId = matchJobPath(path);
+  if (jobId && method === "GET") {
+    return await handleGetJob(ctx, request, jobId);
   }
   if (method === "POST" && path === "/v1/store/redeem") {
     return await handleStoreRedeem(ctx, request);
