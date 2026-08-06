@@ -648,57 +648,66 @@ async function startAsyncVideoJob(
     created_at: now,
     updated_at: now,
   };
-  await ctx.store.createAsyncJob(row);
 
+  // CRITICAL: register waitUntil + start upstream BEFORE any await that can lose the
+  // client (D1 insert). If the phone locks during createAsyncJob, CF aborts the
+  // request -- and if waitUntil is not registered yet, AI Gateway is never called.
   // Prompt stays in this closure only (privacy: never written to D1).
-  ctx.waitUntil(
-    (async () => {
-      try {
-        const produced = await produceVideo(ctx, request, gate, prompt, imageUrl);
-        if (!produced.ok) {
-          const msg = await errorMessageFromResponse(produced.response);
-          await ctx.store.updateAsyncJob({
-            id: jobId,
-            status: "failed",
-            error_code: "upstream_error",
-            error_detail: msg,
-            updated_at: new Date().toISOString(),
-          });
-          return;
-        }
-        await meterAndRespond(
-          ctx,
-          gate,
-          1,
-          { model: gate.model.id, video: produced.video },
-          200,
-          produced.gatewayLogId,
-        );
+  const work = (async () => {
+    try {
+      // Start upstream immediately; D1 row in parallel (do not serialize AI behind insert).
+      console.log("async video job start", { jobId, model: gate.model.id, requestId: ctx.requestId });
+      const producedP = produceVideo(ctx, request, gate, prompt, imageUrl);
+      await ctx.store.createAsyncJob(row);
+      const produced = await producedP;
+      if (!produced.ok) {
+        const msg = await errorMessageFromResponse(produced.response);
         await ctx.store.updateAsyncJob({
           id: jobId,
-          status: "succeeded",
-          result_json: JSON.stringify({ video: produced.video, model: gate.model.id }),
-          error_code: null,
-          error_detail: null,
+          status: "failed",
+          error_code: "upstream_error",
+          error_detail: msg,
           updated_at: new Date().toISOString(),
         });
-      } catch (err) {
-        console.error("async video job failed", {
-          jobId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-        await ctx.store
-          .updateAsyncJob({
-            id: jobId,
-            status: "failed",
-            error_code: "internal",
-            error_detail: (err instanceof Error ? err.message : String(err)).slice(0, 280),
-            updated_at: new Date().toISOString(),
-          })
-          .catch(() => undefined);
+        return;
       }
-    })(),
-  );
+      await meterAndRespond(
+        ctx,
+        gate,
+        1,
+        { model: gate.model.id, video: produced.video },
+        200,
+        produced.gatewayLogId,
+      );
+      await ctx.store.updateAsyncJob({
+        id: jobId,
+        status: "succeeded",
+        result_json: JSON.stringify({ video: produced.video, model: gate.model.id }),
+        error_code: null,
+        error_detail: null,
+        updated_at: new Date().toISOString(),
+      });
+      console.log("async video job done", { jobId, requestId: ctx.requestId });
+    } catch (err) {
+      console.error("async video job failed", {
+        jobId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      await ctx.store
+        .updateAsyncJob({
+          id: jobId,
+          status: "failed",
+          error_code: "internal",
+          error_detail: (err instanceof Error ? err.message : String(err)).slice(0, 280),
+          updated_at: new Date().toISOString(),
+        })
+        .catch(() => undefined);
+    }
+  })();
+  ctx.waitUntil(work);
+
+  // Best-effort row for immediate poll (work path also inserts OR IGNORE).
+  await ctx.store.createAsyncJob(row).catch(() => undefined);
 
   return jsonResponse(ctx.requestId, jobToWire(row), { status: 202 });
 }
@@ -864,68 +873,75 @@ async function startAsyncMusicJob(
     created_at: now,
     updated_at: now,
   };
-  await ctx.store.createAsyncJob(row);
 
-  ctx.waitUntil(
-    (async () => {
-      try {
-        const produced = await produceMusic(
-          ctx,
-          request,
-          gate,
-          prompt,
-          lyrics,
-          isInstrumental,
-          lyricsOptimizer,
-        );
-        if (!produced.ok) {
-          const msg = await errorMessageFromResponse(produced.response);
-          await ctx.store.updateAsyncJob({
-            id: jobId,
-            status: "failed",
-            error_code: "upstream_error",
-            error_detail: msg,
-            updated_at: new Date().toISOString(),
-          });
-          return;
-        }
-        await meterAndRespond(
-          ctx,
-          gate,
-          1,
-          { model: gate.model.id, audio: produced.audio, rehosted: produced.rehosted },
-          200,
-          produced.gatewayLogId,
-        );
+  // Same race as video: waitUntil + upstream MUST start before awaiting D1 if the
+  // client can disconnect (lock). Otherwise MiniMax never hits AI Gateway.
+  const work = (async () => {
+    try {
+      // Start MiniMax immediately; D1 insert must not gate the AI Gateway call.
+      console.log("async music job start", { jobId, model: gate.model.id, requestId: ctx.requestId });
+      const producedP = produceMusic(
+        ctx,
+        request,
+        gate,
+        prompt,
+        lyrics,
+        isInstrumental,
+        lyricsOptimizer,
+      );
+      await ctx.store.createAsyncJob(row);
+      const produced = await producedP;
+      if (!produced.ok) {
+        const msg = await errorMessageFromResponse(produced.response);
         await ctx.store.updateAsyncJob({
           id: jobId,
-          status: "succeeded",
-          result_json: JSON.stringify({
-            audio: produced.audio,
-            rehosted: produced.rehosted,
-            model: gate.model.id,
-          }),
-          error_code: null,
-          error_detail: null,
+          status: "failed",
+          error_code: "upstream_error",
+          error_detail: msg,
           updated_at: new Date().toISOString(),
         });
-      } catch (err) {
-        console.error("async music job failed", {
-          jobId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-        await ctx.store
-          .updateAsyncJob({
-            id: jobId,
-            status: "failed",
-            error_code: "internal",
-            error_detail: (err instanceof Error ? err.message : String(err)).slice(0, 280),
-            updated_at: new Date().toISOString(),
-          })
-          .catch(() => undefined);
+        return;
       }
-    })(),
-  );
+      await meterAndRespond(
+        ctx,
+        gate,
+        1,
+        { model: gate.model.id, audio: produced.audio, rehosted: produced.rehosted },
+        200,
+        produced.gatewayLogId,
+      );
+      await ctx.store.updateAsyncJob({
+        id: jobId,
+        status: "succeeded",
+        result_json: JSON.stringify({
+          audio: produced.audio,
+          rehosted: produced.rehosted,
+          model: gate.model.id,
+        }),
+        error_code: null,
+        error_detail: null,
+        updated_at: new Date().toISOString(),
+      });
+      console.log("async music job done", { jobId, requestId: ctx.requestId });
+    } catch (err) {
+      console.error("async music job failed", {
+        jobId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      await ctx.store
+        .updateAsyncJob({
+          id: jobId,
+          status: "failed",
+          error_code: "internal",
+          error_detail: (err instanceof Error ? err.message : String(err)).slice(0, 280),
+          updated_at: new Date().toISOString(),
+        })
+        .catch(() => undefined);
+    }
+  })();
+  ctx.waitUntil(work);
+
+  await ctx.store.createAsyncJob(row).catch(() => undefined);
 
   return jsonResponse(ctx.requestId, jobToWire(row), { status: 202 });
 }

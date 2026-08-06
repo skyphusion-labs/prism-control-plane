@@ -432,6 +432,8 @@ export class FakeStore implements ControlPlaneStore {
   }
 
   async createAsyncJob(row: AsyncJobRow) {
+    // Mirror INSERT OR IGNORE: first writer wins.
+    if (this.asyncJobs.has(row.id)) return;
     this.asyncJobs.set(row.id, { ...row });
   }
 

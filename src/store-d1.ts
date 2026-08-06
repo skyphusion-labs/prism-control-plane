@@ -724,9 +724,10 @@ export function d1Store(db: D1Database): ControlPlaneStore {
     },
 
     async createAsyncJob(row) {
+      // OR IGNORE: main path and waitUntil race to insert the same id; both must be safe.
       await db
         .prepare(
-          `INSERT INTO async_jobs (
+          `INSERT OR IGNORE INTO async_jobs (
              id, account_id, client_id, kind, model_id, status,
              result_json, error_code, error_detail, request_id, created_at, updated_at
            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
