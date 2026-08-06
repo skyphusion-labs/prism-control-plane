@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.4.20] - 2026-08-06
+
+### Fixed
+
+- **Fable stream (device Empty stream completion), take 2:** Anthropic `binding` +
+  client `stream:true` no longer uses native Messages SSE. Non-stream `env.AI.run`
+  (the path that already works) buffers the full answer, then the plane synthesizes
+  OpenAI `chat.completion.chunk` frames + usage + `[DONE]`. True token streaming was
+  losing iOS clients during Fable thinking despite keepalives; buffered synthetic SSE
+  is reliable. Anthropic binding timeout raised to 180s for long thinks.
+
 ## [0.4.19] - 2026-08-06
 
 ### Fixed

@@ -78,10 +78,11 @@
 // own arithmetic against the biller's is trusting itself for no reason.
 // https://developers.cloudflare.com/ai-gateway/observability/logging/
 
-import { anthropicSseToOpenAIStream } from "./anthropic-sse-to-openai";
+import { openAIStreamFromCompletion } from "./anthropic-sse-to-openai";
 import { findModel, type Billing } from "./catalog";
 import { gatewayConfig, upstreamTimeoutMs, type Env } from "./env";
-import type { InferenceRequest, InferenceResult, InferenceRunner } from "./inference";
+import { extractText, type InferenceRequest, type InferenceResult, type InferenceRunner } from "./inference";
+import { extractUsage } from "./meter";
 
 /** The AI Gateway host. A constant so the anti-bypass test has one literal to pin. */
 export const GATEWAY_HOST = "https://gateway.ai.cloudflare.com";
@@ -251,21 +252,55 @@ async function runViaBinding(
   // env.AI.run for these ids (legacy /compat allowlist is frozen). gateway: { id } still routes
   // the call through AI_GATEWAY_ID for logs/reconcile. Money authority remains the D1 ledger after
   // the call (same posture as non-chat UB binding). See docs/security-false-positives.md.
+  //
+  // Anthropic binding + client stream:true: DO NOT use native Messages SSE. Non-stream AI.run
+  // is the path that reliably returns text (Fable thinking works there). Native SSE still loses
+  // device clients to idle cuts / empty assembly even with keepalives. Buffer, then synthesize
+  // OpenAI chat.completion.chunk frames. Grok/OpenAI bindings already stream OpenAI-shaped.
+  const anthropicBufferedStream =
+    request.stream === true && bindingModel.startsWith("anthropic/");
+  const runRequest: InferenceRequest = anthropicBufferedStream
+    ? { ...request, stream: false }
+    : request;
+  // Fable thinking regularly exceeds the 60s chat default; cap at plane max (180s).
+  const timeoutMs = bindingModel.startsWith("anthropic/")
+    ? Math.max(deps.timeoutMs, 180_000)
+    : deps.timeoutMs;
+
   try {
     const result = await Promise.race([
-      (ai as unknown as { run: RunFn }).run(bindingModel, bindingChatBody(request), {
+      (ai as unknown as { run: RunFn }).run(bindingModel, bindingChatBody(runRequest), {
         gateway: { id: deps.gatewayId },
       }),
       new Promise<never>((_, reject) => {
         setTimeout(
           () => reject(Object.assign(new Error("timeout"), { name: "TimeoutError" })),
-          deps.timeoutMs,
+          timeoutMs,
         );
       }),
     ]);
 
     const logId =
       (ai as unknown as { aiGatewayLogId?: string }).aiGatewayLogId ?? null;
+
+    if (anthropicBufferedStream) {
+      const text = extractText(result);
+      if (text === null) {
+        return {
+          outcome: "upstream_error",
+          status: null,
+          detail: "Anthropic binding returned no extractable text (buffered stream path)",
+        };
+      }
+      const usage = extractUsage(result);
+      const stream = openAIStreamFromCompletion({
+        model: bindingModel,
+        text,
+        promptTokens: usage?.inputTokens ?? null,
+        completionTokens: usage?.outputTokens ?? null,
+      });
+      return { outcome: "stream", stream, gatewayLogId: logId };
+    }
 
     if (request.stream) {
       if (!(result instanceof ReadableStream)) {
@@ -275,21 +310,18 @@ async function runViaBinding(
           detail: `binding stream expected ReadableStream, got ${typeof result}`,
         };
       }
-      let stream = result as ReadableStream<Uint8Array>;
-      // Anthropic binding returns native Messages SSE (text_delta / thinking_delta). The
-      // plane door is OpenAI-compatible; transform so prism-ios and OpenAI SDKs see
-      // choices[].delta.content + trailing usage + [DONE]. Grok/OpenAI bindings already
-      // emit that shape and pass through unchanged.
-      if (bindingModel.startsWith("anthropic/")) {
-        stream = anthropicSseToOpenAIStream(stream, { model: bindingModel });
-      }
-      return { outcome: "stream", stream, gatewayLogId: logId };
+      // Non-Anthropic binding streams (Grok etc.): already OpenAI-shaped; relay as-is.
+      return {
+        outcome: "stream",
+        stream: result as ReadableStream<Uint8Array>,
+        gatewayLogId: logId,
+      };
     }
 
     return { outcome: "ok", body: result, gatewayLogId: logId };
   } catch (err) {
     const aborted = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
-    if (aborted) return { outcome: "timeout", waitedMs: deps.timeoutMs };
+    if (aborted) return { outcome: "timeout", waitedMs: timeoutMs };
     // Do not echo raw provider/body dumps to the client path; keep a short operator-safe string.
     return {
       outcome: "upstream_error",

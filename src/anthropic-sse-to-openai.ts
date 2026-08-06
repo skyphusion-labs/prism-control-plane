@@ -246,11 +246,57 @@ export class AnthropicSseToOpenAI {
 }
 
 /**
+ * Synthesize an OpenAI SSE stream from a completed Anthropic (or already-OpenAI) body.
+ *
+ * Preferred path for anthropic binding + client stream:true. Native Anthropic SSE from
+ * env.AI.run is flaky on the device path (long thinking, idle cuts, empty client assembly)
+ * while non-stream AI.run reliably returns text. Buffering then emitting OpenAI chunks is
+ * honest: the client still gets stream frames + trailing usage; first-token latency is the
+ * full think time (which is when Fable's text would have appeared anyway).
+ */
+export function openAIStreamFromCompletion(opts: {
+  model: string;
+  text: string;
+  promptTokens?: number | null;
+  completionTokens?: number | null;
+}): ReadableStream<Uint8Array> {
+  const state = newAnthropicToOpenAIState({ model: opts.model });
+  if (opts.promptTokens != null && Number.isInteger(opts.promptTokens)) {
+    state.inputTokens = opts.promptTokens;
+  }
+  if (opts.completionTokens != null && Number.isInteger(opts.completionTokens)) {
+    state.outputTokens = opts.completionTokens;
+  }
+  let body = openChunk(state);
+  const text = opts.text;
+  // Chunk so UI can paint progressively even though upstream was buffered.
+  const chunkSize = 48;
+  if (text.length === 0) {
+    // Still finish cleanly; client may show empty rather than hang.
+  } else {
+    for (let i = 0; i < text.length; i += chunkSize) {
+      body += textChunk(state, text.slice(i, i + chunkSize));
+    }
+  }
+  body += finishAndUsage(state);
+  const bytes = new TextEncoder().encode(body);
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    },
+  });
+}
+
+/**
  * Transform a ReadableStream of Anthropic SSE bytes into OpenAI chat.completion.chunk SSE.
  *
  * Uses start()+pump (not pull-only) so we can emit **timer keepalives** while blocked on
  * upstream reader.read() during Fable's long thinking stretch. Pull-only cannot enqueue
  * while awaiting the binding, which is exactly when URLSession idle-times out.
+ *
+ * Prefer openAIStreamFromCompletion for anthropic binding streams in production; this
+ * transform remains for tests and any caller that already holds a native Anthropic SSE.
  */
 export function anthropicSseToOpenAIStream(
   source: ReadableStream<Uint8Array>,

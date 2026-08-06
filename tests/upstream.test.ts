@@ -288,23 +288,15 @@ describe("runnerFor binding path", () => {
     expect(isAllowedBindingChatModel("evil/model")).toBe(false);
   });
 
-  it("transforms anthropic binding streams to OpenAI chat.completion.chunk SSE", async () => {
-    const anthropicBytes = new TextEncoder().encode(
-      [
-        'data: {"type":"message_start","message":{"usage":{"input_tokens":9,"output_tokens":1}}}\n\n',
-        'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"pong"}}\n\n',
-        'data: {"type":"message_delta","usage":{"output_tokens":1}}\n\n',
-        'data: {"type":"message_stop"}\n\n',
-      ].join(""),
-    );
-    const run = vi.fn(async () => {
-      return new ReadableStream<Uint8Array>({
-        start(controller) {
-          controller.enqueue(anthropicBytes);
-          controller.close();
-        },
-      });
-    });
+  it("buffers anthropic binding stream:true via non-stream AI.run then OpenAI SSE", async () => {
+    // Device path: native Anthropic SSE is flaky; non-stream body is reliable.
+    const run = vi.fn(async () => ({
+      content: [
+        { type: "thinking", thinking: "hmm" },
+        { type: "text", text: "pong" },
+      ],
+      usage: { input_tokens: 9, output_tokens: 4 },
+    }));
     const result = await runnerFor({
       ...DEPS,
       ai: { run } as unknown as Ai,
@@ -320,10 +312,13 @@ describe("runnerFor binding path", () => {
     expect(text).toContain('"content":"pong"');
     expect(text).toContain("chat.completion.chunk");
     expect(text).toContain("data: [DONE]");
+    expect(text).toContain('"prompt_tokens":9');
+    expect(text).toContain('"completion_tokens":4');
     expect(text).not.toContain("content_block_delta");
+    // Non-stream body: no stream:true on the binding call.
     expect(run).toHaveBeenCalledWith(
       "anthropic/claude-fable-5",
-      expect.objectContaining({ stream: true }),
+      expect.not.objectContaining({ stream: true }),
       { gateway: { id: "prism-proxy" } },
     );
   });
