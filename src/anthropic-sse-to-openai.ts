@@ -11,11 +11,16 @@
 // not need a per-provider SSE dialect for a door that advertises OpenAI compatibility.
 //
 // WHAT IT DOES NOT DO. It does not buffer the whole answer. Thinking / signature / tool
-// deltas are dropped (same discipline as prism interpretAnthropicSSEFrame). Metering still
-// rides the transformed trailing usage frame so SseUsageScanner + meterUsageObject stay one
-// reader for all stream paths.
+// deltas are not shown as content (same discipline as prism interpretAnthropicSSEFrame),
+// but they DO emit SSE comment keepalives. Fable can think for tens of seconds before the
+// first text_delta; with zero wire bytes, URLSession's default 60s idle timeout kills the
+// stream and prism-ios reports Empty stream completion. Metering still rides the
+// transformed trailing usage frame so SseUsageScanner + meterUsageObject stay one reader.
 
 const SENTINELS = new Set(["[DONE]", "[done]"]);
+
+/** SSE comment; ignored by OpenAI clients and prism-ios SSEParser (`:` lines). */
+const KEEPALIVE = ": prism-keepalive\n\n";
 
 export interface AnthropicToOpenAIState {
   id: string;
@@ -144,9 +149,11 @@ export function anthropicPayloadToOpenAIFrames(
     if (delta?.type === "text_delta" && typeof delta.text === "string" && delta.text.length > 0) {
       if (!state.opened) out += openChunk(state);
       out += textChunk(state, delta.text);
+      return out;
     }
-    // thinking_delta, signature_delta, input_json_delta: dropped
-    return out;
+    // thinking_delta / signature_delta / input_json_delta: no client text, but keep the
+    // socket warm so idle clients (URLSession 60s) do not drop the stream mid-think.
+    return KEEPALIVE;
   }
 
   if (evType === "message_delta") {
@@ -160,7 +167,7 @@ export function anthropicPayloadToOpenAIFrames(
         state.outputTokens = usage.output_tokens as number;
       }
     }
-    return out;
+    return out || KEEPALIVE;
   }
 
   if (evType === "message_stop") {
@@ -171,7 +178,16 @@ export function anthropicPayloadToOpenAIFrames(
     return out;
   }
 
-  // content_block_start/stop, ping, error (handled elsewhere), unknown: ignore
+  // content_block_start/stop, ping: keepalive so long thinking blocks stay connected.
+  if (
+    evType === "content_block_start" ||
+    evType === "content_block_stop" ||
+    evType === "ping"
+  ) {
+    return KEEPALIVE;
+  }
+
+  // unknown: ignore without traffic
   return out;
 }
 
@@ -231,51 +247,81 @@ export class AnthropicSseToOpenAI {
 
 /**
  * Transform a ReadableStream of Anthropic SSE bytes into OpenAI chat.completion.chunk SSE.
+ *
+ * Uses start()+pump (not pull-only) so we can emit **timer keepalives** while blocked on
+ * upstream reader.read() during Fable's long thinking stretch. Pull-only cannot enqueue
+ * while awaiting the binding, which is exactly when URLSession idle-times out.
  */
 export function anthropicSseToOpenAIStream(
   source: ReadableStream<Uint8Array>,
-  opts: { model: string },
+  opts: { model: string; keepaliveMs?: number },
 ): ReadableStream<Uint8Array> {
   const transformer = new AnthropicSseToOpenAI(opts);
   const reader = source.getReader();
-  /** Always close OpenAI-compat (finish + optional usage + [DONE]) so clients do not hang
-   * when the binding aborts mid-thinking or the edge cuts the stream without message_stop. */
-  const closeOpenAI = (controller: ReadableStreamDefaultController<Uint8Array>): void => {
-    try {
-      const tail = transformer.end();
-      if (tail.byteLength > 0) controller.enqueue(tail);
-    } catch {
-      // ignore double-end
-    }
-    try {
-      controller.close();
-    } catch {
-      // already closed
-    }
-  };
+  const encoder = new TextEncoder();
+  const keepaliveMs = opts.keepaliveMs ?? 15_000;
+
+  let timer: ReturnType<typeof setInterval> | null = null;
+  let closed = false;
+
   return new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      try {
-        const { done, value } = await reader.read();
-        if (done) {
-          closeOpenAI(controller);
-          return;
+    start(controller) {
+      const closeOpenAI = (): void => {
+        if (closed) return;
+        closed = true;
+        if (timer !== null) {
+          clearInterval(timer);
+          timer = null;
         }
-        if (value) {
-          // Binding may yield string chunks in some runtimes; normalize to bytes.
-          const bytes =
-            value instanceof Uint8Array
-              ? value
-              : new TextEncoder().encode(typeof value === "string" ? value : String(value));
-          const out = transformer.push(bytes);
-          if (out.byteLength > 0) controller.enqueue(out);
+        try {
+          const tail = transformer.end();
+          if (tail.byteLength > 0) controller.enqueue(tail);
+        } catch {
+          /* double-end */
         }
-      } catch {
-        // Prefer a clean OpenAI end over an error mid-body when we already streamed deltas.
-        closeOpenAI(controller);
-      }
+        try {
+          controller.close();
+        } catch {
+          /* already closed */
+        }
+      };
+
+      timer = setInterval(() => {
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(KEEPALIVE));
+        } catch {
+          /* controller closed */
+        }
+      }, keepaliveMs);
+
+      void (async () => {
+        try {
+          while (!closed) {
+            const { done, value } = await reader.read();
+            if (done) {
+              closeOpenAI();
+              return;
+            }
+            if (!value) continue;
+            const bytes =
+              value instanceof Uint8Array
+                ? value
+                : new TextEncoder().encode(typeof value === "string" ? value : String(value));
+            const out = transformer.push(bytes);
+            if (out.byteLength > 0) controller.enqueue(out);
+          }
+        } catch {
+          closeOpenAI();
+        }
+      })();
     },
     cancel(reason) {
+      closed = true;
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
       return reader.cancel(reason);
     },
   });

@@ -59,7 +59,7 @@ describe("anthropicPayloadToOpenAIFrames", () => {
     expect(out).toContain('"finish_reason":"stop"');
   });
 
-  it("drops thinking-only stream content but still finishes with [DONE]", () => {
+  it("drops thinking text but emits keepalives and still finishes with [DONE]", () => {
     const out = framesFromPayloads([
       {
         type: "message_start",
@@ -75,6 +75,8 @@ describe("anthropicPayloadToOpenAIFrames", () => {
     expect(out).toContain("data: [DONE]");
     expect(out).toContain('"role":"assistant"');
     expect(out).not.toContain("only thoughts");
+    // Keepalive comments keep URLSession idle timers from killing long Fable thinks.
+    expect(out).toContain(": prism-keepalive");
   });
 });
 
