@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.4.30] - 2026-08-06
+
+### Fixed
+
+- **Async video/music never hit AI Gateway on client disconnect:** `waitUntil` was registered
+  only *after* `await createAsyncJob`. Phone lock during the D1 insert aborted the request
+  before waitUntil was attached, so MiniMax/Grok never started. Now: start upstream immediately,
+  `waitUntil` first, D1 insert races with OR IGNORE.
+
 ## [0.4.29] - 2026-08-06
 
 ### Added
