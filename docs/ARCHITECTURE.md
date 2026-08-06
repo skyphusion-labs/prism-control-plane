@@ -26,7 +26,9 @@ door only.
 | `workers.dev` | **off.** A second un-DNS'd door to the same metered routes is a hole, not a convenience |
 | AI Gateway | `prism-proxy` (authenticated, `collect_logs=true`, `cache_ttl=0`) |
 | D1 | `prism-control-plane` |
-| KV / R2 / Queues / Durable Objects | **none.** Not used and not planned; the only binding is `DB` |
+| R2 | **`MEDIA`** (`prism-control-plane-media`) for Grok video ZDR ingress (`output.upload_url`). Optional: absent closes only Grok video. |
+| KV / Queues | **none.** |
+| Durable Objects | **`STT_SESSION`** (Flux live STT). |
 | Cloudflare account | `fabcb25d9c7eb087110ec474a03e50d2` (prod, `@skyphusion.org`) |
 | Credential mode | `shared` (see below) |
 

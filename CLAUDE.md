@@ -149,7 +149,7 @@ Only the final inference call spends anything.
 
 Live: Worker **`prism-control-plane`** at **`play-proxy.skyphusion.org`** (custom domain, wrangler-owned
 DNS), AI Gateway **`prism-proxy`**, D1 **`prism-control-plane`**, prod account
-`fabcb25d9c7eb087110ec474a03e50d2`. No `workers.dev`. Primary store is `DB` (D1); also `AI` and `STT_SESSION` DO. No KV/R2/Queues..
+`fabcb25d9c7eb087110ec474a03e50d2`. No `workers.dev`. Primary store is `DB` (D1); also `AI`, `STT_SESSION` DO, and R2 `MEDIA` (Grok ZDR video ingress). No KV/Queues.
 
 **Credential posture: one shared `CF_AIG_TOKEN` only.** AI Gateway Run + Workers AI Read + AI Gateway
 Read (read is for reconciliation). Every Prism account rides that same token; per-account attribution is

@@ -33,6 +33,13 @@ database_id = "PLACEHOLDER_RUN_wrangler_d1_create_THEN_PASTE_HERE"
 # Migrations live in ./migrations/. Apply with:
 #   npx wrangler d1 migrations apply prism-control-plane --remote
 
+# ZDR video ingress (Grok on CF Unified Billing requires output.upload_url).
+# Create: wrangler r2 bucket create prism-control-plane-media
+# Live bucket exists account-wide as prism-control-plane-media (2026-08-06).
+[[r2_buckets]]
+binding = "MEDIA"
+bucket_name = "prism-control-plane-media"
+
 # The custom domain. Wrangler creates the DNS record and the route for a hostname on a zone in this
 # account, so the hostname is IaC rather than a dashboard click.
 [[routes]]

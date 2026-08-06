@@ -27,6 +27,12 @@ export interface Env {
    */
   STT_SESSION?: DurableObjectNamespace;
 
+  /**
+   * R2 bucket for ZDR video ingress (Grok on Unified Billing must PUT to output.upload_url).
+   * ABSENT: xai/grok-imagine-video* answers 503 with a clear message; other video models unaffected.
+   */
+  MEDIA?: R2Bucket;
+
   /** The Cloudflare account inference runs on. A plain var: an account id is not a secret. */
   CF_ACCOUNT_ID?: string;
 
