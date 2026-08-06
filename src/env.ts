@@ -33,6 +33,13 @@ export interface Env {
    */
   MEDIA?: R2Bucket;
 
+  /**
+   * Cloudflare Workflow for multi-minute video/music (PlaneLongRunWorkflow).
+   * ABSENT: async video/music answers 503; sync path still works.
+   * Required for mobile lock-safe gens -- waitUntil cannot hold env.AI.run.
+   */
+  LONGRUN?: Workflow;
+
   /** The Cloudflare account inference runs on. A plain var: an account id is not a secret. */
   CF_ACCOUNT_ID?: string;
 
