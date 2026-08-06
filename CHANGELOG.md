@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.4.25] - 2026-08-06
+
+### Fixed
+
+- **Music audio rehost (Grok-video pattern):** after MiniMax returns a short-lived Aliyun HTTPS
+  URL, the plane fetches the bytes into MEDIA R2 under `music/…` and returns a signed
+  `GET /v1/media/{token}` on play-proxy (24h). iOS can open/play/save without fighting OSS
+  URLs. Falls back to the provider URL if MEDIA/signing is missing or fetch fails.
+- **Aura-2 TTS missing voice:** `buildTtsParams` now always sends `speaker` + `voice`
+  (default `luna`) and `encoding: mp3`. Runtime was rejecting with "Must provide a voice
+  parameter when using Aura-2 models" when only `{ text }` was forwarded.
+
 ## [0.4.24] - 2026-08-06
 
 ### Fixed

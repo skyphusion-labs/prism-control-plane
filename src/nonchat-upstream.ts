@@ -309,11 +309,33 @@ export function buildImageParams(
   return body;
 }
 
-export function buildTtsParams(modelId: string, text: string): Record<string, unknown> {
+/**
+ * TTS body for Workers AI / Deepgram Aura and MeloTTS.
+ *
+ * Aura-2 rejects requests without a voice (runtime: "Must provide a voice parameter").
+ * CF docs name the field `speaker` (default luna); Deepgram native often uses `voice`.
+ * Send both with the same value so either schema path is happy.
+ */
+export function buildTtsParams(
+  modelId: string,
+  text: string,
+  opts?: { voice?: string },
+): Record<string, unknown> {
   text = clipPrompt(text);
-  if (modelId.includes("melotts")) return { prompt: text, lang: "en" };
-  // Deepgram aura
-  return { text };
+  if (modelId.includes("melotts")) {
+    return { prompt: text, lang: "en" };
+  }
+  // Deepgram aura-1 / aura-2
+  const speaker =
+    typeof opts?.voice === "string" && opts.voice.trim()
+      ? opts.voice.trim().toLowerCase()
+      : "luna";
+  return {
+    text,
+    speaker,
+    voice: speaker,
+    encoding: "mp3",
+  };
 }
 
 export function buildSttParams(audioBase64: string): Record<string, unknown> {

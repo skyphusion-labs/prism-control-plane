@@ -114,11 +114,18 @@ export async function handleMediaDownload(
     return errorResponse(requestId, "not_found", "Media object not found.");
   }
 
+  const isMusic = parsed.objectKey.startsWith("music/");
   const headers = new Headers();
-  headers.set("content-type", obj.httpMetadata?.contentType ?? "video/mp4");
+  headers.set(
+    "content-type",
+    obj.httpMetadata?.contentType ?? (isMusic ? "audio/mpeg" : "video/mp4"),
+  );
   headers.set("cache-control", "private, max-age=3600");
   if (obj.size != null) headers.set("content-length", String(obj.size));
-  headers.set("content-disposition", 'inline; filename="video.mp4"');
+  headers.set(
+    "content-disposition",
+    isMusic ? 'inline; filename="prism-music.mp3"' : 'inline; filename="video.mp4"',
+  );
 
   if (request.method === "HEAD") {
     return new Response(null, { status: 200, headers });
