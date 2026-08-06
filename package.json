@@ -1,6 +1,6 @@
 {
   "name": "prism-control-plane",
-  "version": "0.4.25",
+  "version": "0.4.26",
   "private": true,
   "description": "Metering and policy plane for commercial Prism: client keys, entitlements, usage ledger, and a metered proxy to Cloudflare AI Gateway / Workers AI (AGPL-3.0).",
   "license": "AGPL-3.0-only",

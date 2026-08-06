@@ -57,7 +57,7 @@ describe("nonChatUpstreamTimeoutMs", () => {
       UPSTREAM_TIMEOUT_MS: "60000",
     } as import("../src/env").Env;
     expect(nonChatUpstreamTimeoutMs(env)).toBe(DEFAULT_NONCHAT_UPSTREAM_TIMEOUT_MS);
-    expect(nonChatUpstreamTimeoutMs(env)).toBe(180_000);
+    expect(nonChatUpstreamTimeoutMs(env)).toBe(300_000);
   });
 
   it("honors NONCHAT_UPSTREAM_TIMEOUT_MS", () => {
@@ -66,5 +66,12 @@ describe("nonChatUpstreamTimeoutMs", () => {
       NONCHAT_UPSTREAM_TIMEOUT_MS: "150000",
     } as import("../src/env").Env;
     expect(nonChatUpstreamTimeoutMs(env)).toBe(150_000);
+  });
+
+  it("caps nonchat timeout at 360s", () => {
+    const env = {
+      NONCHAT_UPSTREAM_TIMEOUT_MS: "999999",
+    } as import("../src/env").Env;
+    expect(nonChatUpstreamTimeoutMs(env)).toBe(360_000);
   });
 });
