@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.4.19] - 2026-08-06
+
+### Fixed
+
+- **Fable Empty stream completion (idle timeout):** Anthropic binding streams emit long
+  stretches of `thinking_delta` before any `text_delta`. The plane dropped those frames
+  with **zero wire bytes**, so URLSession's 60s idle timeout killed the connection and
+  prism-ios reported Empty stream completion. Now: SSE comment keepalives on thinking /
+  block lifecycle frames, plus a 15s timer keepalive while blocked on the binding reader.
+  Clients ignore `:` comments; text deltas are unchanged.
+
 ## [0.4.18] - 2026-08-06
 
 ### Fixed
