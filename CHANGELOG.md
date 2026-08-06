@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.4.21] - 2026-08-06
+
+### Fixed
+
+- **Anthropic binding consecutive roles:** after clients drop failed assistant shells
+  (prism-ios `(error)` / `(cancelled)`), the request can contain back-to-back `user`
+  turns. Anthropic rejects that → 502 "model or gateway failed". Plane now merges
+  same-role neighbors and drops a leading assistant when building Messages bodies.
+
 ## [0.4.20] - 2026-08-06
 
 ### Fixed
