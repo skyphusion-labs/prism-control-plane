@@ -343,6 +343,14 @@ paths:
                 model: { type: string }
                 prompt: { type: string }
                 lyrics: { type: string }
+                is_instrumental:
+                  type: boolean
+                  description: >-
+                    MiniMax Music 2.6. Default true when lyrics omitted; false when lyrics set.
+                lyrics_optimizer:
+                  type: boolean
+                  description: >-
+                    Auto-generate lyrics when is_instrumental is false and lyrics omitted.
       responses:
         "200":
           description: Provider result (opaque)

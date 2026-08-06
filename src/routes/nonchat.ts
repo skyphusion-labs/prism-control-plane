@@ -669,7 +669,12 @@ export async function handleMusicGenerations(ctx: Ctx, request: Request): Promis
     return errorResponse(ctx.requestId, "invalid_request", '"prompt" is required.');
   }
   const lyrics = requireString(raw, "lyrics") ?? undefined;
-  const params = buildMusicParams(prompt, lyrics);
+  // Optional client overrides (plane defaults: instrumental when no lyrics).
+  const isInstrumental =
+    typeof raw.is_instrumental === "boolean" ? raw.is_instrumental : undefined;
+  const lyricsOptimizer =
+    typeof raw.lyrics_optimizer === "boolean" ? raw.lyrics_optimizer : undefined;
+  const params = buildMusicParams(prompt, lyrics, { isInstrumental, lyricsOptimizer });
   const up = await runUpstream(ctx, gate, params);
   if (!up.ok) return up.response;
   const fail = providerStateFailed(up.body);

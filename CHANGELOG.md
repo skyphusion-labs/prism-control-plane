@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.4.24] - 2026-08-06
+
+### Fixed
+
+- **Music 7003 User Input Error:** `POST /v1/music/generations` now sends MiniMax Music 2.6
+  required fields `is_instrumental` + `lyrics_optimizer` (+ `format: mp3`). Style-only prompts
+  default to instrumental; with `lyrics` → vocal + optimizer off. Optional body overrides
+  `is_instrumental` / `lyrics_optimizer`. Omitting the booleans made CF reject every mobile
+  music call (iOS More → Music) while the door looked healthy.
+
 ## [0.4.23] - 2026-08-06
 
 ### Added
