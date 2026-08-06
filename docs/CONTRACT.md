@@ -112,7 +112,7 @@ All paths are relative to the deployment origin. All request and response bodies
 | GET | `/v1/usage` | client key | Current-period usage detail. |
 | POST | `/v1/chat/completions` | client key | Metered chat inference. OpenAI-compatible. |
 | POST | `/v1/images/generations` | client key | Metered image generation (unit-priced). |
-| POST | `/v1/audio/speech` | client key | Metered text-to-speech (unit-priced). |
+| POST | `/v1/audio/speech` | client key | Metered TTS (unit-priced). Optional `async: true` → 202 Workflow job. |
 | POST | `/v1/audio/transcriptions` | client key | Metered speech-to-text (unit-priced). |
 | POST | `/v1/videos/generations` | client key | Metered video generation (unit-priced). Optional `async: true` → 202 job (Workflow). |
 | POST | `/v1/music/generations` | client key | Metered music generation (unit-priced). Optional `async: true` → 202 job (Workflow). |

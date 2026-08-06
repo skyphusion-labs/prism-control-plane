@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.4.32] - 2026-08-06
+
+### Added
+
+- **Speech (TTS) on Workflows:** `POST /v1/audio/speech` with `async: true` / Prefer:
+  respond-async starts `PlaneLongRunWorkflow` kind `speech`, rehosts mp3 to MEDIA, poll
+  `GET /v1/jobs/{id}` for `result.audio` URL. Mobile long doors = video + music + speech;
+  image stays sync.
+
 ## [0.4.31] - 2026-08-06
 
 ### Fixed

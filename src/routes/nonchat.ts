@@ -521,6 +521,23 @@ export async function handleAudioSpeech(ctx: Ctx, request: Request): Promise<Res
   // Aura-2 requires voice/speaker; optional client override, else plane default "luna".
   const voice =
     requireString(raw, "voice") ?? requireString(raw, "speaker") ?? undefined;
+
+  // Mobile / Prefer: respond-async → Workflow (same as music/video).
+  if (wantsAsync(request, raw)) {
+    const units =
+      gate.unitPrice.unit === "k_characters"
+        ? Math.max(1, Math.ceil(input.length / 1000))
+        : 1;
+    return startAsyncLongRun(ctx, request, gate, {
+      kind: "speech",
+      prompt: input,
+      lyrics: undefined,
+      imageUrl: undefined,
+      voice,
+      billableUnits: units,
+    });
+  }
+
   const params = buildTtsParams(gate.model.id, input, { voice });
   const up = await runUpstream(ctx, gate, params);
   if (!up.ok) return up.response;
@@ -637,6 +654,8 @@ async function startAsyncVideoJob(
     prompt,
     lyrics: undefined,
     imageUrl,
+    voice: undefined,
+    billableUnits: 1,
   });
 }
 
@@ -782,22 +801,27 @@ async function startAsyncMusicJob(
     prompt,
     lyrics,
     imageUrl: undefined,
+    voice: undefined,
+    billableUnits: 1,
   });
 }
 
 /**
  * Create D1 job row + Cloudflare Workflow instance (NOT waitUntil).
  * Multi-minute AI.run must use Workflows -- waitUntil dies ~30s after the 202.
+ * Covers video, music, speech. Image stays sync.
  */
 async function startAsyncLongRun(
   ctx: Ctx,
   request: Request,
   gate: NonChatGateOk,
   args: {
-    kind: "video" | "music";
+    kind: "video" | "music" | "speech";
     prompt: string;
     lyrics: string | undefined;
     imageUrl: string | undefined;
+    voice: string | undefined;
+    billableUnits: number;
   },
 ): Promise<Response> {
   if (!ctx.env.LONGRUN) {
@@ -854,6 +878,7 @@ async function startAsyncLongRun(
         upstreamModel: gate.model.upstream,
         prompt: args.prompt,
         lyrics: args.lyrics,
+        voice: args.voice,
         imageUrl,
         imageObjectKey,
         accountId: gate.account.id,
@@ -862,6 +887,7 @@ async function startAsyncLongRun(
         requestId: ctx.requestId,
         unitMicroUsd: gate.unitPrice.microUsdPerUnit,
         unit: gate.unitPrice.unit,
+        billableUnits: args.billableUnits,
         monthlyIncludedMicroUsd: gate.plan.monthlyIncludedMicroUsd,
         origin,
         startedAtIso: now,

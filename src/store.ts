@@ -387,7 +387,7 @@ export interface ControlPlaneStore {
 /** Status for long-run video/music jobs (mobile poll). */
 export type AsyncJobStatus = "queued" | "running" | "succeeded" | "failed";
 
-export type AsyncJobKind = "video" | "music";
+export type AsyncJobKind = "video" | "music" | "speech";
 
 /**
  * One long-run job. `result_json` is JSON like `{ "video": "https://..." }` or

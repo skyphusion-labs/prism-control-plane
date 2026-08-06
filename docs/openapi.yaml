@@ -265,6 +265,9 @@ paths:
     post:
       tags: [inference]
       summary: Metered text-to-speech
+      description: >-
+        Sync returns audio_base64. `"async": true` or Prefer: respond-async starts a Workflow
+        job; poll GET /v1/jobs/{job_id} for result.audio (signed media URL).
       requestBody:
         required: true
         content:
@@ -276,9 +279,13 @@ paths:
                 model: { type: string }
                 input: { type: string }
                 text: { type: string }
+                voice: { type: string }
+                async: { type: boolean }
       responses:
         "200":
-          description: Audio (base64)
+          description: Audio (base64, sync)
+        "202":
+          description: Async job accepted
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "402": { $ref: "#/components/responses/QuotaExhausted" }
         "409": { $ref: "#/components/responses/ModelUnpriced" }
