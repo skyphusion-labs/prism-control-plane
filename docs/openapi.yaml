@@ -350,6 +350,31 @@ paths:
         "402": { $ref: "#/components/responses/QuotaExhausted" }
         "409": { $ref: "#/components/responses/ModelUnpriced" }
 
+  /v1/store/redeem:
+    post:
+      tags: [billing]
+      summary: Redeem App Store / StoreKit purchase for prepaid credit
+      description: >-
+        Device-key authenticated. Accepts StoreKit 2 signed_transaction JWS. Maps
+        org.skyphusion.prism.credit.{5,20,50} to prepaid micro-USD. Idempotent on
+        appstore:&lt;transactionId&gt;.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                signed_transaction: { type: string, description: StoreKit 2 JWS }
+                transaction_id: { type: string, description: Test-only with trust flag }
+                product_id: { type: string, description: Test-only with trust flag }
+      responses:
+        "200":
+          description: Credit applied or already applied (applied false)
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "400":
+          description: Invalid transaction or unknown product
+
   /v1/chat/completions:
     post:
       tags: [inference]
