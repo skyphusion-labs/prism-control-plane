@@ -110,20 +110,36 @@ export async function verifyMediaToken(
   return { kind: kindRaw, objectKey, exp };
 }
 
-/** Object keys must be path-safe and under video/. */
+/** Object keys must be path-safe under video/ (ZDR ingress) or music/ (rehosted audio). */
 export function isSafeObjectKey(key: string): boolean {
   if (key.length < 8 || key.length > 200) return false;
-  if (!key.startsWith("video/")) return false;
   if (key.includes("..") || key.includes("//") || key.includes("\\")) return false;
-  return /^video\/[A-Za-z0-9._/-]+$/.test(key);
+  if (key.startsWith("video/")) {
+    return /^video\/[A-Za-z0-9._/-]+$/.test(key);
+  }
+  if (key.startsWith("music/")) {
+    return /^music\/[A-Za-z0-9._/-]+$/.test(key);
+  }
+  return false;
+}
+
+function mediaKeyParts(accountId: string, requestId: string): { acct: string; req: string; rand: string } {
+  const acct = accountId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 32) || "acct";
+  const req = requestId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 32) || "req";
+  const rand = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+  return { acct, req, rand };
 }
 
 export function newVideoObjectKey(accountId: string, requestId: string): string {
   // Keep key short; both ids are already uuid-ish.
-  const acct = accountId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 32) || "acct";
-  const req = requestId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 32) || "req";
-  const rand = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+  const { acct, req, rand } = mediaKeyParts(accountId, requestId);
   return `video/${acct}/${req}-${rand}.mp4`;
+}
+
+/** R2 object key for rehosted MiniMax (or other) music assets. */
+export function newMusicObjectKey(accountId: string, requestId: string): string {
+  const { acct, req, rand } = mediaKeyParts(accountId, requestId);
+  return `music/${acct}/${req}-${rand}.mp3`;
 }
 
 export async function mintUploadToken(

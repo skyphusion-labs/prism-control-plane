@@ -309,11 +309,33 @@ export function buildImageParams(
   return body;
 }
 
-export function buildTtsParams(modelId: string, text: string): Record<string, unknown> {
+/**
+ * TTS body for Workers AI / Deepgram Aura and MeloTTS.
+ *
+ * Aura-2 rejects requests without a voice (runtime: "Must provide a voice parameter").
+ * CF docs name the field `speaker` (default luna); Deepgram native often uses `voice`.
+ * Send both with the same value so either schema path is happy.
+ */
+export function buildTtsParams(
+  modelId: string,
+  text: string,
+  opts?: { voice?: string },
+): Record<string, unknown> {
   text = clipPrompt(text);
-  if (modelId.includes("melotts")) return { prompt: text, lang: "en" };
-  // Deepgram aura
-  return { text };
+  if (modelId.includes("melotts")) {
+    return { prompt: text, lang: "en" };
+  }
+  // Deepgram aura-1 / aura-2
+  const speaker =
+    typeof opts?.voice === "string" && opts.voice.trim()
+      ? opts.voice.trim().toLowerCase()
+      : "luna";
+  return {
+    text,
+    speaker,
+    voice: speaker,
+    encoding: "mp3",
+  };
 }
 
 export function buildSttParams(audioBase64: string): Record<string, unknown> {
@@ -482,10 +504,51 @@ export function buildVideoParams(
   };
 }
 
-export function buildMusicParams(prompt: string, lyrics?: string): Record<string, unknown> {
-  const body: Record<string, unknown> = { prompt: clipPrompt(prompt) };
-  if (typeof lyrics === "string" && lyrics.trim()) {
-    body.lyrics = clipPrompt(lyrics);
+/**
+ * MiniMax Music 2.6 (CF Workers AI / Unified Billing) body.
+ *
+ * CF schema marks `is_instrumental` and `lyrics_optimizer` as required booleans.
+ * Sending only `{ prompt }` returns provider **7003 User Input Error** (measured
+ * 2026-08-06 on iOS More → Music). Defaults in CF docs are not applied when the
+ * fields are omitted from the JSON body.
+ *
+ * Contract reference: https://developers.cloudflare.com/ai/models/minimax/music-2.6/
+ * - instrumental: `is_instrumental: true`, `lyrics_optimizer: false`
+ * - song + lyrics: `is_instrumental: false`, `lyrics`, `lyrics_optimizer: false`
+ * - song, auto lyrics: `is_instrumental: false`, `lyrics_optimizer: true`
+ */
+export function buildMusicParams(
+  prompt: string,
+  lyrics?: string,
+  opts?: { isInstrumental?: boolean; lyricsOptimizer?: boolean },
+): Record<string, unknown> {
+  const hasLyrics = typeof lyrics === "string" && lyrics.trim().length > 0;
+  let isInstrumental: boolean;
+  if (typeof opts?.isInstrumental === "boolean") {
+    isInstrumental = opts.isInstrumental;
+  } else if (hasLyrics) {
+    isInstrumental = false;
+  } else {
+    // Mobile style-only prompts (no lyrics field) → instrumental by default.
+    isInstrumental = true;
+  }
+  let lyricsOptimizer: boolean;
+  if (typeof opts?.lyricsOptimizer === "boolean") {
+    lyricsOptimizer = opts.lyricsOptimizer;
+  } else if (hasLyrics || isInstrumental) {
+    lyricsOptimizer = false;
+  } else {
+    // Vocal track without client lyrics: let the model write them.
+    lyricsOptimizer = true;
+  }
+  const body: Record<string, unknown> = {
+    prompt: clipPrompt(prompt),
+    is_instrumental: isInstrumental,
+    lyrics_optimizer: lyricsOptimizer,
+    format: "mp3",
+  };
+  if (hasLyrics) {
+    body.lyrics = clipPrompt(lyrics!.trim());
   }
   return body;
 }

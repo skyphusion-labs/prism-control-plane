@@ -32,10 +32,12 @@ import { entitlesTier, planFromRow, type Plan } from "../plans";
 import { checkRateLimit, inferenceBucket } from "../rate-limit";
 import type { UsageEvent } from "../store";
 import {
+  MEDIA_MAX_BYTES,
   mediaPublicUrl,
   mediaSigningSecret,
   mintDownloadToken,
   mintUploadToken,
+  newMusicObjectKey,
   newVideoObjectKey,
 } from "../media";
 import { requireCaller, type Ctx } from "./shared";
@@ -514,7 +516,10 @@ export async function handleAudioSpeech(ctx: Ctx, request: Request): Promise<Res
   if (!input) {
     return errorResponse(ctx.requestId, "invalid_request", '"input" (or "text") is required.');
   }
-  const params = buildTtsParams(gate.model.id, input);
+  // Aura-2 requires voice/speaker; optional client override, else plane default "luna".
+  const voice =
+    requireString(raw, "voice") ?? requireString(raw, "speaker") ?? undefined;
+  const params = buildTtsParams(gate.model.id, input, { voice });
   const up = await runUpstream(ctx, gate, params);
   if (!up.ok) return up.response;
   const fail = providerStateFailed(up.body);
@@ -669,7 +674,12 @@ export async function handleMusicGenerations(ctx: Ctx, request: Request): Promis
     return errorResponse(ctx.requestId, "invalid_request", '"prompt" is required.');
   }
   const lyrics = requireString(raw, "lyrics") ?? undefined;
-  const params = buildMusicParams(prompt, lyrics);
+  // Optional client overrides (plane defaults: instrumental when no lyrics).
+  const isInstrumental =
+    typeof raw.is_instrumental === "boolean" ? raw.is_instrumental : undefined;
+  const lyricsOptimizer =
+    typeof raw.lyrics_optimizer === "boolean" ? raw.lyrics_optimizer : undefined;
+  const params = buildMusicParams(prompt, lyrics, { isInstrumental, lyricsOptimizer });
   const up = await runUpstream(ctx, gate, params);
   if (!up.ok) return up.response;
   const fail = providerStateFailed(up.body);
@@ -677,7 +687,7 @@ export async function handleMusicGenerations(ctx: Ctx, request: Request): Promis
     await recordUnmetered(ctx, gate, "provider_failed", 200);
     return errorResponse(ctx.requestId, "upstream_error", fail);
   }
-  const asset = extractMusicAsset(up.body);
+  let asset = extractMusicAsset(up.body);
   if (!asset) {
     await recordUnmetered(ctx, gate, "no_music_payload", 200);
     return errorResponse(
@@ -685,6 +695,13 @@ export async function handleMusicGenerations(ctx: Ctx, request: Request): Promis
       "upstream_error",
       "Music generation returned no audio payload.",
     );
+  }
+  // Re-host provider HTTPS audio on our MEDIA R2 + signed download (same shape as Grok video).
+  // MiniMax returns short-lived Aliyun OSS URLs that Safari/UIApplication often cannot open;
+  // play-proxy /v1/media/{token} is stable for 24h and works in-app.
+  if (looksLikeHttpUrl(asset)) {
+    const rehosted = await rehostMusicAudio(ctx, request, gate.account.id, asset);
+    if (rehosted) asset = rehosted;
   }
   return meterAndRespond(
     ctx,
@@ -694,6 +711,44 @@ export async function handleMusicGenerations(ctx: Ctx, request: Request): Promis
     200,
     up.gatewayLogId,
   );
+}
+
+function looksLikeHttpUrl(s: string): boolean {
+  return s.startsWith("https://") || s.startsWith("http://");
+}
+
+/**
+ * Fetch provider audio and store under music/… in R2; return signed GET URL.
+ * Returns null if MEDIA/signing missing or fetch fails (caller keeps original URL).
+ */
+async function rehostMusicAudio(
+  ctx: Ctx,
+  request: Request,
+  accountId: string,
+  sourceUrl: string,
+): Promise<string | null> {
+  const secret = mediaSigningSecret(ctx.env);
+  if (!ctx.env.MEDIA || !secret) return null;
+  try {
+    const res = await fetch(sourceUrl, {
+      method: "GET",
+      headers: { accept: "audio/*,application/octet-stream,*/*" },
+      redirect: "follow",
+    });
+    if (!res.ok) return null;
+    const buf = await res.arrayBuffer();
+    if (buf.byteLength === 0 || buf.byteLength > MEDIA_MAX_BYTES) return null;
+    const objectKey = newMusicObjectKey(accountId, ctx.requestId);
+    const contentType = res.headers.get("content-type") ?? "audio/mpeg";
+    await ctx.env.MEDIA.put(objectKey, buf, {
+      httpMetadata: { contentType: contentType.split(";")[0]?.trim() || "audio/mpeg" },
+    });
+    const downTok = await mintDownloadToken(secret, objectKey);
+    const origin = new URL(request.url).origin;
+    return mediaPublicUrl(origin, `/v1/media/${downTok.token}`);
+  } catch {
+    return null;
+  }
 }
 
 // silence unused import if tree-shaken oddly

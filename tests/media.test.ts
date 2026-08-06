@@ -3,6 +3,7 @@ import {
   isSafeObjectKey,
   mintDownloadToken,
   mintUploadToken,
+  newMusicObjectKey,
   newVideoObjectKey,
   verifyMediaToken,
 } from "../src/media";
@@ -40,6 +41,17 @@ describe("media tokens", () => {
   it("rejects path-traversal object keys", () => {
     expect(isSafeObjectKey("video/../etc/passwd")).toBe(false);
     expect(isSafeObjectKey("notvideo/x")).toBe(false);
+    expect(isSafeObjectKey("music/../etc/passwd")).toBe(false);
+  });
+
+  it("accepts music/ object keys and round-trips download tokens", async () => {
+    const key = newMusicObjectKey("acct_music", "req_1");
+    expect(key.startsWith("music/")).toBe(true);
+    expect(key.endsWith(".mp3")).toBe(true);
+    expect(isSafeObjectKey(key)).toBe(true);
+    const down = await mintDownloadToken(SECRET, key, 1_700_000_000);
+    const vd = await verifyMediaToken(SECRET, down.token, 1_700_000_000);
+    expect(vd).toEqual({ kind: "d", objectKey: key, exp: down.exp });
   });
 });
 
