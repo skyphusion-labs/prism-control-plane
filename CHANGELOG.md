@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.4.28] - 2026-08-06
+
+### Fixed
+
+- **Music long-run Internal Server Error:** after MiniMax returns, the plane was including the full
+  provider `result` in the JSON body. Large/non-JSON-safe envelopes after multi-minute gens could
+  throw in `JSON.stringify` → bare CF 500. Response is now slim (`model`, `audio`, `rehosted`).
+  Rehost streams into R2 when possible; handler is try/caught with structured `internal` errors.
+
 ## [0.4.27] - 2026-08-06
 
 ### Fixed
