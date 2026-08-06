@@ -31,6 +31,13 @@ import { periodBounds } from "../period";
 import { entitlesTier, planFromRow, type Plan } from "../plans";
 import { checkRateLimit, inferenceBucket } from "../rate-limit";
 import type { UsageEvent } from "../store";
+import {
+  mediaPublicUrl,
+  mediaSigningSecret,
+  mintDownloadToken,
+  mintUploadToken,
+  newVideoObjectKey,
+} from "../media";
 import { requireCaller, type Ctx } from "./shared";
 
 /** Audio / multimodal JSON. 4 MiB matches the LLaVA image decode cap (audit: lower than 6 MiB). */
@@ -594,7 +601,30 @@ export async function handleVideoGenerations(ctx: Ctx, request: Request): Promis
       `Model "${gate.model.id}" requires an image (i2v). Pass "image" as an https URL or data: URI, or pick a text-to-video model (e.g. bytedance/seedance-2.0-mini, xai/grok-imagine-video, google/veo-3.1-fast).`,
     );
   }
-  const params = buildVideoParams(gate.model.id, prompt, imageUrl);
+
+  // Grok video on CF UB: managed xAI credentials are ZDR. Must supply output.upload_url
+  // (xAI PUTs the mp4 to us). See src/media.ts.
+  let uploadUrl: string | undefined;
+  let downloadUrl: string | undefined;
+  let objectKey: string | undefined;
+  if (gate.model.id.startsWith("xai/grok-imagine-video")) {
+    const secret = mediaSigningSecret(ctx.env);
+    if (!ctx.env.MEDIA || !secret) {
+      return errorResponse(
+        ctx.requestId,
+        "unavailable",
+        "Grok video requires the MEDIA R2 binding and CF_AIG_TOKEN (ZDR-managed xAI needs output.upload_url). Use Veo or Seedance Fast until configured.",
+      );
+    }
+    objectKey = newVideoObjectKey(gate.account.id, ctx.requestId);
+    const origin = new URL(request.url).origin;
+    const upTok = await mintUploadToken(secret, objectKey);
+    const downTok = await mintDownloadToken(secret, objectKey);
+    uploadUrl = mediaPublicUrl(origin, `/v1/media/ingress/${upTok.token}`);
+    downloadUrl = mediaPublicUrl(origin, `/v1/media/${downTok.token}`);
+  }
+
+  const params = buildVideoParams(gate.model.id, prompt, imageUrl, { uploadUrl });
   const up = await runUpstream(ctx, gate, params);
   if (!up.ok) return up.response;
   const fail = providerStateFailed(up.body);
@@ -602,7 +632,16 @@ export async function handleVideoGenerations(ctx: Ctx, request: Request): Promis
     await recordUnmetered(ctx, gate, "provider_failed", 200);
     return errorResponse(ctx.requestId, "upstream_error", fail);
   }
-  const asset = extractVideoAsset(up.body);
+  let asset = extractVideoAsset(up.body);
+  // ZDR path: provider may return Completed with no hosted URL; bytes are in our R2 via ingress.
+  if (!asset && downloadUrl && objectKey && ctx.env.MEDIA) {
+    const head = await ctx.env.MEDIA.head(objectKey);
+    if (head) asset = downloadUrl;
+  }
+  if (!asset && downloadUrl) {
+    // Some providers ack before the PUT finishes; still hand back the signed URL and let the client retry GET.
+    asset = downloadUrl;
+  }
   if (!asset) {
     await recordUnmetered(ctx, gate, "no_video_payload", 200);
     return errorResponse(

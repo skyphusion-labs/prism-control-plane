@@ -12,6 +12,7 @@ describe("buildVideoParams t2v", () => {
     });
     expect(p).not.toHaveProperty("generate_audio");
     expect(p).not.toHaveProperty("_operation");
+    expect(p).not.toHaveProperty("output");
     expect(typeof p.duration).toBe("number");
   });
 

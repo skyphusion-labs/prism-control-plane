@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.4.14] - 2026-08-05
+
+### Fixed
+
+- **Grok video (ZDR upload_url):** CF Unified Billing uses managed xAI credentials that are a
+  **ZDR team**. xAI refuses video without `output.upload_url` ("Zero Data Retention teams must
+  provide output.upload_url"). Plane now mints a short-lived HMAC ingress URL
+  (`PUT /v1/media/ingress/{token}` → R2 `MEDIA`), passes it as `output.upload_url`, and returns a
+  signed download URL (`GET /v1/media/{token}`) as `video`. Requires R2 binding `MEDIA` (bucket
+  `prism-control-plane-media`). Other video models unchanged.
+
 ## [0.4.13] - 2026-08-05
 
 ### Added

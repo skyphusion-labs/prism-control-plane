@@ -325,7 +325,20 @@ export function buildSttParams(audioBase64: string): Record<string, unknown> {
   return { audio };
 }
 
-export function buildVideoParams(modelId: string, prompt: string, imageUrl?: string): Record<string, unknown> {
+export interface BuildVideoParamsOpts {
+  /**
+   * Absolute URL xAI PUTs the finished mp4 to. Required on CF Unified Billing for Grok video:
+   * managed xAI credentials are a ZDR team and refuse without output.upload_url.
+   */
+  uploadUrl?: string;
+}
+
+export function buildVideoParams(
+  modelId: string,
+  prompt: string,
+  imageUrl?: string,
+  opts?: BuildVideoParamsOpts,
+): Record<string, unknown> {
   prompt = clipPrompt(prompt);
   // imageUrl: only accept data: or https: strings of bounded length (no nested objects).
   let image: string | undefined;
@@ -334,6 +347,14 @@ export function buildVideoParams(modelId: string, prompt: string, imageUrl?: str
       image = imageUrl;
     }
   }
+  const uploadUrl =
+    typeof opts?.uploadUrl === "string" &&
+    opts.uploadUrl.length > 0 &&
+    opts.uploadUrl.length <= 2048 &&
+    (opts.uploadUrl.startsWith("https://") || opts.uploadUrl.startsWith("http://"))
+      ? opts.uploadUrl
+      : undefined;
+
   if (image) {
     // Per-model i2v shapes (mirror prism longrun-params; additionalProperties is false upstream).
     if (modelId.startsWith("bytedance/seedance")) {
@@ -378,14 +399,17 @@ export function buildVideoParams(modelId: string, prompt: string, imageUrl?: str
       return params;
     }
     // xAI Grok video i2v: image as { url } object (CF docs); duration integer.
+    // ZDR-managed credentials also require output.upload_url.
     if (modelId.startsWith("xai/grok-imagine-video")) {
-      return {
+      const body: Record<string, unknown> = {
         prompt,
         duration: 5,
         aspect_ratio: "16:9",
         resolution: "720p",
         image: { url: image },
       };
+      if (uploadUrl) body.output = { upload_url: uploadUrl };
+      return body;
     }
     return { image, prompt };
   }
@@ -406,14 +430,16 @@ export function buildVideoParams(modelId: string, prompt: string, imageUrl?: str
     };
   }
   if (modelId.startsWith("xai/grok-imagine-video")) {
-    // CF docs env.AI.run example (no generate_audio). Avoid _operation — some gateway
-    // paths reject it with 7003. Integer duration 1-15.
-    return {
+    // CF docs env.AI.run example + ZDR output.upload_url (required on UB-managed xAI keys).
+    // Avoid _operation — some gateway paths reject it with 7003. Integer duration 1-15.
+    const body: Record<string, unknown> = {
       prompt,
       duration: 5,
       aspect_ratio: "16:9",
       resolution: "720p",
     };
+    if (uploadUrl) body.output = { upload_url: uploadUrl };
+    return body;
   }
   if (modelId.startsWith("bytedance/seedance")) {
     // CF seedance-2.0-mini schema: duration/resolution/aspect_ratio/fps/camera_fixed/watermark required

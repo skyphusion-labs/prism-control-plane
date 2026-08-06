@@ -44,6 +44,12 @@ import {
   handleMusicGenerations,
   handleVideoGenerations,
 } from "./routes/nonchat";
+import {
+  handleMediaDownload,
+  handleMediaIngress,
+  matchMediaDownload,
+  matchMediaIngress,
+} from "./routes/media";
 import { handleEnroll } from "./routes/clients";
 import { handleDeepHealth, handleHealth, SERVICE_NAME } from "./routes/health";
 import {
@@ -125,6 +131,16 @@ export async function handleRequest(ctx: Ctx, request: Request): Promise<Respons
 
   if (method === "GET" && path === "/health") return handleHealth(ctx);
   if (method === "GET" && path === "/health/deep") return await handleDeepHealth(ctx);
+
+  // ZDR video ingress (xAI PUT) + signed download. Auth is the path token, not pcp_.
+  const ingressTok = matchMediaIngress(path);
+  if (ingressTok && (method === "PUT" || method === "POST")) {
+    return await handleMediaIngress(ctx.env, request, ingressTok, ctx.requestId);
+  }
+  const downloadTok = matchMediaDownload(path);
+  if (downloadTok && (method === "GET" || method === "HEAD")) {
+    return await handleMediaDownload(ctx.env, request, downloadTok, ctx.requestId);
+  }
 
   // Browser path: mint short-lived stt_ ticket (never put pcp_ in Sec-WebSocket-Protocol).
   if (method === "POST" && path === "/v1/stt/sessions") {
