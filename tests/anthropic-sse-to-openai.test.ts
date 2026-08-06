@@ -4,6 +4,7 @@ import {
   anthropicPayloadToOpenAIFrames,
   anthropicSseToOpenAIStream,
   newAnthropicToOpenAIState,
+  openAIStreamFromCompletion,
 } from "../src/anthropic-sse-to-openai";
 import { SseUsageScanner } from "../src/stream";
 
@@ -98,6 +99,23 @@ describe("AnthropicSseToOpenAI incremental", () => {
     expect(all).toContain('"content":"ok"');
     expect(all).toContain('"completion_tokens":4');
     expect(all).toContain("data: [DONE]");
+  });
+});
+
+describe("openAIStreamFromCompletion", () => {
+  it("emits OpenAI chunks + usage + [DONE] from buffered text", async () => {
+    const stream = openAIStreamFromCompletion({
+      model: MODEL,
+      text: "Hello world",
+      promptTokens: 3,
+      completionTokens: 2,
+    });
+    const body = await new Response(stream).text();
+    expect(body).toContain('"content":"Hello world"');
+    expect(body).toContain('"prompt_tokens":3');
+    expect(body).toContain('"completion_tokens":2');
+    expect(body).toContain("data: [DONE]");
+    expect(body).toContain('"finish_reason":"stop"');
   });
 });
 

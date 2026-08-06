@@ -298,9 +298,11 @@ is **allowance first, then prepaid credit**.
 `stream: true` returns `200` with `content-type: text/event-stream` and `prism-stream: true`. The
 client always sees **OpenAI-compatible** `chat.completion.chunk` frames (`choices[].delta.content`)
 ending with a usage frame and `data: [DONE]`. Most upstreams already emit that shape and are relayed
-byte-for-byte. Anthropic **binding** models (`env.AI.run`, e.g. `anthropic/claude-fable-5`) emit
-native Messages SSE (`content_block_delta` / `text_delta`); the plane transforms those to the OpenAI
-chunk shape before the client so prism-ios and OpenAI SDKs need no Anthropic dialect.
+byte-for-byte. Anthropic **binding** models (`env.AI.run`, e.g. `anthropic/claude-fable-5`) are
+served as a **buffered synthetic stream**: the plane waits for the full non-stream completion
+(Fable thinking is unreliable on native SSE for mobile clients), then emits OpenAI chunks so
+prism-ios and OpenAI SDKs need no Anthropic dialect. First-token latency equals full generation
+time for those models; the wire shape stays OpenAI stream.
 
 **The money headers are absent on a stream, and that absence is deliberate.** `prism-usage-micro-usd`
 and `prism-metered` describe what a request cost, and the token counts only arrive in the final frame,
