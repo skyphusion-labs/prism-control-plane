@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.4.27] - 2026-08-06
+
+### Fixed
+
+- **Aura-2 TTS empty audio:** REST `ai/run` returns raw `audio/mpeg` for Aura-2. Plane was
+  `res.text()` + JSON parse, so `extractAudioBase64` always missed and clients saw
+  "TTS returned no audio payload" / no playable audio despite gateway 200. Binary audio
+  bodies (and binding ReadableStream/ArrayBuffer) are now base64-wrapped as `{ audio }`.
+
 ## [0.4.26] - 2026-08-06
 
 ### Fixed

@@ -156,6 +156,35 @@ async function runViaRest(
     clearTimeout(timer);
     const logId = res.headers.get("cf-aig-log-id");
     const contentType = res.headers.get("content-type");
+    if (!res.ok) {
+      const text = await res.text();
+      let detail = text.slice(0, 400);
+      try {
+        const j = JSON.parse(text) as { errors?: unknown };
+        if (j.errors) detail = JSON.stringify(j.errors).slice(0, 400);
+      } catch {
+        /* keep text */
+      }
+      return { outcome: "upstream_error", status: res.status, detail: detail || `HTTP ${res.status}` };
+    }
+    // Aura-2 / some TTS models return raw audio/mpeg (not JSON). Gateway logs show
+    // response_content_type: audio/mpeg; parsing as text then extractAudioBase64 → "no audio".
+    if (contentTypeLooksBinaryAudio(contentType)) {
+      const buf = await res.arrayBuffer();
+      if (buf.byteLength === 0) {
+        return {
+          outcome: "upstream_error",
+          status: res.status,
+          detail: "TTS returned empty audio body",
+        };
+      }
+      return {
+        outcome: "ok",
+        body: { audio: bytesToBase64(new Uint8Array(buf)) },
+        gatewayLogId: logId,
+        contentType,
+      };
+    }
     const text = await res.text();
     let body: unknown = null;
     if (text) {
@@ -165,19 +194,14 @@ async function runViaRest(
         body = { raw: text.slice(0, 200) };
       }
     }
-    if (!res.ok) {
-      const detail =
-        typeof body === "object" && body && "errors" in body
-          ? JSON.stringify((body as { errors: unknown }).errors).slice(0, 400)
-          : text.slice(0, 400);
-      return { outcome: "upstream_error", status: res.status, detail: detail || `HTTP ${res.status}` };
-    }
     // CF wraps many results as { success, result }
     const unwrapped =
       typeof body === "object" && body !== null && "result" in body
         ? (body as { result: unknown }).result
         : body;
-    return { outcome: "ok", body: unwrapped, gatewayLogId: logId, contentType };
+    // Binding-shaped result may still be binary-in-JSON or a nested audio field.
+    const normalized = await normalizeNonChatBody(unwrapped);
+    return { outcome: "ok", body: normalized, gatewayLogId: logId, contentType };
   } catch (err) {
     clearTimeout(timer);
     const aborted = err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError");
@@ -212,7 +236,8 @@ async function runViaBinding(
     ]);
     const logId =
       (ai as unknown as { aiGatewayLogId?: string }).aiGatewayLogId ?? null;
-    return { outcome: "ok", body: result, gatewayLogId: logId, contentType: null };
+    const body = await normalizeNonChatBody(result);
+    return { outcome: "ok", body, gatewayLogId: logId, contentType: null };
   } catch (err) {
     const aborted = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
     if (aborted) return { outcome: "timeout", waitedMs: deps.timeoutMs };
@@ -222,6 +247,65 @@ async function runViaBinding(
       detail: String(err instanceof Error ? err.message : err).slice(0, 400),
     };
   }
+}
+
+function contentTypeLooksBinaryAudio(contentType: string | null): boolean {
+  if (!contentType) return false;
+  const c = contentType.toLowerCase();
+  return (
+    c.includes("audio/") ||
+    c.includes("application/octet-stream") ||
+    c.includes("application/mpeg")
+  );
+}
+
+/** Convert binary TTS (stream / buffer) into `{ audio: base64 }` for extractAudioBase64. */
+async function normalizeNonChatBody(body: unknown): Promise<unknown> {
+  if (body == null) return body;
+  if (body instanceof ArrayBuffer) {
+    return { audio: bytesToBase64(new Uint8Array(body)) };
+  }
+  if (body instanceof Uint8Array) {
+    return { audio: bytesToBase64(body) };
+  }
+  // Workers AI Aura binding returns ReadableStream of MPEG bytes.
+  if (typeof ReadableStream !== "undefined" && body instanceof ReadableStream) {
+    const buf = await streamToUint8Array(body as ReadableStream<Uint8Array>);
+    if (buf.byteLength === 0) return body;
+    return { audio: bytesToBase64(buf) };
+  }
+  return body;
+}
+
+function bytesToBase64(u8: Uint8Array): string {
+  // Chunk to avoid call-stack limits on large mp3s.
+  const chunk = 0x8000;
+  let s = "";
+  for (let i = 0; i < u8.length; i += chunk) {
+    s += String.fromCharCode(...u8.subarray(i, i + chunk));
+  }
+  return btoa(s);
+}
+
+async function streamToUint8Array(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value && value.byteLength) {
+      chunks.push(value);
+      total += value.byteLength;
+    }
+  }
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    out.set(c, off);
+    off += c.byteLength;
+  }
+  return out;
 }
 
 /** Cap user text fields before they hit a provider body. */
