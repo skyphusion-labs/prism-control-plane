@@ -245,7 +245,10 @@ with `invalid_request`. Use a vision-capable chat model for image understanding.
 ```
 
 - `model` MUST be an id from `GET /v1/models`.
-- `messages` is required, non-empty, roles `system` | `user` | `assistant`, `content` a string.
+- `messages` is required, non-empty, roles `system` | `user` | `assistant`.
+  `content` is a string **or** an OpenAI multiparty array of `{type:"text",text}` /
+  `{type:"image_url",image_url:{url}}` parts (vision). Image parts are user-only;
+  `url` is `data:image/...;base64,...` or https.
 - `max_tokens` is **clamped down** to the plan's `max_output_tokens` without error. The response
   header `prism-max-tokens-applied` reports what was actually used. Clamping rather than rejecting
   is deliberate: the cap exists to bound one request's cost, and a client should not have to know

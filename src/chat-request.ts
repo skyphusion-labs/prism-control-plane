@@ -33,6 +33,8 @@ export const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 export interface ChatTurnInput {
   role: "system" | "user" | "assistant";
   content: string;
+  /** Vision image URLs (data: or https) from multiparty content parts. */
+  images?: string[];
 }
 
 export interface ValidChatRequest {
@@ -100,20 +102,79 @@ export function parseChatRequest(body: unknown): ChatRequestResult {
     if (typeof asRecord.role !== "string" || !ALLOWED_ROLES.has(asRecord.role)) {
       return bad(`messages[${i}].role must be one of system, user, assistant.`);
     }
-    // Content must be a STRING. The OpenAI multi-part content array (text plus image parts) is not
-    // forwarded, so accepting it would be the exact silent-drop this validator refuses to do.
-    if (typeof asRecord.content !== "string") {
+    // Content: string (text) OR OpenAI multiparty array (text + image_url parts for vision).
+    let contentText = "";
+    let images: string[] | undefined;
+    if (typeof asRecord.content === "string") {
+      contentText = asRecord.content;
+    } else if (Array.isArray(asRecord.content)) {
+      const urls: string[] = [];
+      const texts: string[] = [];
+      for (let j = 0; j < asRecord.content.length; j++) {
+        const part = asRecord.content[j];
+        if (typeof part !== "object" || part === null) {
+          return bad(`messages[${i}].content[${j}] must be an object.`);
+        }
+        const p = part as Record<string, unknown>;
+        const pType = typeof p.type === "string" ? p.type : "";
+        if (pType === "text") {
+          if (typeof p.text !== "string") {
+            return bad(`messages[${i}].content[${j}].text must be a string.`);
+          }
+          texts.push(p.text);
+        } else if (pType === "image_url") {
+          const iu = p.image_url;
+          const url =
+            typeof iu === "string"
+              ? iu
+              : iu && typeof iu === "object" && typeof (iu as { url?: unknown }).url === "string"
+                ? ((iu as { url: string }).url)
+                : null;
+          if (!url || !url.trim()) {
+            return bad(
+              `messages[${i}].content[${j}].image_url must be a non-empty url string or {url}.`,
+            );
+          }
+          const u = url.trim();
+          if (!(u.startsWith("data:image/") || u.startsWith("https://") || u.startsWith("http://"))) {
+            return bad(
+              `messages[${i}].content[${j}].image_url must be a data:image/... or http(s) URL.`,
+            );
+          }
+          if (u.startsWith("data:image/")) {
+            const parsed = parseImageDataUrl(u);
+            if (!parsed.ok) return bad(`messages[${i}].content[${j}]: ${parsed.message}`);
+          }
+          urls.push(u);
+        } else {
+          return bad(
+            `messages[${i}].content[${j}].type must be "text" or "image_url" (got ${JSON.stringify(pType)}).`,
+          );
+        }
+      }
+      contentText = texts.join("\n");
+      if (urls.length) images = urls;
+      if (!contentText && !images?.length) {
+        return bad(`messages[${i}].content multiparty array produced no text or images.`);
+      }
+    } else {
       return bad(
-        `messages[${i}].content must be a string. Multi-part content arrays are not forwarded by ` +
-          "this plane.",
+        `messages[${i}].content must be a string or an array of {type:text|image_url} parts.`,
       );
     }
-    if (asRecord.content.length > MAX_CONTENT_CHARS) {
+    if (contentText.length > MAX_CONTENT_CHARS) {
       return bad(
-        `messages[${i}].content is ${asRecord.content.length} characters; the cap is ${MAX_CONTENT_CHARS}.`,
+        `messages[${i}].content is ${contentText.length} characters; the cap is ${MAX_CONTENT_CHARS}.`,
       );
     }
-    messages.push({ role: asRecord.role as ChatTurnInput["role"], content: asRecord.content });
+    if (images?.length && asRecord.role !== "user") {
+      return bad(`messages[${i}]: image_url parts are only allowed on user turns.`);
+    }
+    messages.push({
+      role: asRecord.role as ChatTurnInput["role"],
+      content: contentText,
+      ...(images?.length ? { images } : {}),
+    });
   }
 
   let maxTokens: number | undefined;

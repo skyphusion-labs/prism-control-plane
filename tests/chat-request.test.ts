@@ -44,11 +44,40 @@ describe("parseChatRequest", () => {
     ).toMatchObject({ ok: false });
   });
 
-  it("rejects multi-part content arrays instead of forwarding a shape it drops", () => {
+  it("accepts multiparty content with text + image_url for vision", () => {
+    const tiny =
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    const result = parseChatRequest({
+      ...valid,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "what color?" },
+            { type: "image_url", image_url: { url: tiny } },
+          ],
+        },
+      ],
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.messages[0].content).toBe("what color?");
+      expect(result.value.messages[0].images).toEqual([tiny]);
+    }
+  });
+
+  it("rejects image_url on assistant turns", () => {
+    const tiny =
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
     expect(
       parseChatRequest({
         ...valid,
-        messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+        messages: [
+          {
+            role: "assistant",
+            content: [{ type: "image_url", image_url: { url: tiny } }],
+          },
+        ],
       }),
     ).toMatchObject({ ok: false });
   });

@@ -169,28 +169,43 @@ export function bindingChatBody(request: InferenceRequest): Record<string, unkno
   }
   if (modelId.startsWith("anthropic/")) {
     const systemParts: string[] = [];
-    const messages: Array<{ role: "user" | "assistant"; content: Array<{ type: "text"; text: string }> }> =
-      [];
+    type ABlock =
+      | { type: "text"; text: string }
+      | { type: "image"; source: { type: "base64"; media_type: string; data: string } };
+    const messages: Array<{ role: "user" | "assistant"; content: ABlock[] }> = [];
     for (const m of request.messages) {
       if (m.role === "system") {
         if (m.content.trim()) systemParts.push(m.content);
         continue;
       }
       if (m.role !== "user" && m.role !== "assistant") continue;
-      const text = m.content;
+      const blocks: ABlock[] = [];
+      for (const url of m.images ?? []) {
+        const img = anthropicImageBlock(url);
+        if (img) blocks.push(img);
+      }
+      if (m.content.trim() || blocks.length === 0) {
+        blocks.push({ type: "text", text: m.content || " " });
+      }
       // Anthropic requires strict user/assistant alternation and a user-first list.
       // Clients (prism-ios) drop failed assistant shells, which leaves consecutive user
       // turns → provider 400 → "model or gateway failed". Merge same-role neighbors.
       const prev = messages[messages.length - 1];
       if (prev && prev.role === m.role) {
-        const block = prev.content[0];
-        if (block) block.text = block.text ? `${block.text}\n\n${text}` : text;
+        // Merge text into the last text block when possible; append images/blocks otherwise.
+        for (const b of blocks) {
+          if (b.type === "text") {
+            const lastText = [...prev.content].reverse().find((x) => x.type === "text");
+            if (lastText && lastText.type === "text") {
+              lastText.text = lastText.text ? `${lastText.text}\n\n${b.text}` : b.text;
+              continue;
+            }
+          }
+          prev.content.push(b);
+        }
         continue;
       }
-      messages.push({
-        role: m.role,
-        content: [{ type: "text", text }],
-      });
+      messages.push({ role: m.role, content: blocks });
     }
     // Leading assistant is invalid; drop (orphan from a filtered prior user).
     while (messages.length > 0 && messages[0].role === "assistant") messages.shift();
@@ -208,7 +223,7 @@ export function bindingChatBody(request: InferenceRequest): Record<string, unkno
 
   // OpenAI-compatible (Grok via binding uses public xai/* id + max_completion_tokens).
   const body: Record<string, unknown> = {
-    messages: request.messages,
+    messages: request.messages.map(toOpenAIMessage),
     max_completion_tokens: request.maxTokens,
   };
   if (request.stream) {
@@ -218,6 +233,39 @@ export function bindingChatBody(request: InferenceRequest): Record<string, unkno
   if (request.temperature !== undefined) body.temperature = request.temperature;
   if (request.topP !== undefined) body.top_p = request.topP;
   return body;
+}
+
+function toOpenAIMessage(m: {
+  role: string;
+  content: string;
+  images?: string[];
+}): Record<string, unknown> {
+  if (!m.images?.length) return { role: m.role, content: m.content };
+  const parts: Array<Record<string, unknown>> = [];
+  for (const url of m.images) {
+    parts.push({ type: "image_url", image_url: { url } });
+  }
+  parts.push({ type: "text", text: m.content || " " });
+  return { role: m.role, content: parts };
+}
+
+/** Anthropic Messages image block from data: or https URL (https passed as URL source if possible). */
+function anthropicImageBlock(
+  url: string,
+): { type: "image"; source: { type: "base64"; media_type: string; data: string } } | null {
+  const m = /^data:(image\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)$/i.exec(url);
+  if (!m) {
+    // https: Anthropic accepts url source on some gateways; prefer base64 from client.
+    return null;
+  }
+  return {
+    type: "image",
+    source: {
+      type: "base64",
+      media_type: m[1].toLowerCase(),
+      data: m[2].replace(/\s+/g, ""),
+    },
+  };
 }
 
 /**
@@ -366,7 +414,7 @@ export function upstreamBody(request: InferenceRequest): Record<string, unknown>
   const tokenField = outputTokenField(request.upstreamModel);
   return {
     model: request.upstreamModel,
-    messages: request.messages,
+    messages: request.messages.map(toOpenAIMessage),
     [tokenField]: request.maxTokens,
     ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
     ...(request.topP === undefined ? {} : { top_p: request.topP }),
