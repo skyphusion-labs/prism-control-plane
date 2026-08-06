@@ -40,6 +40,14 @@ database_id = "PLACEHOLDER_RUN_wrangler_d1_create_THEN_PASTE_HERE"
 binding = "MEDIA"
 bucket_name = "prism-control-plane-media"
 
+# Durable multi-minute video/music (async: true → 202 + poll GET /v1/jobs/{id}).
+# env.AI.run for MiniMax/Veo/Grok blocks 1-5 min, which exceeds waitUntil's ~30s
+# post-response budget (prism LongRunWorkflow same reason). Class: PlaneLongRunWorkflow.
+[[workflows]]
+name = "prism-control-plane-longrun"
+binding = "LONGRUN"
+class_name = "PlaneLongRunWorkflow"
+
 # The custom domain. Wrangler creates the DNS record and the route for a hostname on a zone in this
 # account, so the hostname is IaC rather than a dashboard click.
 [[routes]]

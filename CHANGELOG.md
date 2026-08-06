@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.4.31] - 2026-08-06
+
+### Fixed
+
+- **Async music/video never completed / never hit AI Gateway:** `ctx.waitUntil` cannot hold
+  multi-minute `env.AI.run` (same lesson as prism playground). Jobs stuck `status=running`
+  forever. Replaced waitUntil long-run path with **Cloudflare Workflows**
+  (`PlaneLongRunWorkflow` / `LONGRUN` binding), matching prism `LongRunWorkflow`.
+
+### Added
+
+- `[[workflows]]` binding `LONGRUN` + class `PlaneLongRunWorkflow` (wrangler.example.toml).
+- Workflow steps: invoke-model → rehost-asset → finalize (meter + async_jobs row).
+
 ## [0.4.30] - 2026-08-06
 
 ### Fixed

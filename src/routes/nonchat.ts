@@ -632,84 +632,12 @@ async function startAsyncVideoJob(
   prompt: string,
   imageUrl: string | undefined,
 ): Promise<Response> {
-  const now = ctx.now.toISOString();
-  const jobId = newId("job");
-  const row: AsyncJobRow = {
-    id: jobId,
-    account_id: gate.account.id,
-    client_id: gate.client.id,
+  return startAsyncLongRun(ctx, request, gate, {
     kind: "video",
-    model_id: gate.model.id,
-    status: "running",
-    result_json: null,
-    error_code: null,
-    error_detail: null,
-    request_id: ctx.requestId,
-    created_at: now,
-    updated_at: now,
-  };
-
-  // CRITICAL: register waitUntil + start upstream BEFORE any await that can lose the
-  // client (D1 insert). If the phone locks during createAsyncJob, CF aborts the
-  // request -- and if waitUntil is not registered yet, AI Gateway is never called.
-  // Prompt stays in this closure only (privacy: never written to D1).
-  const work = (async () => {
-    try {
-      // Start upstream immediately; D1 row in parallel (do not serialize AI behind insert).
-      console.log("async video job start", { jobId, model: gate.model.id, requestId: ctx.requestId });
-      const producedP = produceVideo(ctx, request, gate, prompt, imageUrl);
-      await ctx.store.createAsyncJob(row);
-      const produced = await producedP;
-      if (!produced.ok) {
-        const msg = await errorMessageFromResponse(produced.response);
-        await ctx.store.updateAsyncJob({
-          id: jobId,
-          status: "failed",
-          error_code: "upstream_error",
-          error_detail: msg,
-          updated_at: new Date().toISOString(),
-        });
-        return;
-      }
-      await meterAndRespond(
-        ctx,
-        gate,
-        1,
-        { model: gate.model.id, video: produced.video },
-        200,
-        produced.gatewayLogId,
-      );
-      await ctx.store.updateAsyncJob({
-        id: jobId,
-        status: "succeeded",
-        result_json: JSON.stringify({ video: produced.video, model: gate.model.id }),
-        error_code: null,
-        error_detail: null,
-        updated_at: new Date().toISOString(),
-      });
-      console.log("async video job done", { jobId, requestId: ctx.requestId });
-    } catch (err) {
-      console.error("async video job failed", {
-        jobId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      await ctx.store
-        .updateAsyncJob({
-          id: jobId,
-          status: "failed",
-          error_code: "internal",
-          error_detail: (err instanceof Error ? err.message : String(err)).slice(0, 280),
-          updated_at: new Date().toISOString(),
-        })
-        .catch(() => undefined);
-    }
-  })();
-  ctx.waitUntil(work);
-
-  // Best-effort row for immediate poll (work path also inserts OR IGNORE).
-  await ctx.store.createAsyncJob(row).catch(() => undefined);
-
-  return jsonResponse(ctx.requestId, jobToWire(row), { status: 202 });
+    prompt,
+    lyrics: undefined,
+    imageUrl,
+  });
 }
 
 /**
@@ -788,15 +716,6 @@ async function produceVideo(
   return { ok: true, video: asset, gatewayLogId: up.gatewayLogId, upstreamBody: up.body };
 }
 
-async function errorMessageFromResponse(res: Response): Promise<string> {
-  try {
-    const body = (await res.clone().json()) as { error?: { message?: string } };
-    return (body.error?.message ?? `HTTP ${res.status}`).slice(0, 280);
-  } catch {
-    return `HTTP ${res.status}`;
-  }
-}
-
 export async function handleMusicGenerations(ctx: Ctx, request: Request): Promise<Response> {
   try {
     return await handleMusicGenerationsInner(ctx, request);
@@ -854,16 +773,49 @@ async function startAsyncMusicJob(
   gate: NonChatGateOk,
   prompt: string,
   lyrics: string | undefined,
-  isInstrumental: boolean | undefined,
-  lyricsOptimizer: boolean | undefined,
+  _isInstrumental: boolean | undefined,
+  _lyricsOptimizer: boolean | undefined,
 ): Promise<Response> {
+  // Instrumental/lyrics_optimizer defaults are applied again inside the workflow via buildMusicParams.
+  return startAsyncLongRun(ctx, request, gate, {
+    kind: "music",
+    prompt,
+    lyrics,
+    imageUrl: undefined,
+  });
+}
+
+/**
+ * Create D1 job row + Cloudflare Workflow instance (NOT waitUntil).
+ * Multi-minute AI.run must use Workflows -- waitUntil dies ~30s after the 202.
+ */
+async function startAsyncLongRun(
+  ctx: Ctx,
+  request: Request,
+  gate: NonChatGateOk,
+  args: {
+    kind: "video" | "music";
+    prompt: string;
+    lyrics: string | undefined;
+    imageUrl: string | undefined;
+  },
+): Promise<Response> {
+  if (!ctx.env.LONGRUN) {
+    return errorResponse(
+      ctx.requestId,
+      "unavailable",
+      "Long-run Workflow binding is not configured on this deployment. " +
+        "Add [[workflows]] LONGRUN / PlaneLongRunWorkflow (see wrangler.example.toml).",
+    );
+  }
+
   const now = ctx.now.toISOString();
   const jobId = newId("job");
   const row: AsyncJobRow = {
     id: jobId,
     account_id: gate.account.id,
     client_id: gate.client.id,
-    kind: "music",
+    kind: args.kind,
     model_id: gate.model.id,
     status: "running",
     result_json: null,
@@ -873,77 +825,99 @@ async function startAsyncMusicJob(
     created_at: now,
     updated_at: now,
   };
+  await ctx.store.createAsyncJob(row);
 
-  // Same race as video: waitUntil + upstream MUST start before awaiting D1 if the
-  // client can disconnect (lock). Otherwise MiniMax never hits AI Gateway.
-  const work = (async () => {
-    try {
-      // Start MiniMax immediately; D1 insert must not gate the AI Gateway call.
-      console.log("async music job start", { jobId, model: gate.model.id, requestId: ctx.requestId });
-      const producedP = produceMusic(
-        ctx,
-        request,
-        gate,
-        prompt,
-        lyrics,
-        isInstrumental,
-        lyricsOptimizer,
-      );
-      await ctx.store.createAsyncJob(row);
-      const produced = await producedP;
-      if (!produced.ok) {
-        const msg = await errorMessageFromResponse(produced.response);
-        await ctx.store.updateAsyncJob({
-          id: jobId,
-          status: "failed",
-          error_code: "upstream_error",
-          error_detail: msg,
-          updated_at: new Date().toISOString(),
-        });
-        return;
-      }
-      await meterAndRespond(
-        ctx,
-        gate,
-        1,
-        { model: gate.model.id, audio: produced.audio, rehosted: produced.rehosted },
-        200,
-        produced.gatewayLogId,
-      );
-      await ctx.store.updateAsyncJob({
-        id: jobId,
-        status: "succeeded",
-        result_json: JSON.stringify({
-          audio: produced.audio,
-          rehosted: produced.rehosted,
-          model: gate.model.id,
-        }),
-        error_code: null,
-        error_detail: null,
-        updated_at: new Date().toISOString(),
-      });
-      console.log("async music job done", { jobId, requestId: ctx.requestId });
-    } catch (err) {
-      console.error("async music job failed", {
-        jobId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      await ctx.store
-        .updateAsyncJob({
-          id: jobId,
-          status: "failed",
-          error_code: "internal",
-          error_detail: (err instanceof Error ? err.message : String(err)).slice(0, 280),
-          updated_at: new Date().toISOString(),
-        })
-        .catch(() => undefined);
+  // Stage data: images to MEDIA so the Workflow event stays small (1 MiB cap).
+  let imageUrl = args.imageUrl;
+  let imageObjectKey: string | undefined;
+  if (
+    args.kind === "video" &&
+    imageUrl &&
+    imageUrl.startsWith("data:") &&
+    ctx.env.MEDIA
+  ) {
+    const staged = await stageDataImage(ctx, gate.account.id, jobId, imageUrl);
+    if (staged) {
+      imageObjectKey = staged;
+      imageUrl = undefined;
     }
-  })();
-  ctx.waitUntil(work);
+  }
 
-  await ctx.store.createAsyncJob(row).catch(() => undefined);
+  const origin = new URL(request.url).origin;
+  try {
+    await ctx.env.LONGRUN.create({
+      id: jobId,
+      params: {
+        jobId,
+        kind: args.kind,
+        modelId: gate.model.id,
+        upstreamModel: gate.model.upstream,
+        prompt: args.prompt,
+        lyrics: args.lyrics,
+        imageUrl,
+        imageObjectKey,
+        accountId: gate.account.id,
+        clientId: gate.client.id,
+        planId: gate.account.plan_id,
+        requestId: ctx.requestId,
+        unitMicroUsd: gate.unitPrice.microUsdPerUnit,
+        unit: gate.unitPrice.unit,
+        monthlyIncludedMicroUsd: gate.plan.monthlyIncludedMicroUsd,
+        origin,
+        startedAtIso: now,
+      },
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await ctx.store.updateAsyncJob({
+      id: jobId,
+      status: "failed",
+      error_code: "unavailable",
+      error_detail: `Workflow create failed: ${msg}`.slice(0, 280),
+      updated_at: new Date().toISOString(),
+    });
+    return errorResponse(
+      ctx.requestId,
+      "unavailable",
+      `Failed to start long-run workflow: ${msg}`.slice(0, 280),
+    );
+  }
 
+  console.log("async longrun workflow started", {
+    jobId,
+    kind: args.kind,
+    model: gate.model.id,
+    requestId: ctx.requestId,
+  });
   return jsonResponse(ctx.requestId, jobToWire(row), { status: 202 });
+}
+
+/** Put a data: image into MEDIA; return object key. */
+async function stageDataImage(
+  ctx: Ctx,
+  accountId: string,
+  jobId: string,
+  dataUrl: string,
+): Promise<string | null> {
+  if (!ctx.env.MEDIA) return null;
+  const m = /^data:([^;,]+);base64,(.+)$/s.exec(dataUrl);
+  if (!m) return null;
+  const contentType = m[1] || "image/jpeg";
+  const b64 = m[2];
+  let bytes: Uint8Array;
+  try {
+    const bin = atob(b64);
+    bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  } catch {
+    return null;
+  }
+  if (bytes.byteLength === 0 || bytes.byteLength > MEDIA_MAX_BYTES) return null;
+  const key = `video/${accountId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 32)}/${jobId}-ref`;
+  await ctx.env.MEDIA.put(key, bytes, {
+    httpMetadata: { contentType },
+  });
+  return key;
 }
 
 async function produceMusic(

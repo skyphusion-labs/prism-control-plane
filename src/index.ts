@@ -67,9 +67,10 @@ import {
 } from "./scheduled";
 
 export { SERVICE_NAME };
-// Durable Object class must be exported from the Worker entry (wrangler class_name).
-// Lazy re-export: tests import handleRequest without loading cloudflare:workers.
+// Durable Object + Workflow classes must be exported from the Worker entry
+// (wrangler class_name). Tests alias cloudflare:workers to a stub.
 export { SttSession } from "./stt-session";
+export { PlaneLongRunWorkflow } from "./routes/longrun-workflow";
 
 const REVOKE_CLIENT_PATH = /^\/admin\/clients\/([A-Za-z0-9_-]{1,64})\/revoke$/;
 const CREDIT_PATH = /^\/admin\/accounts\/([A-Za-z0-9_-]{1,64})\/credits$/;
