@@ -44,6 +44,7 @@ import {
   handleMusicGenerations,
   handleVideoGenerations,
 } from "./routes/nonchat";
+import { handleStoreRedeem } from "./routes/store";
 import {
   handleMediaDownload,
   handleMediaIngress,
@@ -168,6 +169,9 @@ export async function handleRequest(ctx: Ctx, request: Request): Promise<Respons
   }
   if (method === "POST" && path === "/v1/music/generations") {
     return await handleMusicGenerations(ctx, request);
+  }
+  if (method === "POST" && path === "/v1/store/redeem") {
+    return await handleStoreRedeem(ctx, request);
   }
 
   if (method === "POST" && path === "/admin/accounts") return await handleCreateAccount(ctx, request);

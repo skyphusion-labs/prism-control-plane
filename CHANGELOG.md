@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.4.15] - 2026-08-06
+
+### Added
+
+- **App Store credit redeem:** `POST /v1/store/redeem` (device key). Accepts StoreKit 2
+  `signed_transaction` JWS; maps `org.skyphusion.prism.credit.{5,20,50}` to prepaid micro-USD;
+  idempotent on `appstore:<transactionId>`. Xcode StoreKit Configuration redeems without extra
+  config; set `STORE_REDEEM_TRUST_DECODE=true` only for lab field-only tests.
+- Unparks CONTRACT open decision #1 for **credit apply after purchase** (enrollment remains
+  operator tokens; this is top-up, not enroll).
+
 ## [0.4.14] - 2026-08-05
 
 ### Fixed

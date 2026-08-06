@@ -487,10 +487,11 @@ exists so the operator can see it in `/v1/usage`.
 These are named rather than defaulted, because each one is a product or money decision that code
 does not get to invent. Status updated 2026-08-05.
 
-1. **Enrollment source of truth.** **DEFERRED** until further control-plane development is done
-   (ruling 2026-08-05). Today: operator-minted one-time tokens only. The enrollment table remains
-   the seam for App Store / Play RTDN, RevenueCat (or similar), or first-party accounts later.
-   Do not build receipt enrollment until this is un-parked.
+1. **Enrollment source of truth.** Enrollment remains **operator-minted one-time tokens** only.
+   **App Store credit top-up is UNPARKED (2026-08-06):** `POST /v1/store/redeem` with StoreKit 2
+   `signed_transaction` grants prepaid credit (product map in `src/store-products.ts`). This does
+   **not** create accounts; it tops up an already-enrolled device's account. Play RTDN / first-party
+   signup remain future work.
 2. **Plan pricing and credit prices.** **DEFERRED** (ruling 2026-08-05). The seeded `dev` plan
    stays provisional. Operators can still upsert via `POST /admin/plans`. Commercial plan numbers,
    credit prices, and margin over Cloudflare rates are unset until un-parked.

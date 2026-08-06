@@ -116,6 +116,13 @@ export interface Env {
    * Default 7. Dry runs use this every tick until a live run establishes a watermark.
    */
   RECONCILE_CRON_INITIAL_LOOKBACK_DAYS?: string;
+
+  /**
+   * When "true", POST /v1/store/redeem accepts decoded JWS without crypto verify, and
+   * field-only {transaction_id, product_id} bodies. For Configuration.storekit / lab only.
+   * Leave unset in production (Xcode environment claims still redeem without this flag).
+   */
+  STORE_REDEEM_TRUST_DECODE?: string;
 }
 
 /** Documented default for UPSTREAM_TIMEOUT_MS: long enough for a slow first token, short enough that
