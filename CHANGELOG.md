@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.4.36] - 2026-08-06
+
+### Fixed
+
+- **Store redeem Production JWS (1.0):** leaf ES256 verify extracts SPKI from the
+  X.509 cert in `x5c[0]` (was incorrectly importing the raw cert as SPKI). Production
+  environment requires successful crypto verify + x5c chain length >= 2. Sandbox no
+  longer trusts decode-only by default; optional `STORE_REDEEM_ALLOW_SANDBOX_TRUST=true`
+  for lab only. `STORE_REDEEM_TRUST_DECODE` never applies to Production claims.
+
 ## [0.4.35] - 2026-08-06
 
 ### Fixed

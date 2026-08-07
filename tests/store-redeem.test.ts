@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { decodeAppleTransactionJws, isXcodeStoreEnvironment } from "../src/apple-jws";
+import {
+  decodeAppleTransactionJws,
+  isProductionStoreEnvironment,
+  isSandboxStoreEnvironment,
+  isXcodeStoreEnvironment,
+  jwsHasCertChain,
+  spkiFromX509Der,
+  tryVerifyJwsEs256,
+} from "../src/apple-jws";
 import {
   creditMicroUsdForProduct,
   isKnownStoreProduct,
@@ -11,8 +19,14 @@ function b64url(obj: unknown): string {
   return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-function fakeJws(payload: Record<string, unknown>): string {
-  return `${b64url({ alg: "ES256", typ: "JWT" })}.${b64url(payload)}.${b64url({ sig: "x" })}`;
+function b64urlBytes(bytes: Uint8Array): string {
+  let s = "";
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function fakeJws(payload: Record<string, unknown>, header: Record<string, unknown> = {}): string {
+  return `${b64url({ alg: "ES256", typ: "JWT", ...header })}.${b64url(payload)}.${b64urlBytes(new Uint8Array(64))}`;
 }
 
 describe("store products", () => {
@@ -51,6 +65,35 @@ describe("apple JWS decode", () => {
   it("detects Xcode store environment", () => {
     expect(isXcodeStoreEnvironment("Xcode")).toBe(true);
     expect(isXcodeStoreEnvironment("Sandbox")).toBe(false);
+  });
+
+  it("classifies Production vs Sandbox", () => {
+    expect(isProductionStoreEnvironment("Production")).toBe(true);
+    expect(isSandboxStoreEnvironment("Sandbox")).toBe(true);
+    expect(isProductionStoreEnvironment("Sandbox")).toBe(false);
+  });
+
+  it("requires x5c chain shape for jwsHasCertChain", () => {
+    const noChain = fakeJws({ transactionId: "1", productId: "p", bundleId: "b" });
+    expect(jwsHasCertChain(noChain)).toBe(false);
+    const withChain = fakeJws(
+      { transactionId: "1", productId: "p", bundleId: "b" },
+      { x5c: ["YQ==", "Yg=="] },
+    );
+    expect(jwsHasCertChain(withChain)).toBe(true);
+  });
+
+  it("tryVerifyJwsEs256 returns null without x5c", async () => {
+    const jws = fakeJws({
+      transactionId: "1",
+      productId: "org.skyphusion.prism.credit.5",
+      bundleId: "org.skyphusion.prism",
+    });
+    expect(await tryVerifyJwsEs256(jws)).toBeNull();
+  });
+
+  it("spkiFromX509Der rejects garbage", () => {
+    expect(spkiFromX509Der(new Uint8Array([1, 2, 3]))).toBeNull();
   });
 });
 
