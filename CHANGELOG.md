@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+## [0.4.35] - 2026-08-06
+
+### Fixed
+
+- **FLUX-2 image gen 5006 multipart:** FLUX-2 (dev / klein-4b / klein-9b) requires
+  `{ multipart: { body, contentType } }` on `env.AI.run`. Plane was POSTing JSON via
+  REST → AiError "required properties at '/' are 'multipart'". Now binding path with
+  FormData (same as prism playground), gateway bypassed (stream in unsupported).
+- **Phoenix / Dreamshaper / SDXL empty image:** these return PNG `ReadableStream`;
+  AI Gateway cannot proxy stream out. Binding bypass + drain stream into `{ image: b64 }`.
+- **Imagen-4 7003 User Input Error:** schema is `prompt` + `aspect_ratio` (not nano-banana
+  `output_format`). Additional properties rejected.
+- **Aura-2 Spanish default voice:** default was `luna` (EN-only enum); ES defaults to
+  `sirio`. Explicit client voice still wins.
+- **Nova empty transcript → 502:** silent clips now return `200` + `text: ""` when the
+  provider envelope is present but empty (not upstream_error).
+- **gpt-image-2 mobile timeout:** auto-async Workflow (`kind: image`) for gpt-image-2
+  (and any image request with Prefer: respond-async); poll `GET /v1/jobs/{id}` for
+  `result.data[].url`.
+
 ## [0.4.34] - 2026-08-06
 
 ### Added

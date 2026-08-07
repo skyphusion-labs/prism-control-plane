@@ -105,6 +105,31 @@ export function nonChatRunnerFor(deps: NonChatRunnerDeps): NonChatRunner {
         modality: entry.modality,
       };
 
+      // FLUX-2 needs multipart in; Phoenix/Dreamshaper/SDXL stream PNG out.
+      // AI Gateway cannot proxy either (5006 / "ReadableStreams not supported").
+      // Mirror prism playground: env.AI.run without gateway for these only.
+      if (
+        normalized.modality === "image" &&
+        isBindingOnlyImageModel(normalized.upstreamModel)
+      ) {
+        if (!deps.ai) {
+          return {
+            outcome: "unavailable",
+            detail:
+              "This image model requires the Worker AI binding (multipart/stream path). " +
+              "Add [ai] binding = \"AI\" to wrangler config.",
+          };
+        }
+        const params = isFlux2Model(normalized.upstreamModel)
+          ? toFlux2MultipartParams(normalized.params)
+          : normalized.params;
+        return runViaBinding(
+          deps,
+          { ...normalized, params },
+          { bypassGateway: true },
+        );
+      }
+
       if (isCfModel(normalized.upstreamModel)) {
         return runViaRest(doFetch, deps, normalized);
       }
@@ -117,6 +142,60 @@ export function nonChatRunnerFor(deps: NonChatRunnerDeps): NonChatRunner {
         };
       }
       return runViaBinding(deps, normalized);
+    },
+  };
+}
+
+/** FLUX.2 family: multipart form input (prompt + optional input_image_0..3). */
+export function isFlux2Model(modelId: string): boolean {
+  return modelId.startsWith("@cf/black-forest-labs/flux-2");
+}
+
+/**
+ * Image models that must call `env.AI.run` without the AI Gateway option.
+ * Gateway cannot proxy multipart request streams or PNG response streams.
+ */
+export function isBindingOnlyImageModel(modelId: string): boolean {
+  return (
+    isFlux2Model(modelId) ||
+    modelId === "@cf/leonardo/phoenix-1.0" ||
+    modelId === "@cf/lykon/dreamshaper-8-lcm" ||
+    modelId === "@cf/stabilityai/stable-diffusion-xl-base-1.0"
+  );
+}
+
+/**
+ * Build FLUX.2 `{ multipart: { body, contentType } }` for `env.AI.run`.
+ * Accepts the same fields as {@link buildImageParams} (prompt, width, height, input_image_*).
+ */
+export function toFlux2MultipartParams(
+  params: Record<string, unknown>,
+): { multipart: { body: ReadableStream<Uint8Array>; contentType: string } } {
+  const form = new FormData();
+  const prompt = typeof params.prompt === "string" ? params.prompt : "";
+  form.append("prompt", prompt);
+  form.append("width", String(typeof params.width === "number" ? params.width : 1024));
+  form.append("height", String(typeof params.height === "number" ? params.height : 1024));
+  for (let i = 0; i < 4; i++) {
+    const key = `input_image_${i}`;
+    const v = params[key];
+    if (typeof v !== "string" || !v.length) continue;
+    const b64 = stripDataUrlToBase64(v);
+    try {
+      const bytes = base64ToBytes(b64);
+      // Copy into a plain ArrayBuffer-backed Uint8Array for Blob (SharedArrayBuffer-safe).
+      const copy = new Uint8Array(bytes.byteLength);
+      copy.set(bytes);
+      form.append(key, new Blob([copy], { type: "image/png" }), `ref-${i}.png`);
+    } catch {
+      /* skip bad ref */
+    }
+  }
+  const formResponse = new Response(form);
+  return {
+    multipart: {
+      body: formResponse.body as ReadableStream<Uint8Array>,
+      contentType: formResponse.headers.get("content-type") ?? "multipart/form-data",
     },
   };
 }
@@ -201,7 +280,7 @@ async function runViaRest(
         ? (body as { result: unknown }).result
         : body;
     // Binding-shaped result may still be binary-in-JSON or a nested audio field.
-    const normalized = await normalizeNonChatBody(unwrapped);
+    const normalized = await normalizeNonChatBody(unwrapped, request.modality);
     return { outcome: "ok", body: normalized, gatewayLogId: logId, contentType };
   } catch (err) {
     clearTimeout(timer);
@@ -218,26 +297,29 @@ async function runViaRest(
 async function runViaBinding(
   deps: NonChatRunnerDeps,
   request: NonChatRunRequest,
+  opts?: { bypassGateway?: boolean },
 ): Promise<NonChatRunResult> {
   const ai = deps.ai!;
   try {
     // Workers AI binding: gateway option routes through prism-proxy for logs.
+    // bypassGateway: multipart/stream models (FLUX-2, Phoenix, SDXL) -- gateway
+    // cannot proxy ReadableStreams (same lesson as prism playground image path).
     type RunFn = (
       model: string,
       params: unknown,
       opts?: { gateway?: { id: string }; returnRawResponse?: boolean },
     ) => Promise<unknown>;
+    const runOpts = opts?.bypassGateway ? undefined : { gateway: { id: deps.gatewayId } };
     const result = await Promise.race([
-      (ai as unknown as { run: RunFn }).run(request.upstreamModel, request.params, {
-        gateway: { id: deps.gatewayId },
-      }),
+      (ai as unknown as { run: RunFn }).run(request.upstreamModel, request.params, runOpts),
       new Promise<never>((_, reject) => {
         setTimeout(() => reject(Object.assign(new Error("timeout"), { name: "TimeoutError" })), deps.timeoutMs);
       }),
     ]);
-    const logId =
-      (ai as unknown as { aiGatewayLogId?: string }).aiGatewayLogId ?? null;
-    const body = await normalizeNonChatBody(result);
+    const logId = opts?.bypassGateway
+      ? null
+      : ((ai as unknown as { aiGatewayLogId?: string }).aiGatewayLogId ?? null);
+    const body = await normalizeNonChatBody(result, request.modality);
     return { outcome: "ok", body, gatewayLogId: logId, contentType: null };
   } catch (err) {
     const aborted = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
@@ -260,22 +342,59 @@ function contentTypeLooksBinaryAudio(contentType: string | null): boolean {
   );
 }
 
-/** Convert binary TTS (stream / buffer) into `{ audio: base64 }` for extractAudioBase64. */
-async function normalizeNonChatBody(body: unknown): Promise<unknown> {
+/**
+ * Convert binary binding results into JSON-shaped bodies for extractors.
+ * Image streams (Phoenix/Dreamshaper/SDXL) become `{ image: base64 }`;
+ * TTS streams become `{ audio: base64 }`. When modality is unknown, sniff
+ * PNG/JPEG magic so image bytes are never mis-filed as audio.
+ */
+async function normalizeNonChatBody(
+  body: unknown,
+  modality?: Modality,
+): Promise<unknown> {
   if (body == null) return body;
   if (body instanceof ArrayBuffer) {
-    return { audio: bytesToBase64(new Uint8Array(body)) };
+    return binaryToField(new Uint8Array(body), modality);
   }
   if (body instanceof Uint8Array) {
-    return { audio: bytesToBase64(body) };
+    return binaryToField(body, modality);
   }
-  // Workers AI Aura binding returns ReadableStream of MPEG bytes.
+  // Workers AI: Aura returns MPEG stream; Phoenix/SDXL return PNG stream.
   if (typeof ReadableStream !== "undefined" && body instanceof ReadableStream) {
     const buf = await streamToUint8Array(body as ReadableStream<Uint8Array>);
     if (buf.byteLength === 0) return body;
-    return { audio: bytesToBase64(buf) };
+    return binaryToField(buf, modality);
   }
   return body;
+}
+
+function binaryToField(u8: Uint8Array, modality?: Modality): Record<string, string> {
+  const asImage =
+    modality === "image" || (modality !== "tts" && modality !== "music" && looksLikeImageBytes(u8));
+  return asImage ? { image: bytesToBase64(u8) } : { audio: bytesToBase64(u8) };
+}
+
+function looksLikeImageBytes(u8: Uint8Array): boolean {
+  if (u8.byteLength < 4) return false;
+  // PNG
+  if (u8[0] === 0x89 && u8[1] === 0x50 && u8[2] === 0x4e && u8[3] === 0x47) return true;
+  // JPEG
+  if (u8[0] === 0xff && u8[1] === 0xd8 && u8[2] === 0xff) return true;
+  // WebP (RIFF....WEBP)
+  if (
+    u8.byteLength >= 12 &&
+    u8[0] === 0x52 &&
+    u8[1] === 0x49 &&
+    u8[2] === 0x46 &&
+    u8[3] === 0x46 &&
+    u8[8] === 0x57 &&
+    u8[9] === 0x45 &&
+    u8[10] === 0x42 &&
+    u8[11] === 0x50
+  ) {
+    return true;
+  }
+  return false;
 }
 
 function bytesToBase64(u8: Uint8Array): string {
@@ -351,14 +470,15 @@ export function buildImageParams(
     return { prompt, width: 512, height: 512, steps: 4 };
   }
   if (modelId.startsWith("@cf/black-forest-labs/flux-2")) {
-    // Multi-reference family: CF schema is input_image_0..3 (binary / base64).
-    // Full multi-ref wants multipart (prism playground path); single ref via JSON is best-effort.
+    // Multi-reference family: CF requires multipart at run time (toFlux2MultipartParams).
+    // Params here stay JSON-shaped so tests + callers can set input_image_*; the runner
+    // converts to FormData before env.AI.run.
     const body: Record<string, unknown> = { prompt, width: 1024, height: 1024 };
     if (image) body.input_image_0 = stripDataUrlToBase64(image);
     return body;
   }
   if (modelId === "@cf/stabilityai/stable-diffusion-xl-base-1.0") {
-    // Pure t2i; no image-input on this binding.
+    // Pure t2i; step field is num_steps (max 20), not steps.
     return { prompt, width: 1024, height: 1024, num_steps: 20 };
   }
   if (modelId.startsWith("@cf/")) {
@@ -366,6 +486,11 @@ export function buildImageParams(
     return { prompt, width: 1024, height: 1024, steps: 25 };
   }
   // Unified Billing providers (mirror prism proxied-image-params + CF image_input shapes)
+  // Imagen-4 schema is NOT nano-banana: prompt + aspect_ratio (+ person_generation).
+  // output_format is additionalProperties:false → CF 7003 User Input Error (matrix smoke).
+  if (modelId === "google/imagen-4" || modelId.startsWith("google/imagen")) {
+    return { prompt, aspect_ratio: "1:1" };
+  }
   if (modelId.startsWith("google/")) {
     const body: Record<string, unknown> = { prompt, output_format: "png" };
     // nano-banana family: image_input[] for reference images
@@ -395,6 +520,17 @@ export function buildImageParams(
 }
 
 /**
+ * Default Aura speaker when the client omits voice.
+ * English: luna. Spanish (aura-2-es): sirio (luna is not in the ES enum → 5006).
+ */
+export function defaultTtsVoice(modelId: string): string {
+  if (modelId.includes("aura-2-es") || modelId.endsWith("/aura-2-es")) {
+    return "sirio";
+  }
+  return "luna";
+}
+
+/**
  * TTS body for Workers AI / Deepgram Aura and MeloTTS.
  *
  * Aura-2 rejects requests without a voice (runtime: "Must provide a voice parameter").
@@ -410,11 +546,11 @@ export function buildTtsParams(
   if (modelId.includes("melotts")) {
     return { prompt: text, lang: "en" };
   }
-  // Deepgram aura-1 / aura-2
+  // Deepgram aura-1 / aura-2 — locale-aware default (ES cannot use luna).
   const speaker =
     typeof opts?.voice === "string" && opts.voice.trim()
       ? opts.voice.trim().toLowerCase()
-      : "luna";
+      : defaultTtsVoice(modelId);
   return {
     text,
     speaker,
@@ -813,21 +949,28 @@ export function extractAudioBase64(body: unknown): string | null {
   return null;
 }
 
+/**
+ * Extract transcript text. Empty string is a valid silent result (do not 502).
+ * Returns null only when no transcript field exists in the provider envelope.
+ */
 export function extractTranscript(body: unknown): string | null {
   if (typeof body !== "object" || body === null) return null;
   const r = body as Record<string, unknown>;
-  if (typeof r.text === "string" && r.text.length > 0) return r.text;
-  if (typeof r.transcript === "string" && r.transcript.length > 0) return r.transcript;
-  // Deepgram Nova native envelope
+  if (typeof r.text === "string") return r.text;
+  if (typeof r.transcript === "string") return r.transcript;
+  // Deepgram Nova native envelope (empty transcript → "")
   const dg = extractDeepgramTranscript(body);
-  if (dg) return dg;
+  if (dg !== null) return dg;
   if (typeof r.result === "object" && r.result !== null) {
     return extractTranscript(r.result);
   }
-  return typeof r.response === "string" && r.response.length > 0 ? r.response : null;
+  return typeof r.response === "string" ? r.response : null;
 }
 
-/** Deepgram results.channels[0].alternatives[0].transcript (and flat fallbacks). */
+/**
+ * Deepgram results.channels[0].alternatives[0].transcript (and flat fallbacks).
+ * Returns "" when the structure is present but empty (silence); null if absent.
+ */
 export function extractDeepgramTranscript(result: unknown): string | null {
   if (typeof result !== "object" || result === null) return null;
   const r = result as {
@@ -839,12 +982,21 @@ export function extractDeepgramTranscript(result: unknown): string | null {
     transcript?: string;
   };
   const viaChannels = r.results?.channels?.[0]?.alternatives?.[0]?.transcript;
-  if (typeof viaChannels === "string" && viaChannels.trim()) return viaChannels.trim();
+  if (typeof viaChannels === "string") return viaChannels.trim();
   const viaAlternatives = r.results?.alternatives?.[0]?.transcript;
-  if (typeof viaAlternatives === "string" && viaAlternatives.trim()) return viaAlternatives.trim();
-  if (typeof r.transcript === "string" && r.transcript.trim()) return r.transcript.trim();
-  if (typeof r.text === "string" && r.text.trim()) return r.text.trim();
+  if (typeof viaAlternatives === "string") return viaAlternatives.trim();
+  // Structure present with empty alternatives array → silent clip, not missing field.
+  if (r.results && (r.results.channels || r.results.alternatives)) {
+    return "";
+  }
+  if (typeof r.transcript === "string") return r.transcript.trim();
+  if (typeof r.text === "string") return r.text.trim();
   return null;
+}
+
+/** Models that routinely exceed mobile sync budgets; prefer Workflow async. */
+export function prefersAsyncImage(modelId: string): boolean {
+  return modelId === "openai/gpt-image-2";
 }
 
 /**

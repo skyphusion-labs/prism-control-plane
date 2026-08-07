@@ -97,4 +97,24 @@ describe("extractDeepgramTranscript", () => {
     ).toBe("hello");
     expect(extractTranscript({ text: "from whisper" })).toBe("from whisper");
   });
+
+  it("returns empty string for silent Deepgram (not null)", () => {
+    expect(
+      extractDeepgramTranscript({
+        results: { channels: [{ alternatives: [{ transcript: "" }] }] },
+      }),
+    ).toBe("");
+    expect(
+      extractDeepgramTranscript({
+        results: { channels: [{ alternatives: [] }] },
+      }),
+    ).toBe("");
+    // Missing envelope still null so the handler can 502 only when structure is wrong.
+    expect(extractDeepgramTranscript({ state: "Completed" })).toBeNull();
+  });
+
+  it("extractTranscript allows empty text field", () => {
+    expect(extractTranscript({ text: "" })).toBe("");
+    expect(extractTranscript({ result: { text: "" } })).toBe("");
+  });
 });

@@ -387,11 +387,12 @@ export interface ControlPlaneStore {
 /** Status for long-run video/music jobs (mobile poll). */
 export type AsyncJobStatus = "queued" | "running" | "succeeded" | "failed";
 
-export type AsyncJobKind = "video" | "music" | "speech";
+export type AsyncJobKind = "video" | "music" | "speech" | "image";
 
 /**
- * One long-run job. `result_json` is JSON like `{ "video": "https://..." }` or
- * `{ "audio": "https://..." }` — never prompts or lyrics (privacy).
+ * One long-run job. `result_json` is JSON like `{ "video": "https://..." }`,
+ * `{ "audio": "https://..." }`, or image `{ "data": [{ "url": "..." }] }` —
+ * never prompts or lyrics (privacy).
  */
 export interface AsyncJobRow {
   id: string;
