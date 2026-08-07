@@ -259,6 +259,48 @@ describe("bindingChatBody", () => {
       messages: [{ role: "user", content: "hi" }],
     });
   });
+
+  it("builds Gemini-native contents shape (not OpenAI messages)", () => {
+    const body = bindingChatBody(
+      request({
+        bindingModel: "google/gemini-3.1-pro",
+        messages: [
+          { role: "system", content: "be brief" },
+          { role: "user", content: "Say hi" },
+          { role: "assistant", content: "Hello" },
+          { role: "user", content: "again" },
+        ],
+        maxTokens: 64,
+        temperature: 0.2,
+        stream: true,
+      }),
+    );
+    expect(body).toMatchObject({
+      systemInstruction: { parts: [{ text: "be brief" }] },
+      // Floor 256 so short client max_tokens still leave room for thought + answer.
+      generationConfig: { maxOutputTokens: 256, temperature: 0.2 },
+      contents: [
+        { role: "user", parts: [{ text: "Say hi" }] },
+        { role: "model", parts: [{ text: "Hello" }] },
+        { role: "user", parts: [{ text: "again" }] },
+      ],
+    });
+    // Must not send OpenAI chat fields (gateway 502 root cause for Gemini).
+    expect(body).not.toHaveProperty("messages");
+    expect(body).not.toHaveProperty("max_completion_tokens");
+    expect(body).not.toHaveProperty("stream");
+  });
+
+  it("honors Gemini max_tokens above the 256 floor", () => {
+    const body = bindingChatBody(
+      request({
+        bindingModel: "google/gemini-3.6-flash",
+        messages: [{ role: "user", content: "hi" }],
+        maxTokens: 1024,
+      }),
+    );
+    expect(body.generationConfig).toMatchObject({ maxOutputTokens: 1024 });
+  });
 });
 
 describe("runnerFor binding path", () => {

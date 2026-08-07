@@ -447,14 +447,31 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
   if (text === null) {
     // A successful-looking response with no extractable content is an upstream failure, not an empty
     // completion. Returning "" would make a provider problem look like a model that chose to say nothing.
+    const bodyKeys =
+      result.body && typeof result.body === "object"
+        ? Object.keys(result.body as object).slice(0, 12)
+        : [];
+    const finish =
+      result.body &&
+      typeof result.body === "object" &&
+      Array.isArray((result.body as { candidates?: unknown }).candidates)
+        ? (
+            (result.body as { candidates: Array<{ finishReason?: string }> }).candidates[0]
+              ?.finishReason ?? null
+          )
+        : null;
     console.error("upstream returned no extractable text", {
       requestId: ctx.requestId,
       model: model.id,
+      bodyKeys,
+      finishReason: finish,
     });
     return errorResponse(
       ctx.requestId,
       "upstream_error",
-      "The model returned a response this plane could not read as text.",
+      finish
+        ? `The model returned no text (finishReason=${finish}).`
+        : "The model returned a response this plane could not read as text.",
     );
   }
 

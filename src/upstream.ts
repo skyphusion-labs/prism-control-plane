@@ -155,6 +155,8 @@ export function outputTokenField(upstreamModel: string): "max_tokens" | "max_com
  * Body for env.AI.run on binding-dispatch chat models.
  *
  * Anthropic binding expects Messages API shape (system top-level, content blocks).
+ * Gemini binding expects native `contents` / `systemInstruction` / `generationConfig`
+ * (NOT OpenAI messages -- that yields gateway 502 "model or gateway failed").
  * Grok / OpenAI-shaped bindings take Chat Completions (messages + max_completion_tokens).
  * Model id is the first argument to run(), not a body field.
  */
@@ -166,6 +168,10 @@ export function bindingChatBody(request: InferenceRequest): Record<string, unkno
       ...request,
       upstreamModel: modelId.replace(/^xai\//, "grok/"),
     });
+  }
+  // Gemini-native (mirror prism providers/google.ts). Roles: assistant→model; system hoisted.
+  if (modelId.startsWith("google/gemini") || modelId.startsWith("google-ai-studio/")) {
+    return geminiBindingBody(request);
   }
   if (modelId.startsWith("anthropic/")) {
     const systemParts: string[] = [];
@@ -233,6 +239,87 @@ export function bindingChatBody(request: InferenceRequest): Record<string, unkno
   if (request.temperature !== undefined) body.temperature = request.temperature;
   if (request.topP !== undefined) body.top_p = request.topP;
   return body;
+}
+
+/**
+ * Gemini-native body for env.AI.run("google/gemini-*", …).
+ * Verified shape (prism + CF model pages): contents[].parts[].text, systemInstruction, generationConfig.
+ * Do not send OpenAI messages / max_completion_tokens -- binding rejects them as bad input / 502.
+ */
+export function geminiBindingBody(request: InferenceRequest): Record<string, unknown> {
+  const systemParts: string[] = [];
+  const contents: Array<{ role: string; parts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> }> = [];
+  for (const m of request.messages) {
+    if (m.role === "system") {
+      if (m.content.trim()) systemParts.push(m.content);
+      continue;
+    }
+    if (m.role !== "user" && m.role !== "assistant") continue;
+    const role = m.role === "assistant" ? "model" : "user";
+    const parts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = [];
+    for (const url of m.images ?? []) {
+      const inline = geminiInlineImage(url);
+      if (inline) parts.push(inline);
+    }
+    if (m.content.trim() || parts.length === 0) {
+      parts.push({ text: m.content || " " });
+    }
+    // Gemini also wants alternation; merge consecutive same-role turns.
+    const prev = contents[contents.length - 1];
+    if (prev && prev.role === role) {
+      for (const p of parts) {
+        if ("text" in p) {
+          const lastText = [...prev.parts].reverse().find((x) => "text" in x) as
+            | { text: string }
+            | undefined;
+          if (lastText) {
+            lastText.text = lastText.text ? `${lastText.text}\n\n${p.text}` : p.text;
+            continue;
+          }
+        }
+        prev.parts.push(p);
+      }
+      continue;
+    }
+    contents.push({ role, parts });
+  }
+  // Leading model turns are invalid; drop.
+  while (contents.length > 0 && contents[0].role === "model") contents.shift();
+
+  // Gemini 3.x spends a large share of the output budget on thought tokens. Clients that
+  // send max_tokens: 16–32 (matrix smoke, short probes) get finishReason=MAX_TOKENS with
+  // empty answer text and look like plane 502s. Floor the binding budget so short requests
+  // still produce a visible reply; meter still uses returned usageMetadata.
+  const GEMINI_MIN_OUTPUT_TOKENS = 256;
+  const generationConfig: Record<string, unknown> = {
+    maxOutputTokens: Math.max(request.maxTokens, GEMINI_MIN_OUTPUT_TOKENS),
+  };
+  if (request.temperature !== undefined) generationConfig.temperature = request.temperature;
+  if (request.topP !== undefined) generationConfig.topP = request.topP;
+
+  const body: Record<string, unknown> = {
+    contents,
+    generationConfig,
+  };
+  if (systemParts.length) {
+    body.systemInstruction = { parts: [{ text: systemParts.join("\n\n") }] };
+  }
+  // stream:true on Gemini returns Gemini SSE, not OpenAI; non-stream is buffered into SSE
+  // by runViaBinding (same posture as Anthropic). Never set stream on the binding body.
+  return body;
+}
+
+function geminiInlineImage(
+  url: string,
+): { inlineData: { mimeType: string; data: string } } | null {
+  const m = /^data:(image\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)$/i.exec(url);
+  if (!m) return null;
+  return {
+    inlineData: {
+      mimeType: m[1].toLowerCase(),
+      data: m[2].replace(/\s+/g, ""),
+    },
+  };
 }
 
 function toOpenAIMessage(m: {
@@ -318,14 +405,21 @@ async function runViaBinding(
   // is the path that reliably returns text. Return an SSE Response **immediately** (open chunk
   // + keepalives), run non-stream inside the stream, then emit text. Awaiting AI.run before
   // Response left mobile clients with no first-byte for the whole think window → Empty stream.
-  const anthropicBufferedStream =
-    request.stream === true && bindingModel.startsWith("anthropic/");
+  // Native-provider streams (Anthropic Messages SSE, Gemini SSE) are not OpenAI chat SSE.
+  // Buffer non-stream AI.run, then emit OpenAI-shaped SSE (same path as Fable).
+  const bufferedNativeStream =
+    request.stream === true &&
+    (bindingModel.startsWith("anthropic/") ||
+      bindingModel.startsWith("google/gemini") ||
+      bindingModel.startsWith("google-ai-studio/"));
   // Fable thinking regularly exceeds the 60s chat default; cap at plane max (180s).
-  const timeoutMs = bindingModel.startsWith("anthropic/")
-    ? Math.max(deps.timeoutMs, 180_000)
-    : deps.timeoutMs;
+  // Gemini Pro can also think for a long window.
+  const timeoutMs =
+    bindingModel.startsWith("anthropic/") || bindingModel.startsWith("google/")
+      ? Math.max(deps.timeoutMs, 180_000)
+      : deps.timeoutMs;
 
-  if (anthropicBufferedStream) {
+  if (bufferedNativeStream) {
     const nonStreamReq: InferenceRequest = { ...request, stream: false };
     const stream = openAIStreamFromDeferredCompletion({
       model: bindingModel,
@@ -344,7 +438,9 @@ async function runViaBinding(
         ]);
         const text = extractText(result);
         if (text === null) {
-          throw new Error("Anthropic binding returned no extractable text");
+          throw new Error(
+            `${bindingModel.startsWith("google/") ? "Gemini" : "Anthropic"} binding returned no extractable text`,
+          );
         }
         const usage = extractUsage(result);
         return {

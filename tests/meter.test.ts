@@ -130,3 +130,14 @@ describe("meterResponse", () => {
     }
   });
 });
+
+describe("extractUsage Gemini usageMetadata", () => {
+  it("reads promptTokenCount / candidatesTokenCount", () => {
+    expect(
+      extractUsage({
+        candidates: [{ content: { parts: [{ text: "hi" }] } }],
+        usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 2 },
+      }),
+    ).toEqual({ inputTokens: 3, outputTokens: 2 });
+  });
+});

@@ -18,6 +18,11 @@
   `sirio`. Explicit client voice still wins.
 - **Nova empty transcript → 502:** silent clips now return `200` + `text: ""` when the
   provider envelope is present but empty (not upstream_error).
+- **Gemini 3.x thought budget:** floor `maxOutputTokens` at 256 in the binding body so
+  short client `max_tokens` (16–32) do not finish with empty answer (MAX_TOKENS).
+- **Gemini chat 502:** binding sent OpenAI `messages`/`max_completion_tokens`; Gemini needs
+  native `contents` / `systemInstruction` / `generationConfig` (assistant→model). Stream path
+  buffers non-stream like Anthropic and emits OpenAI SSE. Meter reads `usageMetadata`.
 - **gpt-image-2 mobile timeout:** auto-async Workflow (`kind: image`) for gpt-image-2
   (and any image request with Prefer: respond-async); poll `GET /v1/jobs/{id}` for
   `result.data[].url`.
