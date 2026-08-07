@@ -10,16 +10,24 @@
 //
 // A GREEN GATE THAT CANNOT GO RED IS NOT A GATE. That is why /health/deep returns 503 on failure rather
 // than 200 with an `ok: false` body: a monitor watching status codes must be able to see this fail.
+//
+// BOTH carry `version`, and it is on the LIVENESS probe deliberately. "Which code is serving?" is a
+// question about the deploy, not about the bindings, so answering it should not require the readiness
+// probe's D1 round-trip -- and /health/deep can answer 503 for reasons that have nothing to do with
+// which build is running, which is exactly the moment you most want to know. The value comes from
+// src/version.ts, which is pinned to package.json by a test that DERIVES the expected string rather
+// than transcribing it. See fleet-chezmoi#1641.
 
 import { CATALOG } from "../catalog";
 import { gatewayConfig, perUserModeRequested } from "../env";
 import { jsonResponse } from "../http";
+import { VERSION } from "../version";
 import type { Ctx } from "./shared";
 
 export const SERVICE_NAME = "prism-control-plane";
 
 export function handleHealth(ctx: Ctx): Response {
-  return jsonResponse(ctx.requestId, { ok: true, service: SERVICE_NAME });
+  return jsonResponse(ctx.requestId, { ok: true, service: SERVICE_NAME, version: VERSION });
 }
 
 interface Check {
@@ -91,7 +99,7 @@ export async function handleDeepHealth(ctx: Ctx): Promise<Response> {
   const ok = checks.every((check) => check.ok);
   return jsonResponse(
     ctx.requestId,
-    { ok, service: SERVICE_NAME, checks },
+    { ok, service: SERVICE_NAME, version: VERSION, checks },
     { status: ok ? 200 : 503 },
   );
 }
