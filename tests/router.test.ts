@@ -13,6 +13,7 @@ import type { Env } from "../src/env";
 import type { InferenceRequest, InferenceResult, InferenceRunner } from "../src/inference";
 import type { CredentialOutcome, UpstreamCredentialSource } from "../src/token-minter";
 import type { Ctx } from "../src/routes/shared";
+import { VERSION } from "../src/version";
 import { FakeLogSource, logRow } from "./fake-gateway-logs";
 import { FakeStore, testPlan } from "./fake-store";
 
@@ -191,7 +192,15 @@ describe("health", () => {
     h.store.probeFails = true;
     const response = await handleRequest(h.ctx, get("/health"));
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ ok: true, service: "prism-control-plane" });
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      service: "prism-control-plane",
+      // Version is on the LIVENESS probe deliberately: "which code is serving?" is a question
+      // about the deploy, not about the bindings, and it must stay answerable while readiness
+      // is 503. Compared against VERSION rather than a typed literal, so this cannot become a
+      // second copy to forget at release time.
+      version: VERSION,
+    });
   });
 
   it("answers readiness 503 when the schema probe fails", async () => {
@@ -200,6 +209,10 @@ describe("health", () => {
     const response = await handleRequest(h.ctx, get("/health/deep"));
     // 503, not 200-with-ok-false: a monitor watching status codes must be able to see this fail.
     expect(response.status).toBe(503);
+    // The build identifier has to survive the failing path. A readiness probe answers 503 for
+    // reasons that have nothing to do with which build is running, and that is exactly the
+    // moment an operator needs to know which build it is.
+    expect(await response.json()).toMatchObject({ service: "prism-control-plane", version: VERSION });
   });
 
   it("answers readiness 503 when no gateway is configured", async () => {
