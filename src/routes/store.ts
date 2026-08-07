@@ -10,8 +10,7 @@ import {
   isProductionStoreEnvironment,
   isSandboxStoreEnvironment,
   isXcodeStoreEnvironment,
-  jwsHasCertChain,
-  tryVerifyJwsEs256,
+  verifyAppleTransactionJws,
 } from "../apple-jws";
 import {
   APPLE_BUNDLE_ID,
@@ -30,10 +29,10 @@ function trustDecode(env: { STORE_REDEEM_TRUST_DECODE?: string }): boolean {
 }
 
 /**
- * Optional: allow Sandbox (TestFlight) JWS after decode when leaf ES256 verify
- * cannot run. Default OFF for 1.0 production posture. Prefer successful
- * tryVerifyJwsEs256 (fixed SPKI-from-X509 path). Set
- * STORE_REDEEM_ALLOW_SANDBOX_TRUST=true only if sandbox verify fails on a deploy.
+ * Optional: allow Sandbox (TestFlight) JWS after decode when full chain
+ * verification cannot run. Default OFF for 1.0 production posture. Prefer a
+ * successful verifyAppleTransactionJws. Set STORE_REDEEM_ALLOW_SANDBOX_TRUST=true
+ * only if sandbox verification fails on a deploy. It has no effect on Production.
  */
 function allowSandboxTrust(env: { STORE_REDEEM_ALLOW_SANDBOX_TRUST?: string }): boolean {
   return (env.STORE_REDEEM_ALLOW_SANDBOX_TRUST ?? "").trim().toLowerCase() === "true";
@@ -75,18 +74,12 @@ export async function handleStoreRedeem(ctx: Ctx, request: Request): Promise<Res
     bundleId = decoded.bundleId;
     environment = decoded.environment;
 
-    // Production MUST pass leaf ES256 verify (SPKI extracted from x5c leaf).
-    // Xcode: decode-only. Sandbox: verify preferred; optional lab trust flag.
-    const cryptoOk = await tryVerifyJwsEs256(signed);
-    if (cryptoOk === true) {
-      // Prefer chain shape for Production (leaf + intermediate).
-      if (isProductionStoreEnvironment(environment) && !jwsHasCertChain(signed)) {
-        return errorResponse(
-          ctx.requestId,
-          "invalid_request",
-          "Production signed_transaction is missing the Apple certificate chain (x5c).",
-        );
-      }
+    // The only accepting branch is a JWS whose certificate chain terminates at the
+    // pinned Apple Root CA G3 (see src/apple-jws.ts). Everything below it is a lab
+    // path selected by the environment claim, and no lab path is reachable when the
+    // environment is Production.
+    const verdict = await verifyAppleTransactionJws(signed);
+    if (verdict.ok) {
       verified = "jws";
     } else if (isXcodeStoreEnvironment(environment)) {
       // Local Configuration.storekit: non-Apple test chain; accept after decode.
@@ -96,25 +89,20 @@ export async function handleStoreRedeem(ctx: Ctx, request: Request): Promise<Res
     } else if (trustDecode(ctx.env) && !isProductionStoreEnvironment(environment)) {
       // Lab trust_decode never applies to Production environment claims.
       verified = "trust_decode";
-    } else if (cryptoOk === false) {
-      return errorResponse(
-        ctx.requestId,
-        "invalid_request",
-        "signed_transaction signature verification failed.",
-      );
     } else if (isProductionStoreEnvironment(environment)) {
       return errorResponse(
         ctx.requestId,
         "invalid_request",
-        "Could not verify Production signed_transaction (leaf ES256). " +
-          "Production never accepts trust_decode.",
+        "Production signed_transaction did not verify against the pinned Apple root " +
+          `(${verdict.reason}). Production never accepts trust_decode.`,
       );
     } else {
       return errorResponse(
         ctx.requestId,
         "invalid_request",
-        "Could not verify signed_transaction. Sandbox: ensure StoreKit JWS verifies, " +
-          "or set STORE_REDEEM_ALLOW_SANDBOX_TRUST=true only for lab. " +
+        `signed_transaction did not verify against the pinned Apple root (${verdict.reason}). ` +
+          "Sandbox: ensure the StoreKit JWS carries its full Apple chain, or set " +
+          "STORE_REDEEM_ALLOW_SANDBOX_TRUST=true for lab only. " +
           "Xcode Configuration.storekit needs environment Xcode.",
       );
     }

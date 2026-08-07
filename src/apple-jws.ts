@@ -1,16 +1,49 @@
-// Decode + verify App Store / StoreKit 2 signed transaction JWS (compact form).
+// Decode and verify App Store / StoreKit 2 signed transaction JWS (compact form).
 //
-// Production path (1.0):
-//   1. Decode payload (transactionId, productId, bundleId, environment).
-//   2. Extract ECDSA P-256 public key from the leaf cert in header.x5c[0].
-//   3. Verify ES256 signature over header.payload.
-//   4. Optionally require x5c chain length >= 2 (Apple intermediate present).
+// WHAT VERIFICATION MEANS HERE
 //
-// Local Configuration.storekit uses environment "Xcode" and a non-Apple test
-// chain; the plane accepts those after decode only (xcode verified mode).
-// Sandbox TestFlight uses real Apple-signed JWS when verify succeeds; optional
-// STORE_REDEEM_ALLOW_SANDBOX_TRUST for lab decode-only sandbox (off by default
-// for production deploys).
+// A JWS carries its own certificate chain in header.x5c. Verifying the signature
+// with the key from that chain proves only that whoever built the JWS holds the
+// matching private key -- it says nothing about who they are. The identity claim
+// comes entirely from the chain terminating at a root we pinned in advance, so the
+// chain check is the authentication and the signature check is not.
+//
+// Accordingly this module exposes NO function that checks a JWS signature without
+// first validating the chain. That is structural rather than advisory: there is no
+// unsafe primitive left to reach for.
+//
+// THE ACCEPTED SHAPE, which follows Apple's own published verification procedure
+// (apple/app-store-server-library-node, jws_verification.ts):
+//
+//   x5c[0]  leaf         must carry Apple's App Store signing marker extension
+//                        (1.2.840.113635.100.6.11.1), be P-256, and be signed by
+//   x5c[1]  intermediate which must be a CA, carry Apple's WWDR marker extension
+//                        (1.2.840.113635.100.6.2.1), and be signed by
+//           root         the PINNED Apple Root CA G3 in src/apple-root-ca.ts.
+//
+// Any root supplied in x5c is IGNORED. Presenting a root cannot make it trusted;
+// the intermediate is always re-verified against the pinned anchor. Both marker
+// extensions are load-bearing: without the leaf marker, any certificate issued by
+// Apple WWDR -- which includes every Apple Developer Program member's own signing
+// certificate, whose private key that member holds -- would chain to the pinned
+// root and be accepted.
+//
+// Validity windows are checked on all three certificates at the time of the call.
+//
+// Lab paths (Xcode Configuration.storekit, optionally Sandbox) are decided by
+// src/routes/store.ts on the environment claim AFTER this returns a refusal, and
+// are never reachable for environment "Production".
+
+import { APPLE_ROOT_CA_G3_DER_B64 } from "./apple-root-ca";
+import {
+  certValidAt,
+  derEcdsaToP1363,
+  importEcPublicKey,
+  parseCertificate,
+  verifyCertificateSignedBy,
+  verifyEcdsa,
+  type ParsedCertificate,
+} from "./x509";
 
 export interface AppleTransactionPayload {
   transactionId: string;
@@ -25,11 +58,51 @@ export interface AppleTransactionPayload {
   raw: Record<string, unknown>;
 }
 
-function b64urlToBytes(s: string): Uint8Array | null {
+/**
+ * DER of Apple's marker extensions, as lowercase hex of the complete OID TLV.
+ * Verified against the real Apple certificates, with negative controls, in
+ * tests/apple-jws-chain.test.ts.
+ */
+const APPLE_APP_STORE_LEAF_MARKER_OID = "060a2a864886f76364060b01"; // 1.2.840.113635.100.6.11.1
+const APPLE_WWDR_INTERMEDIATE_MARKER_OID = "060a2a864886f76364060201"; // 1.2.840.113635.100.6.2.1
+
+/** Every way the chain check can refuse. Named so a caller can assert WHICH fired. */
+export type AppleJwsRefusal =
+  | "malformed_jws"
+  | "unsupported_alg"
+  | "missing_x5c"
+  | "x5c_too_short"
+  | "leaf_parse_failed"
+  | "intermediate_parse_failed"
+  | "pinned_anchor_unusable"
+  | "intermediate_not_ca"
+  | "intermediate_missing_apple_wwdr_marker"
+  | "leaf_missing_app_store_marker"
+  | "intermediate_not_issued_by_pinned_root"
+  | "leaf_not_issued_by_intermediate"
+  | "certificate_outside_validity_window"
+  | "leaf_key_not_p256"
+  | "signature_malformed"
+  | "signature_invalid";
+
+export type AppleJwsVerdict =
+  | { ok: true }
+  | { ok: false; reason: AppleJwsRefusal };
+
+function b64ToBytes(s: string, urlSafe: boolean): Uint8Array | null {
+  // Reject anything outside the expected alphabet rather than letting the platform
+  // decoder decide. A silent mis-decode here would be indistinguishable from a
+  // genuine signature mismatch.
+  const expected = urlSafe ? /^[A-Za-z0-9_-]*$/ : /^[A-Za-z0-9+/]*={0,2}$/;
+  if (!expected.test(s)) return null;
+  let std = urlSafe ? s.replace(/-/g, "+").replace(/_/g, "/") : s;
+  if (urlSafe) {
+    const rem = std.length % 4;
+    if (rem === 1) return null;
+    if (rem !== 0) std += "=".repeat(4 - rem);
+  }
   try {
-    const pad = s.length % 4 === 0 ? "" : "=".repeat(4 - (s.length % 4));
-    const b64 = s.replace(/-/g, "+").replace(/\//g, "_") + pad;
-    const bin = atob(b64);
+    const bin = atob(std);
     const out = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
     return out;
@@ -38,12 +111,16 @@ function b64urlToBytes(s: string): Uint8Array | null {
   }
 }
 
+/** Decode a base64url segment of a JWS. */
+function b64urlToBytes(s: string): Uint8Array | null {
+  return b64ToBytes(s, true);
+}
+
 function b64urlToJson(s: string): Record<string, unknown> | null {
   const bytes = b64urlToBytes(s);
   if (!bytes) return null;
   try {
-    const text = new TextDecoder().decode(bytes);
-    const v = JSON.parse(text) as unknown;
+    const v = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
     if (typeof v !== "object" || v === null || Array.isArray(v)) return null;
     return v as Record<string, unknown>;
   } catch {
@@ -52,39 +129,29 @@ function b64urlToJson(s: string): Record<string, unknown> | null {
 }
 
 /**
- * Decode a compact JWS without verifying the signature.
- * Returns null if the shape is wrong.
+ * Decode a compact JWS without verifying anything.
+ * Returns null if the shape is wrong. The result is UNAUTHENTICATED: it is only
+ * safe to act on after verifyAppleTransactionJws returns ok, or on a lab path that
+ * has deliberately opted out of verification.
  */
 export function decodeAppleTransactionJws(jws: string): AppleTransactionPayload | null {
   const parts = jws.split(".");
   if (parts.length !== 3) return null;
   const payload = b64urlToJson(parts[1]);
   if (!payload) return null;
-  const transactionId =
-    typeof payload.transactionId === "string"
-      ? payload.transactionId
-      : typeof payload.transaction_id === "string"
-        ? payload.transaction_id
-        : null;
-  const productId =
-    typeof payload.productId === "string"
-      ? payload.productId
-      : typeof payload.product_id === "string"
-        ? payload.product_id
-        : null;
-  const bundleId =
-    typeof payload.bundleId === "string"
-      ? payload.bundleId
-      : typeof payload.bundle_id === "string"
-        ? payload.bundle_id
-        : null;
+  const str = (a: string, b: string): string | null => {
+    if (typeof payload[a] === "string") return payload[a] as string;
+    if (typeof payload[b] === "string") return payload[b] as string;
+    return null;
+  };
+  const transactionId = str("transactionId", "transaction_id");
+  const productId = str("productId", "product_id");
+  const bundleId = str("bundleId", "bundle_id");
   if (!transactionId || !productId || !bundleId) return null;
   return {
     transactionId,
     originalTransactionId:
-      typeof payload.originalTransactionId === "string"
-        ? payload.originalTransactionId
-        : undefined,
+      typeof payload.originalTransactionId === "string" ? payload.originalTransactionId : undefined,
     productId,
     bundleId,
     environment: typeof payload.environment === "string" ? payload.environment : undefined,
@@ -94,133 +161,157 @@ export function decodeAppleTransactionJws(jws: string): AppleTransactionPayload 
   };
 }
 
-/**
- * Extract SubjectPublicKeyInfo (SPKI) DER from an X.509 certificate DER.
- * Walks SEQUENCE tags to the bit string that holds the public key.
- * Works for Apple leaf certs used in StoreKit transaction JWS (ECDSA P-256).
- */
-export function spkiFromX509Der(cert: Uint8Array): Uint8Array | null {
-  // Minimal TLV reader for DER.
-  let off = 0;
-  const readLen = (): number | null => {
-    if (off >= cert.length) return null;
-    const b = cert[off++];
-    if (b < 0x80) return b;
-    const n = b & 0x7f;
-    if (n === 0 || n > 3 || off + n > cert.length) return null;
-    let len = 0;
-    for (let i = 0; i < n; i++) len = (len << 8) | cert[off++];
-    return len;
-  };
-  const expectTag = (tag: number): number | null => {
-    if (off >= cert.length || cert[off++] !== tag) return null;
-    return readLen();
-  };
+let cachedAnchor: ParsedCertificate | null | undefined;
 
-  // Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, signature }
-  const certLen = expectTag(0x30);
-  if (certLen == null) return null;
-  const certEnd = off + certLen;
-
-  // tbsCertificate ::= SEQUENCE
-  const tbsLen = expectTag(0x30);
-  if (tbsLen == null) return null;
-  const tbsEnd = off + tbsLen;
-
-  // Optional version [0]
-  if (off < tbsEnd && cert[off] === 0xa0) {
-    off++;
-    const vLen = readLen();
-    if (vLen == null) return null;
-    off += vLen;
+/** The pinned Apple Root CA G3, parsed once. Returns null only if the constant is unusable. */
+export function pinnedAppleRoot(): ParsedCertificate | null {
+  if (cachedAnchor === undefined) {
+    const der = b64ToBytes(APPLE_ROOT_CA_G3_DER_B64, false);
+    cachedAnchor = der ? parseCertificate(der) : null;
   }
-  // serialNumber INTEGER
-  const serialLen = expectTag(0x02);
-  if (serialLen == null) return null;
-  off += serialLen;
-  // signature AlgorithmIdentifier SEQUENCE
-  const sigAlgLen = expectTag(0x30);
-  if (sigAlgLen == null) return null;
-  off += sigAlgLen;
-  // issuer Name SEQUENCE
-  const issuerLen = expectTag(0x30);
-  if (issuerLen == null) return null;
-  off += issuerLen;
-  // validity SEQUENCE
-  const validityLen = expectTag(0x30);
-  if (validityLen == null) return null;
-  off += validityLen;
-  // subject Name SEQUENCE
-  const subjectLen = expectTag(0x30);
-  if (subjectLen == null) return null;
-  off += subjectLen;
-  // subjectPublicKeyInfo SEQUENCE -- this is SPKI
-  if (off >= cert.length || cert[off] !== 0x30) return null;
-  const spkiStart = off;
-  off++;
-  const spkiLen = readLen();
-  if (spkiLen == null) return null;
-  const spkiEnd = off + spkiLen;
-  if (spkiEnd > cert.length) return null;
-  return cert.subarray(spkiStart, spkiEnd);
+  return cachedAnchor;
 }
 
 /**
- * Verify ES256 JWS using the leaf certificate in header.x5c[0].
- * Returns true / false / null (null = could not attempt: no x5c or import failure).
+ * Validate leaf + intermediate against a trust anchor, applying Apple's policy.
+ *
+ * The trust anchor is the ONLY injectable input, and the production entry point does
+ * not expose it. Tests supply a purpose-built hierarchy because that is the only way
+ * to observe a POSITIVE result at all: we hold no Apple-issued leaf key, so under the
+ * real pin this function can only ever be watched refusing. Apple's policy -- both
+ * marker OIDs, the CA constraint, the issuance links and the validity windows -- is
+ * fixed here and is NOT a parameter, so a test cannot weaken it, only re-anchor it.
  */
-export async function tryVerifyJwsEs256(jws: string): Promise<boolean | null> {
-  const parts = jws.split(".");
-  if (parts.length !== 3) return false;
-  const header = b64urlToJson(parts[0]);
-  if (!header) return false;
-  const x5c = header.x5c;
-  if (!Array.isArray(x5c) || typeof x5c[0] !== "string") return null;
+export async function verifyAppleCertChain(
+  leafDer: Uint8Array,
+  intermediateDer: Uint8Array,
+  anchor: ParsedCertificate,
+  nowMs: number,
+): Promise<{ ok: true; leaf: ParsedCertificate } | { ok: false; reason: AppleJwsRefusal }> {
+  const leaf = parseCertificate(leafDer);
+  if (!leaf) return { ok: false, reason: "leaf_parse_failed" };
+  const intermediate = parseCertificate(intermediateDer);
+  if (!intermediate) return { ok: false, reason: "intermediate_parse_failed" };
 
-  try {
-    const leafDer = Uint8Array.from(atob(x5c[0] as string), (c) => c.charCodeAt(0));
-    // Prefer SPKI extracted from the X.509 leaf (correct path).
-    let spki = spkiFromX509Der(leafDer);
-    if (!spki) {
-      // Some runtimes may already hand us SPKI; try the raw DER as SPKI last.
-      spki = leafDer;
-    }
-    // Copy into a plain ArrayBuffer for importKey (SharedArrayBuffer-safe).
-    const spkiBuf = new ArrayBuffer(spki.byteLength);
-    new Uint8Array(spkiBuf).set(spki);
-
-    const key = await crypto.subtle.importKey(
-      "spki",
-      spkiBuf,
-      { name: "ECDSA", namedCurve: "P-256" },
-      false,
-      ["verify"],
-    );
-    const sig = b64urlToBytes(parts[2]);
-    if (!sig) return false;
-    // JWS ES256: raw r||s (64 bytes for P-256). WebCrypto ECDSA expects IEEE P1363 same shape.
-    if (sig.byteLength !== 64) {
-      // Some stacks wrap DER ECDSA; reject unknown shapes rather than false-accept.
-      return false;
-    }
-    const data = new TextEncoder().encode(`${parts[0]}.${parts[1]}`);
-    const sigBuf = new ArrayBuffer(sig.byteLength);
-    new Uint8Array(sigBuf).set(sig);
-    return await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, key, sigBuf, data);
-  } catch {
-    return null;
+  if (!intermediate.isCa) return { ok: false, reason: "intermediate_not_ca" };
+  if (!intermediate.extensionOids.includes(APPLE_WWDR_INTERMEDIATE_MARKER_OID)) {
+    return { ok: false, reason: "intermediate_missing_apple_wwdr_marker" };
   }
+  if (!leaf.extensionOids.includes(APPLE_APP_STORE_LEAF_MARKER_OID)) {
+    return { ok: false, reason: "leaf_missing_app_store_marker" };
+  }
+  if (!(await verifyCertificateSignedBy(intermediate, anchor))) {
+    return { ok: false, reason: "intermediate_not_issued_by_pinned_root" };
+  }
+  if (!(await verifyCertificateSignedBy(leaf, intermediate))) {
+    return { ok: false, reason: "leaf_not_issued_by_intermediate" };
+  }
+  for (const cert of [leaf, intermediate, anchor]) {
+    if (!certValidAt(cert, nowMs)) {
+      return { ok: false, reason: "certificate_outside_validity_window" };
+    }
+  }
+  return { ok: true, leaf };
 }
 
-/** True when header.x5c has at least leaf + one intermediate (Apple chain shape). */
-export function jwsHasCertChain(jws: string): boolean {
-  const parts = jws.split(".");
-  if (parts.length !== 3) return false;
-  const header = b64urlToJson(parts[0]);
-  if (!header) return false;
-  const x5c = header.x5c;
-  return Array.isArray(x5c) && x5c.length >= 2 && typeof x5c[0] === "string";
+/**
+ * THE production entry point, and the only one src/routes/store.ts calls. Verifies a
+ * signed transaction JWS against the pinned Apple Root CA G3.
+ *
+ * It takes no trust anchor, by design: the anchor is not a parameter any caller can
+ * influence, and there is no flag, env var or option that changes it.
+ *
+ * `nowMs` exists so validity windows can be driven from both sides in tests. It is
+ * not reachable from request input.
+ */
+export async function verifyAppleTransactionJws(
+  jws: string,
+  nowMs: number = Date.now(),
+): Promise<AppleJwsVerdict> {
+  const anchor = pinnedAppleRoot();
+  if (!anchor) return { ok: false, reason: "pinned_anchor_unusable" };
+  return verifyAppleTransactionJwsAgainstAnchor(jws, anchor, nowMs);
 }
+
+/**
+ * The whole pipeline -- header, chain, and signature -- against a caller-supplied
+ * anchor. The trust anchor is the ONE injected value, so tests can drive every step
+ * production runs, including a genuine ACCEPT, which the pinned anchor can never
+ * produce for us: we hold no Apple-issued leaf key.
+ *
+ * Policy is NOT injectable. Both marker OIDs, the CA constraint, the issuance links,
+ * the validity windows and the signature check are fixed here, so a test can
+ * re-anchor this function but cannot weaken it.
+ *
+ * Callers outside tests should use verifyAppleTransactionJws.
+ */
+export async function verifyAppleTransactionJwsAgainstAnchor(
+  jws: string,
+  anchor: ParsedCertificate,
+  nowMs: number,
+): Promise<AppleJwsVerdict> {
+  const parts = jws.split(".");
+  if (parts.length !== 3) return { ok: false, reason: "malformed_jws" };
+  const header = b64urlToJson(parts[0]);
+  if (!header) return { ok: false, reason: "malformed_jws" };
+  if (header.alg !== "ES256") return { ok: false, reason: "unsupported_alg" };
+
+  const x5c = header.x5c;
+  if (!Array.isArray(x5c)) return { ok: false, reason: "missing_x5c" };
+  if (x5c.length < 2 || typeof x5c[0] !== "string" || typeof x5c[1] !== "string") {
+    return { ok: false, reason: "x5c_too_short" };
+  }
+
+  const leafDer = b64ToBytes(x5c[0] as string, false);
+  if (!leafDer) return { ok: false, reason: "leaf_parse_failed" };
+  const intermediateDer = b64ToBytes(x5c[1] as string, false);
+  if (!intermediateDer) return { ok: false, reason: "intermediate_parse_failed" };
+
+  const chain = await verifyAppleCertChain(leafDer, intermediateDer, anchor, nowMs);
+  if (!chain.ok) return chain;
+
+  return verifyJwsSignatureWithLeaf(parts, chain.leaf);
+}
+
+/**
+ * Check the ES256 signature over "<header>.<payload>" with an ALREADY CHAIN-VALIDATED
+ * leaf. Deliberately not exported: a signature check alone authenticates nobody, so
+ * it must not be reachable without the chain validation that precedes it here.
+ */
+async function verifyJwsSignatureWithLeaf(
+  parts: string[],
+  leaf: ParsedCertificate,
+): Promise<AppleJwsVerdict> {
+  // ES256 is defined over P-256. A chain-valid leaf on another curve is a shape we
+  // do not accept rather than one we adapt to.
+  if (leaf.curve !== "P-256") return { ok: false, reason: "leaf_key_not_p256" };
+
+  const sig = b64urlToBytes(parts[2]);
+  if (!sig) return { ok: false, reason: "signature_malformed" };
+  // JWS ES256 signatures are raw r||s. Some stacks emit DER instead; accept that
+  // shape explicitly rather than letting it fall through as a verification failure,
+  // which would make an encoding mismatch indistinguishable from a bad signature.
+  let raw: Uint8Array | null = null;
+  if (sig.byteLength === 64) {
+    raw = sig;
+  } else {
+    raw = derEcdsaToP1363(sig, 32);
+  }
+  if (!raw) return { ok: false, reason: "signature_malformed" };
+
+  const key = await importEcPublicKey(leaf);
+  if (!key) return { ok: false, reason: "signature_malformed" };
+  const data = new TextEncoder().encode(`${parts[0]}.${parts[1]}`);
+  const ok = await verifyEcdsa(key, "SHA-256", raw, data);
+  return ok ? { ok: true } : { ok: false, reason: "signature_invalid" };
+}
+
+/** Exposed for the anchor-identity assertion in tests. */
+export const APPLE_MARKER_OIDS = {
+  leaf: APPLE_APP_STORE_LEAF_MARKER_OID,
+  intermediate: APPLE_WWDR_INTERMEDIATE_MARKER_OID,
+} as const;
+
 
 export function isXcodeStoreEnvironment(env: string | undefined): boolean {
   if (!env) return false;
