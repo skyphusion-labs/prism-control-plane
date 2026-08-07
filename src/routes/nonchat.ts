@@ -663,15 +663,16 @@ async function runDeepgramBatchStt(
     }
     return meterAndRespond(ctx, gate, 1, { model: gate.model.id, text }, 200, null);
   } catch (err) {
+    // Never return raw provider exception text (CodeQL js/stack-trace-exposure).
+    // Log server-side only; clients branch on `code`, not message prose.
     const m = err instanceof Error ? err.message : String(err);
+    console.error("stt upstream_error", { requestId: ctx.requestId, message: m.slice(0, 280) });
     await recordUnmetered(ctx, gate, "upstream_error", null);
-    return errorResponse(
-      ctx.requestId,
-      "upstream_error",
+    const clientMsg =
       m.includes("5006") || m.toLowerCase().includes("bad input")
         ? "STT provider rejected the audio format. Try Whisper Large v3 Turbo, or re-record a short clip."
-        : m.slice(0, 280),
-    );
+        : "STT provider request failed.";
+    return errorResponse(ctx.requestId, "upstream_error", clientMsg);
   }
 }
 
