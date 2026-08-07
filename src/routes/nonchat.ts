@@ -29,6 +29,7 @@ import {
   isDeepgramBatchStt,
   providerStateFailed,
 } from "../nonchat-upstream";
+import { resolveVideoDuration } from "../video-duration";
 import { periodBounds } from "../period";
 import { entitlesTier, planFromRow, type Plan } from "../plans";
 import { checkRateLimit, inferenceBucket } from "../rate-limit";
@@ -679,17 +680,25 @@ export async function handleVideoGenerations(ctx: Ctx, request: Request): Promis
     );
   }
 
+  // Optional duration (seconds or "8s"); clamped per model (CF limits, see video-duration.ts).
+  const durationSec = resolveVideoDuration(gate.model.id, raw.duration ?? raw.seconds).seconds;
+
   if (wantsAsync(request, raw)) {
-    return startAsyncVideoJob(ctx, request, gate, prompt, imageUrl);
+    return startAsyncVideoJob(ctx, request, gate, prompt, imageUrl, durationSec);
   }
 
-  const produced = await produceVideo(ctx, request, gate, prompt, imageUrl);
+  const produced = await produceVideo(ctx, request, gate, prompt, imageUrl, durationSec);
   if (!produced.ok) return produced.response;
   return meterAndRespond(
     ctx,
     gate,
     1,
-    { model: gate.model.id, video: produced.video, result: produced.upstreamBody },
+    {
+      model: gate.model.id,
+      video: produced.video,
+      duration: durationSec,
+      result: produced.upstreamBody,
+    },
     200,
     produced.gatewayLogId,
   );
@@ -701,6 +710,7 @@ async function startAsyncVideoJob(
   gate: NonChatGateOk,
   prompt: string,
   imageUrl: string | undefined,
+  durationSec: number,
 ): Promise<Response> {
   return startAsyncLongRun(ctx, request, gate, {
     kind: "video",
@@ -709,6 +719,7 @@ async function startAsyncVideoJob(
     imageUrl,
     voice: undefined,
     billableUnits: 1,
+    durationSec,
   });
 }
 
@@ -721,6 +732,7 @@ async function produceVideo(
   gate: NonChatGateOk,
   prompt: string,
   imageUrl: string | undefined,
+  durationSec?: number,
 ): Promise<
   | { ok: true; video: string; gatewayLogId: string | null; upstreamBody: unknown }
   | { ok: false; response: Response }
@@ -750,7 +762,10 @@ async function produceVideo(
     downloadUrl = mediaPublicUrl(origin, `/v1/media/${downTok.token}`);
   }
 
-  const params = buildVideoParams(gate.model.id, prompt, imageUrl, { uploadUrl });
+  const params = buildVideoParams(gate.model.id, prompt, imageUrl, {
+    uploadUrl,
+    durationSec,
+  });
   const up = await runUpstream(ctx, gate, params);
   if (!up.ok) return { ok: false, response: up.response };
   const fail = providerStateFailed(up.body);
@@ -875,6 +890,8 @@ async function startAsyncLongRun(
     imageUrl: string | undefined;
     voice: string | undefined;
     billableUnits: number;
+    /** Video only: clamped duration seconds. */
+    durationSec?: number;
   },
 ): Promise<Response> {
   if (!ctx.env.LONGRUN) {
@@ -944,6 +961,7 @@ async function startAsyncLongRun(
         monthlyIncludedMicroUsd: gate.plan.monthlyIncludedMicroUsd,
         origin,
         startedAtIso: now,
+        durationSec: args.durationSec,
       },
     });
   } catch (err) {

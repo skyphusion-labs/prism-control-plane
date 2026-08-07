@@ -114,7 +114,7 @@ All paths are relative to the deployment origin. All request and response bodies
 | POST | `/v1/images/generations` | client key | Metered image generation (unit-priced). |
 | POST | `/v1/audio/speech` | client key | Metered TTS (unit-priced). Optional `async: true` → 202 Workflow job. |
 | POST | `/v1/audio/transcriptions` | client key | Metered speech-to-text (unit-priced). |
-| POST | `/v1/videos/generations` | client key | Metered video generation (unit-priced). Optional `async: true` → 202 job (Workflow). |
+| POST | `/v1/videos/generations` | client key | Metered video generation (unit-priced). Optional `duration` (seconds or `"8s"`; clamped per model). Optional `async: true` → 202 job (Workflow). |
 | POST | `/v1/music/generations` | client key | Metered music generation (unit-priced). Optional `async: true` → 202 job (Workflow). |
 | GET | `/v1/jobs/{job_id}` | client key | Poll async video/music job (`status`, `result.video` / `result.audio`). Workflow-backed. |
 | POST | `/v1/stt/sessions` | client key | Mint a single-use short-lived STT ticket (browser WS auth). |

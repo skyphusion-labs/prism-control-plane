@@ -35,6 +35,13 @@ describe("buildVideoParams t2v", () => {
     expect(p.duration).toBe("8s");
     expect(p.generate_audio).toBe(true);
   });
+
+  it("honors durationSec for Grok max", () => {
+    const p = buildVideoParams("xai/grok-imagine-video", "long", undefined, {
+      durationSec: 15,
+    });
+    expect(p.duration).toBe(15);
+  });
 });
 
 describe("buildVideoParams i2v", () => {

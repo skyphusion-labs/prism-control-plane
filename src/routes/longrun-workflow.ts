@@ -71,6 +71,8 @@ export interface PlaneLongRunParams extends Record<string, unknown> {
   /** Origin for signed media URLs (e.g. https://play-proxy.skyphusion.org). */
   origin: string;
   startedAtIso: string;
+  /** Video only: clamped duration seconds (client request or model default). */
+  durationSec?: number;
 }
 
 export class PlaneLongRunWorkflow extends WorkflowEntrypoint<Env, PlaneLongRunParams> {
@@ -143,7 +145,10 @@ export class PlaneLongRunWorkflow extends WorkflowEntrypoint<Env, PlaneLongRunPa
               ? buildMusicParams(p.prompt, p.lyrics)
               : p.kind === "speech"
                 ? buildTtsParams(p.modelId, p.prompt, { voice: p.voice })
-                : buildVideoParams(p.modelId, p.prompt, image, { uploadUrl });
+                : buildVideoParams(p.modelId, p.prompt, image, {
+                    uploadUrl,
+                    durationSec: p.durationSec,
+                  });
 
           const entry = findModel(p.modelId);
           if (!entry) throw new Error(`Model not in catalog: ${p.modelId}`);

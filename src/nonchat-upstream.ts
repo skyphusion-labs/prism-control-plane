@@ -9,8 +9,9 @@
 // No prompt/completion bodies are logged (cf-aig-collect-log-payload: false).
 
 import { findModel, type Billing, type Modality } from "./catalog";
-import { CF_API_HOST, GATEWAY_HOST } from "./upstream";
 import type { UpstreamAuth } from "./inference";
+import { CF_API_HOST, GATEWAY_HOST } from "./upstream";
+import { resolveVideoDuration, type VideoDurationWire } from "./video-duration";
 
 export interface NonChatRunRequest {
   upstreamModel: string;
@@ -499,6 +500,18 @@ export interface BuildVideoParamsOpts {
    * managed xAI credentials are a ZDR team and refuse without output.upload_url.
    */
   uploadUrl?: string;
+  /**
+   * Client-requested duration (seconds, or already-clamped). When omitted, model default
+   * from `video-duration.ts` is used. Callers should prefer `resolveVideoDuration` first.
+   */
+  durationSec?: number;
+}
+
+function videoDurationWire(modelId: string, opts?: BuildVideoParamsOpts): VideoDurationWire {
+  if (typeof opts?.durationSec === "number" && Number.isFinite(opts.durationSec)) {
+    return resolveVideoDuration(modelId, opts.durationSec).wire;
+  }
+  return resolveVideoDuration(modelId, null).wire;
 }
 
 export function buildVideoParams(
@@ -522,6 +535,7 @@ export function buildVideoParams(
     (opts.uploadUrl.startsWith("https://") || opts.uploadUrl.startsWith("http://"))
       ? opts.uploadUrl
       : undefined;
+  const duration = videoDurationWire(modelId, opts);
 
   if (image) {
     // Per-model i2v shapes (mirror prism longrun-params; additionalProperties is false upstream).
@@ -530,7 +544,7 @@ export function buildVideoParams(
         image,
         prompt,
         aspect_ratio: "16:9",
-        duration: 5,
+        duration,
         resolution: "720p",
         fps: 24,
         camera_fixed: false,
@@ -542,7 +556,7 @@ export function buildVideoParams(
       return {
         first_frame_image: image,
         prompt,
-        duration: 6,
+        duration,
         resolution: "768P",
         fast_pretreatment: false,
         prompt_optimizer: true,
@@ -552,7 +566,7 @@ export function buildVideoParams(
       return {
         image_input: image,
         prompt,
-        duration: 5,
+        duration,
         ratio: "1280:720",
         content_moderation: { public_figure_threshold: "low" },
       };
@@ -562,7 +576,7 @@ export function buildVideoParams(
       modelId === "alibaba/hh1.1-i2v" ||
       modelId === "alibaba/wan-2.7-i2v"
     ) {
-      const params: Record<string, unknown> = { image, resolution: "720P", duration: 5 };
+      const params: Record<string, unknown> = { image, resolution: "720P", duration };
       if (prompt) params.prompt = prompt;
       return params;
     }
@@ -571,7 +585,7 @@ export function buildVideoParams(
     if (modelId.startsWith("xai/grok-imagine-video")) {
       const body: Record<string, unknown> = {
         prompt,
-        duration: 5,
+        duration,
         aspect_ratio: "16:9",
         resolution: "720p",
         image: { url: image },
@@ -579,7 +593,19 @@ export function buildVideoParams(
       if (uploadUrl) body.output = { upload_url: uploadUrl };
       return body;
     }
-    return { image, prompt };
+    // PixVerse / Vidu / generic i2v with image + prompt
+    if (modelId.startsWith("pixverse/") || modelId.startsWith("vidu/")) {
+      return {
+        prompt,
+        image,
+        duration,
+        aspect_ratio: "16:9",
+        ...(modelId.startsWith("pixverse/")
+          ? { generate_audio: true, quality: "720p" }
+          : { resolution: "720p" }),
+      };
+    }
+    return { image, prompt, duration };
   }
 
   // text-to-video: per-model. Wrong duration type or extra fields => CF 7003 User Input Error
@@ -590,7 +616,7 @@ export function buildVideoParams(
   if (modelId.startsWith("minimax/hailuo")) {
     return {
       prompt,
-      duration: 6,
+      duration,
       resolution: "768P",
       prompt_optimizer: true,
       // Missing first_frame_image => upstream 7003; prefer invalid_request in the handler.
@@ -602,7 +628,7 @@ export function buildVideoParams(
     // Avoid _operation — some gateway paths reject it with 7003. Integer duration 1-15.
     const body: Record<string, unknown> = {
       prompt,
-      duration: 5,
+      duration,
       aspect_ratio: "16:9",
       resolution: "720p",
     };
@@ -614,7 +640,7 @@ export function buildVideoParams(
     return {
       prompt,
       aspect_ratio: "16:9",
-      duration: 5,
+      duration,
       resolution: "720p",
       fps: 24,
       camera_fixed: false,
@@ -624,7 +650,7 @@ export function buildVideoParams(
   if (modelId.startsWith("runwayml/")) {
     return {
       prompt,
-      duration: 5,
+      duration,
       ratio: "1280:720",
       content_moderation: { public_figure_threshold: "low" },
     };
@@ -637,13 +663,38 @@ export function buildVideoParams(
     return {
       prompt,
       resolution: "720P",
-      duration: 5,
+      duration,
     };
   }
-  // Google Veo and other long-run UB: duration STRING + generate_audio (prism longrun default)
+  if (modelId.startsWith("pixverse/")) {
+    return {
+      prompt,
+      duration,
+      aspect_ratio: "16:9",
+      generate_audio: true,
+      quality: "720p",
+    };
+  }
+  if (modelId.startsWith("vidu/")) {
+    return {
+      prompt,
+      duration,
+      resolution: "720p",
+    };
+  }
+  // Google Veo and other long-run UB: duration STRING + generate_audio
+  if (modelId.startsWith("google/veo")) {
+    return {
+      prompt,
+      duration,
+      aspect_ratio: "16:9",
+      resolution: "720p",
+      generate_audio: true,
+    };
+  }
   return {
     prompt,
-    duration: "8s",
+    duration,
     aspect_ratio: "16:9",
     resolution: "720p",
     generate_audio: true,

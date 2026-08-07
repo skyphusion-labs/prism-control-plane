@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.4.34] - 2026-08-06
+
+### Added
+
+- **Video duration control:** `POST /v1/videos/generations` accepts optional `duration`
+  (seconds or Veo-style `"8s"`). Clamped per CF model limits (Grok 1–15, Seedance 4–12,
+  Veo 4|6|8, etc.). Async Workflow + sync path both honor it.
+
 ## [0.4.33] - 2026-08-06
 
 ### Fixed
