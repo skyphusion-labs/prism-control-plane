@@ -1,10 +1,57 @@
-## Unreleased
-
-- **fix(deps):** npm override `undici@7.29.0` (Dependabot; transitive of wrangler/miniflare, not Worker runtime).
-
 # Changelog
 
 ## [Unreleased]
+
+## [1.1.0] - 2026-08-07
+
+### Added
+
+- **App Store JWS certificate chain validation against a pinned Apple root.** Redeem verifies that
+  the presented `x5c` chain terminates at a pinned Apple Root CA G3, rather than verifying the JWS
+  signature with a key taken from the JWS's own header. Following Apple's published verification
+  procedure, the chain must also carry the App Store marker OID on the leaf and the WWDR marker OID
+  on the intermediate, with a CA constraint on the intermediate and validity windows checked on
+  every certificate. The root pin alone is not sufficient: WWDR issues signing certificates to every
+  Apple Developer Program member, and such a certificate chains cleanly to the same root. Chain
+  validation is implemented directly in `src/x509.ts`, since Workers WebCrypto offers none; runtime
+  dependencies remain at zero. (#71, fleet-chezmoi#1609)
+
+### Fixed
+
+- **base64url decoding** mapped one character incorrectly and so rejected any input containing an
+  underscore. (#71)
+- **Metered spend is allocated whenever a request is priced.** The non-chat and long-running
+  workflow doors allocated a charge across the allowance and credit pools only while the balance
+  still read allow, so a request priced after the balance was exhausted was written metered with the
+  full `micro_usd` and both pool fields at zero, advancing usage without moving either pool. That
+  state was not recoverable downstream, because the row carries the correct `micro_usd` and
+  reconciliation therefore computes a zero delta and reports agreement while the pool columns it
+  does not read stay wrong. Allocation now happens whenever there is a price; overshooting by one
+  request when the balance has just been exhausted is the accepted bound, matching the chat and STT
+  meters. Also attaches request metadata at the STT gateway call site so reconciliation can join on
+  it, and replaces bare returns in `finalize()` so a session records its usage. Adds
+  `tests/money-path.test.ts`, which states the invariant that for any metered row `from_allowance`
+  plus `from_credit` equals `micro_usd`, drives it end to end through the non-chat door in the
+  reachable race state, and holds both metering doors to the same shape.
+  (#72, fleet-chezmoi#1610)
+- **STT errors return a stable client message.** The Deepgram batch STT path returned the raw
+  provider exception text to the caller. It now logs the provider message server-side and returns a
+  fixed message; clients branch on `code`, not on message prose. (#69)
+- **deps:** npm override `undici@7.29.0` (Dependabot; transitive of wrangler/miniflare, dev and
+  tooling only, not the Worker runtime). (#68)
+
+### Docs
+
+- `CLAUDE.md` refreshed for the plane 1.0.0 estate. (#70)
+
+### Notes
+
+- MINOR per the repo rule (post-1.0 SemVer: MINOR for features, PATCH for fixes): chain validation
+  is new functionality, not a tweak.
+- No schema change and no new binding; nothing for a deployer to apply by hand.
+- Housekeeping in this entry: the file previously opened with a stray `## Unreleased` section
+  sitting above its own `# Changelog` heading. Its one item (the undici override) is folded into
+  this release and the duplicate heading is gone.
 
 ## [1.0.0] - 2026-08-07
 
