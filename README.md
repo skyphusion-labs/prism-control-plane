@@ -14,14 +14,115 @@ machinery on their own Cloudflare account.
 This plane owns **who may call what, and how much**. Conversation history, RAG, artifacts, and the
 multimodal surface stay in [prism](https://github.com/skyphusion-labs/prism).
 
-```
-mobile client --(bearer client key)--> prism-control-plane --(gateway.ai.cloudflare.com)--> AI Gateway --> model
-                                              |
-                                              +-- D1: entitlements, prepaid credit, usage ledger
+Live at `play-proxy.skyphusion.org`, AI Gateway `prism-proxy`. Full production wiring and credential
+model: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+## How the pieces interface
+
+```mermaid
+flowchart TB
+  subgraph clients["Clients (docs/CONTRACT.md + openapi.yaml)"]
+    ios["prism-ios<br/>Prism for iOS"]
+    android["prism-android"]
+    other["Any Bearer client"]
+  end
+
+  subgraph plane["Worker: prism-control-plane<br/>play-proxy.skyphusion.org"]
+    direction TB
+    enroll["POST /v1/clients<br/>enroll → pcp_ key"]
+    me["GET /v1/me · /v1/models · /v1/usage"]
+    doors["Metered doors<br/>chat · images · video · speech<br/>transcriptions · music · STT stream"]
+    jobs["GET /v1/jobs/:id<br/>PlaneLongRunWorkflow"]
+    store["POST /v1/store/redeem<br/>App Store / Play credit"]
+    media["MEDIA R2<br/>/v1/media/* signed URLs"]
+    admin["/admin/* (ADMIN_TOKEN)"]
+  end
+
+  subgraph d1["D1"]
+    acct["accounts · clients · plans"]
+    ledger["usage_events · credit_grants<br/>async_jobs"]
+  end
+
+  subgraph upstream["Cloudflare AI"]
+    gw["AI Gateway: prism-proxy"]
+    wai["Workers AI @cf/*"]
+    ub["Unified Billing providers"]
+  end
+
+  subgraph stores["App stores"]
+    as["App Store IAP JWS"]
+    gp["Google Play purchase token"]
+  end
+
+  ios --> enroll
+  ios --> me
+  ios --> doors
+  ios --> jobs
+  ios --> store
+  ios --> media
+  android --> doors
+  other --> doors
+  as --> store
+  gp --> store
+  admin --> plane
+
+  enroll --> acct
+  doors --> ledger
+  store --> acct
+  jobs --> ledger
+  jobs --> media
+
+  doors --> gw
+  jobs --> gw
+  gw --> wai
+  gw --> ub
 ```
 
-Live at `play-proxy.skyphusion.org`, AI Gateway `prism-proxy`. Full production wiring, the credential
-model, and the mermaid flowchart are in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+### Metered request (sync)
+
+```mermaid
+sequenceDiagram
+  participant C as Client
+  participant P as control plane
+  participant D as D1 ledger
+  participant G as AI Gateway
+  participant M as Model
+
+  C->>P: Bearer pcp_ + POST door
+  P->>D: identity, plan, rate limit
+  P->>D: balance gate (402 if exhausted)
+  P->>G: AI.run / REST (no prompt stored)
+  G->>M: inference
+  M-->>G: result
+  G-->>P: body + gateway log id
+  P->>D: usage_events micro-USD
+  P-->>C: JSON 200 (+ money headers)
+```
+
+### Long-run job (video / music / speech / gpt-image-2)
+
+```mermaid
+sequenceDiagram
+  participant C as Client
+  participant P as control plane
+  participant W as PlaneLongRunWorkflow
+  participant G as AI Gateway
+  participant R as MEDIA R2
+
+  C->>P: Prefer: respond-async / async:true
+  P->>P: create async_jobs row
+  P->>W: LONGRUN.create
+  P-->>C: 202 + job id
+  W->>G: blocking env.AI.run
+  G-->>W: asset
+  W->>R: rehost when needed
+  W->>P: job succeeded + result_json
+  C->>P: GET /v1/jobs/:id poll
+  P-->>C: result URLs / data
+```
+
+Catalog: **93** models in `src/catalog.ts` (same set as playground `src/models.ts`). Live list:
+`GET /v1/models`.
 
 ## The client contract comes first
 
@@ -67,6 +168,23 @@ those files when wiring a client.
 
 Operator routes (`/admin/*`, single bearer, **503 when `ADMIN_TOKEN` is unset**) create accounts, mint
 enrollment tokens, and revoke client keys. They are not part of the client contract.
+
+## Model catalog
+
+**93** priced models in `src/catalog.ts` (mirrored by playground `src/models.ts`). Entitlement-filtered at
+`GET /v1/models`. Full id tables live in the [prism-ios README](https://github.com/skyphusion-labs/prism-ios#model-catalog-control-plane)
+and [prism README](https://github.com/skyphusion-labs/prism#features) Features section.
+
+| Modality | Count |
+| --- | ---: |
+| Chat | 44 |
+| Image | 21 |
+| Video | 19 |
+| TTS | 3 |
+| STT | 4 |
+| Music | 1 |
+| Live voice (Flux) | 1 |
+| **Total** | **93** |
 
 ## How metering works
 

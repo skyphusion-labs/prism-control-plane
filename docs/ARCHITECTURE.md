@@ -42,17 +42,20 @@ the meter would be lying. Caching can come back when the ledger knows how to rea
 ```mermaid
 flowchart TB
     subgraph clients["Clients (build to docs/CONTRACT.md)"]
-        ios["prism-ios<br/>(not started)"]
-        android["prism-android<br/>(not started)"]
+        ios["prism-ios<br/>Prism for iOS 1.0+"]
+        android["prism-android"]
+        any["Any HTTPS client<br/>Bearer pcp_"]
     end
 
     subgraph worker["Worker: prism-control-plane @ play-proxy.skyphusion.org"]
         direction TB
-        auth["1. identity<br/>client key -> account, plan"]
+        auth["1. identity<br/>client key → account, plan"]
         gates["2. entitlement, rate limit,<br/>catalog, price, wiring"]
         balance["3. prepaid balance gate<br/>402 when exhausted"]
         cred["4. upstream credential"]
         meter["5. meter and record<br/>integer micro-USD"]
+        longrun["PlaneLongRunWorkflow<br/>video · music · speech · image"]
+        redeem["POST /v1/store/redeem"]
     end
 
     subgraph d1["D1: prism-control-plane"]
@@ -60,22 +63,28 @@ flowchart TB
         t1["accounts<br/>credit_micro_usd<br/>spent_micro_usd"]
         t2["plans, clients,<br/>enrollments"]
         t3["usage_events<br/>usage_periods<br/>credit_grants"]
-        t4["rate_buckets<br/>model_prices<br/>user_tokens"]
+        t4["async_jobs · rate_buckets<br/>model_prices"]
     end
 
     admin["Operator<br/>/admin/* (ADMIN_TOKEN)"]
 
     subgraph cf["Cloudflare"]
         gw["AI Gateway: prism-proxy<br/>authenticated, metadata logs,<br/>NO payload retention"]
-        wai["Workers AI<br/>@cf/... models"]
-        prov["Third-party providers<br/>via Unified Billing<br/>openai/, anthropic/, xai/, ..."]
+        wai["Workers AI<br/>@cf/… models"]
+        prov["Third-party providers<br/>via Unified Billing<br/>openai/, anthropic/, xai/, …"]
+        r2["MEDIA R2<br/>signed media URLs"]
     end
 
     ios -->|"Bearer client key<br/>HTTPS"| auth
     android -->|"Bearer client key<br/>HTTPS"| auth
+    any --> auth
     admin --> worker
 
     auth --> gates --> balance --> cred --> meter
+    meter --> longrun
+    longrun --> r2
+    longrun --> t4
+    redeem --> t1
 
     auth <-->|"read"| d1
     gates <-->|"read"| d1
@@ -83,7 +92,8 @@ flowchart TB
     meter -->|"write ledger row,<br/>advance spend"| d1
 
     cred -->|"CF_AIG_TOKEN<br/>(shared, Worker secret)"| gw
-    meter -.->|"POST gateway.ai.cloudflare.com<br/>/v1/{acct}/{gw}/…/chat/completions<br/>+ cf-aig-metadata<br/>+ cf-aig-collect-log-payload: false"| gw
+    meter -.->|"POST gateway / env.AI.run<br/>+ cf-aig-metadata<br/>+ collect-log-payload: false"| gw
+    longrun --> gw
     gw --> wai
     gw --> prov
 
