@@ -278,7 +278,7 @@ describe("bindingChatBody", () => {
     expect(body).toMatchObject({
       systemInstruction: { parts: [{ text: "be brief" }] },
       // Floor 256 so short client max_tokens still leave room for thought + answer.
-      generationConfig: { maxOutputTokens: 256, temperature: 0.2 },
+      generationConfig: { maxOutputTokens: 1024, temperature: 0.2 },
       contents: [
         { role: "user", parts: [{ text: "Say hi" }] },
         { role: "model", parts: [{ text: "Hello" }] },
@@ -289,6 +289,17 @@ describe("bindingChatBody", () => {
     expect(body).not.toHaveProperty("messages");
     expect(body).not.toHaveProperty("max_completion_tokens");
     expect(body).not.toHaveProperty("stream");
+  });
+
+  it("floors flash Gemini at 256", () => {
+    const body = bindingChatBody(
+      request({
+        bindingModel: "google/gemini-3.5-flash",
+        messages: [{ role: "user", content: "hi" }],
+        maxTokens: 16,
+      }),
+    );
+    expect(body.generationConfig).toMatchObject({ maxOutputTokens: 256 });
   });
 
   it("honors Gemini max_tokens above the 256 floor", () => {

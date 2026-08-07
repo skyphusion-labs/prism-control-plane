@@ -290,7 +290,9 @@ export function geminiBindingBody(request: InferenceRequest): Record<string, unk
   // send max_tokens: 16–32 (matrix smoke, short probes) get finishReason=MAX_TOKENS with
   // empty answer text and look like plane 502s. Floor the binding budget so short requests
   // still produce a visible reply; meter still uses returned usageMetadata.
-  const GEMINI_MIN_OUTPUT_TOKENS = 256;
+  // Pro needs a higher floor than Flash (measured: 256 still MAX_TOKENS empty on 3.1-pro).
+  const modelId = request.bindingModel ?? request.upstreamModel;
+  const GEMINI_MIN_OUTPUT_TOKENS = /gemini-.*-pro|gemini-3\.1-pro/i.test(modelId) ? 1024 : 256;
   const generationConfig: Record<string, unknown> = {
     maxOutputTokens: Math.max(request.maxTokens, GEMINI_MIN_OUTPUT_TOKENS),
   };
