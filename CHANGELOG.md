@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-08-08
+
+### Added
+
+- **Derived `version` field on `/health` and `/health/deep`.** The Worker advertises the version it
+  is running on its unauthenticated health surfaces, so "is the fix actually serving?" is answerable
+  from the wire rather than only with an account-scoped Cloudflare token from a system separate from
+  the one serving traffic. The value is a guarded literal in `src/version.ts`;
+  `tests/version.test.ts` derives the expected value by reading `package.json` off disk rather than
+  carrying a transcribed second copy, so a release that bumps one and not the other goes red. Merged
+  after the `v1.1.0` tag, so it first reaches the wire under this release. (#75,
+  fleet-chezmoi#1641)
+
+### Fixed
+
+- **`package-lock.json` root version.** Both root `version` fields read `1.0.0` while
+  `package.json` read `1.1.0`: the 1.0.0 and 1.1.0 release commits moved `package.json` and left the
+  lockfile behind. Both now read `1.1.1`.
+
+### Notes
+
+- PATCH per the repo rule (post-1.0 SemVer: MINOR for features, PATCH for fixes): this release
+  changes no behaviour, no schema and no binding, and there is nothing for a deployer to apply by
+  hand. It exists so a tag can be cut, because `v1.1.0` already points at the previous release and
+  a tag is not re-pointed.
+- Version pins moved here: `package.json`, `src/version.ts`, and the two root `version` fields in
+  `package-lock.json`.
+- Enumerated and deliberately NOT moved, each for a measured reason: `src/http.ts` `API_VERSION`
+  (the API contract major on the `prism-api-version` header, unchanged by a patch);
+  `docs/openapi.yaml` `info.version` (reads `1.0.0` and did not move at the 1.1.0 release, so it
+  does not track the package version); the `CLAUDE.md` status line (a claim about what is DEPLOYED,
+  and `v1.1.1` is not deployed at the time of this PR).
+
 ## [1.1.0] - 2026-08-07
 
 ### Added
