@@ -1,3 +1,7 @@
+## Unreleased
+
+- **fix(deps):** npm override `undici@7.29.0` (Dependabot; transitive of wrangler/miniflare, not Worker runtime).
+
 # Changelog
 
 ## [Unreleased]
