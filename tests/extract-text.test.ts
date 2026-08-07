@@ -99,3 +99,28 @@ describe("extractText", () => {
     expect(extractText({})).toBeNull();
   });
 });
+
+  it("reads Gemini thought + answer parts, prefers non-thought text", () => {
+    expect(
+      extractText({
+        candidates: [
+          {
+            content: {
+              parts: [
+                { thought: true, text: "reasoning" },
+                { text: "pong" },
+              ],
+            },
+          },
+        ],
+      }),
+    ).toBe("pong");
+  });
+
+  it("falls back to thought text when no answer part", () => {
+    expect(
+      extractText({
+        candidates: [{ content: { parts: [{ thought: true, text: "only think" }] } }],
+      }),
+    ).toBe("only think");
+  });

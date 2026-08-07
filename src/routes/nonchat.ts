@@ -15,6 +15,7 @@ import { newId } from "../crypto";
 import { errorResponse, jsonResponse, readJsonBody, MAX_BODY_BYTES } from "../http";
 import { priceUnits, resolvePrice, resolveUnitPrice } from "../meter";
 import {
+  buildDeepgramSttBindingParams,
   buildImageParams,
   buildMusicParams,
   buildSttParams,
@@ -25,8 +26,11 @@ import {
   extractMusicAsset,
   extractTranscript,
   extractVideoAsset,
+  isDeepgramBatchStt,
+  prefersAsyncImage,
   providerStateFailed,
 } from "../nonchat-upstream";
+import { resolveVideoDuration } from "../video-duration";
 import { periodBounds } from "../period";
 import { entitlesTier, planFromRow, type Plan } from "../plans";
 import { checkRateLimit, inferenceBucket } from "../rate-limit";
@@ -475,6 +479,20 @@ export async function handleImageGenerations(ctx: Ctx, request: Request): Promis
   // Optional reference image for i2i / edit models (https or data:).
   const imageUrl =
     requireString(raw, "image") ?? requireString(raw, "image_url") ?? undefined;
+
+  // gpt-image-2 (and explicit Prefer: respond-async) → Workflow; sync mobile clients
+  // time out around 90s while the provider often needs longer.
+  if (wantsAsync(request, raw) || prefersAsyncImage(gate.model.id)) {
+    return startAsyncLongRun(ctx, request, gate, {
+      kind: "image",
+      prompt,
+      lyrics: undefined,
+      imageUrl,
+      voice: undefined,
+      billableUnits: 1,
+    });
+  }
+
   const params = buildImageParams(gate.model.id, prompt, imageUrl);
   const up = await runUpstream(ctx, gate, params);
   if (!up.ok) return up.response;
@@ -578,9 +596,20 @@ export async function handleAudioTranscriptions(ctx: Ctx, request: Request): Pro
       '"audio" is required (base64 or data:audio/...;base64,...).',
     );
   }
-  const dataUrl = /^data:audio\/[a-zA-Z0-9.+-]+;base64,(.+)$/.exec(audio);
-  if (dataUrl) audio = dataUrl[1];
-  const params = buildSttParams(audio);
+  let mime = "audio/mpeg";
+  const dataUrl = /^data:(audio\/[a-zA-Z0-9.+-]+);base64,(.+)$/.exec(audio);
+  if (dataUrl) {
+    mime = dataUrl[1];
+    audio = dataUrl[2];
+  }
+
+  // Deepgram Nova batch: ReadableStream body via AI binding only (prism same; gateway 5006).
+  if (isDeepgramBatchStt(gate.model.id)) {
+    return runDeepgramBatchStt(ctx, gate, audio, mime);
+  }
+
+  // Whisper family: classic models need uint8 array; large-v3-turbo needs base64 string.
+  const params = buildSttParams(gate.model.id, audio);
   const up = await runUpstream(ctx, gate, params);
   if (!up.ok) return up.response;
   const fail = providerStateFailed(up.body);
@@ -588,6 +617,7 @@ export async function handleAudioTranscriptions(ctx: Ctx, request: Request): Pro
     await recordUnmetered(ctx, gate, "provider_failed", 200);
     return errorResponse(ctx.requestId, "upstream_error", fail);
   }
+  // Empty string is valid (silent clip); only a missing provider field is an error.
   const text = extractTranscript(up.body);
   if (text === null) {
     await recordUnmetered(ctx, gate, "no_transcript", 200);
@@ -602,6 +632,47 @@ export async function handleAudioTranscriptions(ctx: Ctx, request: Request): Pro
     200,
     up.gatewayLogId,
   );
+}
+
+/**
+ * Deepgram batch STT via `env.AI.run` with stream body. No gateway log id (binding bypass).
+ */
+async function runDeepgramBatchStt(
+  ctx: Ctx,
+  gate: NonChatGateOk,
+  audioBase64: string,
+  mime: string,
+): Promise<Response> {
+  if (!ctx.env.AI) {
+    return errorResponse(
+      ctx.requestId,
+      "unavailable",
+      "Deepgram STT requires the Worker AI binding ([ai] binding = \"AI\").",
+    );
+  }
+  try {
+    const params = buildDeepgramSttBindingParams(audioBase64, mime);
+    const result = await (
+      ctx.env.AI as unknown as { run: (m: string, p: unknown) => Promise<unknown> }
+    ).run(gate.model.upstream, params);
+    // Empty transcript (silence) is 200 + text:""; only a missing envelope is an error.
+    const text = extractTranscript(result);
+    if (text === null) {
+      await recordUnmetered(ctx, gate, "no_transcript", 200);
+      return errorResponse(ctx.requestId, "upstream_error", "STT returned no transcript.");
+    }
+    return meterAndRespond(ctx, gate, 1, { model: gate.model.id, text }, 200, null);
+  } catch (err) {
+    const m = err instanceof Error ? err.message : String(err);
+    await recordUnmetered(ctx, gate, "upstream_error", null);
+    return errorResponse(
+      ctx.requestId,
+      "upstream_error",
+      m.includes("5006") || m.toLowerCase().includes("bad input")
+        ? "STT provider rejected the audio format. Try Whisper Large v3 Turbo, or re-record a short clip."
+        : m.slice(0, 280),
+    );
+  }
 }
 
 export async function handleVideoGenerations(ctx: Ctx, request: Request): Promise<Response> {
@@ -626,17 +697,25 @@ export async function handleVideoGenerations(ctx: Ctx, request: Request): Promis
     );
   }
 
+  // Optional duration (seconds or "8s"); clamped per model (CF limits, see video-duration.ts).
+  const durationSec = resolveVideoDuration(gate.model.id, raw.duration ?? raw.seconds).seconds;
+
   if (wantsAsync(request, raw)) {
-    return startAsyncVideoJob(ctx, request, gate, prompt, imageUrl);
+    return startAsyncVideoJob(ctx, request, gate, prompt, imageUrl, durationSec);
   }
 
-  const produced = await produceVideo(ctx, request, gate, prompt, imageUrl);
+  const produced = await produceVideo(ctx, request, gate, prompt, imageUrl, durationSec);
   if (!produced.ok) return produced.response;
   return meterAndRespond(
     ctx,
     gate,
     1,
-    { model: gate.model.id, video: produced.video, result: produced.upstreamBody },
+    {
+      model: gate.model.id,
+      video: produced.video,
+      duration: durationSec,
+      result: produced.upstreamBody,
+    },
     200,
     produced.gatewayLogId,
   );
@@ -648,6 +727,7 @@ async function startAsyncVideoJob(
   gate: NonChatGateOk,
   prompt: string,
   imageUrl: string | undefined,
+  durationSec: number,
 ): Promise<Response> {
   return startAsyncLongRun(ctx, request, gate, {
     kind: "video",
@@ -656,6 +736,7 @@ async function startAsyncVideoJob(
     imageUrl,
     voice: undefined,
     billableUnits: 1,
+    durationSec,
   });
 }
 
@@ -668,6 +749,7 @@ async function produceVideo(
   gate: NonChatGateOk,
   prompt: string,
   imageUrl: string | undefined,
+  durationSec?: number,
 ): Promise<
   | { ok: true; video: string; gatewayLogId: string | null; upstreamBody: unknown }
   | { ok: false; response: Response }
@@ -697,7 +779,10 @@ async function produceVideo(
     downloadUrl = mediaPublicUrl(origin, `/v1/media/${downTok.token}`);
   }
 
-  const params = buildVideoParams(gate.model.id, prompt, imageUrl, { uploadUrl });
+  const params = buildVideoParams(gate.model.id, prompt, imageUrl, {
+    uploadUrl,
+    durationSec,
+  });
   const up = await runUpstream(ctx, gate, params);
   if (!up.ok) return { ok: false, response: up.response };
   const fail = providerStateFailed(up.body);
@@ -809,19 +894,21 @@ async function startAsyncMusicJob(
 /**
  * Create D1 job row + Cloudflare Workflow instance (NOT waitUntil).
  * Multi-minute AI.run must use Workflows -- waitUntil dies ~30s after the 202.
- * Covers video, music, speech. Image stays sync.
+ * Covers video, music, speech, and slow image (gpt-image-2).
  */
 async function startAsyncLongRun(
   ctx: Ctx,
   request: Request,
   gate: NonChatGateOk,
   args: {
-    kind: "video" | "music" | "speech";
+    kind: "video" | "music" | "speech" | "image";
     prompt: string;
     lyrics: string | undefined;
     imageUrl: string | undefined;
     voice: string | undefined;
     billableUnits: number;
+    /** Video only: clamped duration seconds. */
+    durationSec?: number;
   },
 ): Promise<Response> {
   if (!ctx.env.LONGRUN) {
@@ -855,7 +942,7 @@ async function startAsyncLongRun(
   let imageUrl = args.imageUrl;
   let imageObjectKey: string | undefined;
   if (
-    args.kind === "video" &&
+    (args.kind === "video" || args.kind === "image") &&
     imageUrl &&
     imageUrl.startsWith("data:") &&
     ctx.env.MEDIA
@@ -891,6 +978,7 @@ async function startAsyncLongRun(
         monthlyIncludedMicroUsd: gate.plan.monthlyIncludedMicroUsd,
         origin,
         startedAtIso: now,
+        durationSec: args.durationSec,
       },
     });
   } catch (err) {

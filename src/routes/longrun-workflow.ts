@@ -1,4 +1,4 @@
-// Durable long-run video / music / speech via Cloudflare Workflows.
+// Durable long-run video / music / speech / slow image via Cloudflare Workflows.
 //
 // Why not ctx.waitUntil (see prism README + CLAUDE.md):
 //   waitUntil has ~30s after the HTTP response. MiniMax music and UB video
@@ -7,7 +7,7 @@
 //
 // Pattern mirrors prism LongRunWorkflow: step.do("invoke-model") holds the
 // blocking AI call; later steps rehost + meter + finalize D1.
-// Image gens stay sync (usually seconds).
+// Most image gens stay sync; gpt-image-2 (and Prefer: respond-async) use this path.
 
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { allocateCharge, decideBalance } from "../balance";
@@ -21,14 +21,17 @@ import {
   mediaSigningSecret,
   mintDownloadToken,
   mintUploadToken,
+  newImageObjectKey,
   newMusicObjectKey,
   newVideoObjectKey,
 } from "../media";
 import {
+  buildImageParams,
   buildMusicParams,
   buildTtsParams,
   buildVideoParams,
   extractAudioBase64,
+  extractImageAsset,
   extractMusicAsset,
   extractVideoAsset,
   nonChatRunnerFor,
@@ -39,7 +42,7 @@ import { priceUnits } from "../meter";
 import { d1Store } from "../store-d1";
 import type { UsageEvent } from "../store";
 
-export type PlaneLongRunKind = "video" | "music" | "speech";
+export type PlaneLongRunKind = "video" | "music" | "speech" | "image";
 
 /**
  * Workflow event payload. Prompt/lyrics/speech text live ONLY here for the job
@@ -50,7 +53,7 @@ export interface PlaneLongRunParams extends Record<string, unknown> {
   kind: PlaneLongRunKind;
   modelId: string;
   upstreamModel: string;
-  /** Music/video prompt, or TTS input text. */
+  /** Music/video/image prompt, or TTS input text. */
   prompt: string;
   lyrics?: string;
   /** TTS voice override (Aura speaker). */
@@ -71,6 +74,8 @@ export interface PlaneLongRunParams extends Record<string, unknown> {
   /** Origin for signed media URLs (e.g. https://play-proxy.skyphusion.org). */
   origin: string;
   startedAtIso: string;
+  /** Video only: clamped duration seconds (client request or model default). */
+  durationSec?: number;
 }
 
 export class PlaneLongRunWorkflow extends WorkflowEntrypoint<Env, PlaneLongRunParams> {
@@ -143,7 +148,12 @@ export class PlaneLongRunWorkflow extends WorkflowEntrypoint<Env, PlaneLongRunPa
               ? buildMusicParams(p.prompt, p.lyrics)
               : p.kind === "speech"
                 ? buildTtsParams(p.modelId, p.prompt, { voice: p.voice })
-                : buildVideoParams(p.modelId, p.prompt, image, { uploadUrl });
+                : p.kind === "image"
+                  ? buildImageParams(p.modelId, p.prompt, image)
+                  : buildVideoParams(p.modelId, p.prompt, image, {
+                      uploadUrl,
+                      durationSec: p.durationSec,
+                    });
 
           const entry = findModel(p.modelId);
           if (!entry) throw new Error(`Model not in catalog: ${p.modelId}`);
@@ -185,6 +195,19 @@ export class PlaneLongRunWorkflow extends WorkflowEntrypoint<Env, PlaneLongRunPa
             return { url, gatewayLogId: result.gatewayLogId };
           }
 
+          // Image: b64 or URL → MEDIA when possible, else pass provider URL.
+          if (p.kind === "image") {
+            const img = extractImageAsset(result.body);
+            if (!img || (!img.b64_json && !img.url)) {
+              throw new Error("Image generation returned no image payload.");
+            }
+            if (img.b64_json) {
+              const url = await putImageBytes(this.env, p, img.b64_json);
+              return { url, gatewayLogId: result.gatewayLogId };
+            }
+            return { url: img.url!, gatewayLogId: result.gatewayLogId };
+          }
+
           let url: string | null =
             p.kind === "music" ? extractMusicAsset(result.body) : extractVideoAsset(result.body);
 
@@ -204,7 +227,7 @@ export class PlaneLongRunWorkflow extends WorkflowEntrypoint<Env, PlaneLongRunPa
         },
       );
 
-      // Step 2: rehost provider HTTPS music onto MEDIA when possible.
+      // Step 2: rehost provider HTTPS music/image onto MEDIA when possible.
       const finalAsset = await step.do(
         "rehost-asset",
         { retries: { limit: 2, delay: "5 seconds", backoff: "exponential" } },
@@ -213,8 +236,15 @@ export class PlaneLongRunWorkflow extends WorkflowEntrypoint<Env, PlaneLongRunPa
             const hosted = await rehostMusic(this.env, p, asset.url);
             if (hosted) return { url: hosted, rehosted: true };
           }
-          // speech already on MEDIA; video usually already a URL or our media path
-          return { url: asset.url, rehosted: p.kind === "speech" };
+          if (p.kind === "image" && looksLikeHttpUrl(asset.url)) {
+            const hosted = await rehostImage(this.env, p, asset.url);
+            if (hosted) return { url: hosted, rehosted: true };
+          }
+          // speech/image-from-b64 already on MEDIA; video usually URL or our media path
+          return {
+            url: asset.url,
+            rehosted: p.kind === "speech" || (p.kind === "image" && !looksLikeHttpUrl(asset.url)),
+          };
         },
       );
 
@@ -236,6 +266,13 @@ export class PlaneLongRunWorkflow extends WorkflowEntrypoint<Env, PlaneLongRunPa
               audio: finalAsset.url,
               format: "mp3",
               model: p.modelId,
+            });
+          } else if (p.kind === "image") {
+            resultJson = JSON.stringify({
+              created: Math.floor(Date.now() / 1000),
+              data: [{ url: finalAsset.url }],
+              model: p.modelId,
+              rehosted: finalAsset.rehosted,
             });
           } else {
             resultJson = JSON.stringify({ video: finalAsset.url, model: p.modelId });
@@ -335,6 +372,61 @@ async function putSpeechAudio(
   });
   const downTok = await mintDownloadToken(secret, objectKey);
   return mediaPublicUrl(p.origin, `/v1/media/${downTok.token}`);
+}
+
+/** Decode image base64 and store under image/ for signed download. */
+async function putImageBytes(
+  env: Env,
+  p: PlaneLongRunParams,
+  imageBase64: string,
+): Promise<string> {
+  const secret = mediaSigningSecret(env);
+  if (!env.MEDIA || !secret) {
+    throw new Error("MEDIA R2 + signing required to store async image results.");
+  }
+  let raw = imageBase64;
+  const dataUrl = /^data:image\/[^;]+;base64,(.+)$/i.exec(raw);
+  if (dataUrl) raw = dataUrl[1];
+  const bin = atob(raw);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  if (bytes.byteLength === 0 || bytes.byteLength > MEDIA_MAX_BYTES) {
+    throw new Error(`Image size ${bytes.byteLength} is empty or over MEDIA cap.`);
+  }
+  const objectKey = newImageObjectKey(p.accountId, p.requestId);
+  await env.MEDIA.put(objectKey, bytes, {
+    httpMetadata: { contentType: "image/png" },
+  });
+  const downTok = await mintDownloadToken(secret, objectKey);
+  return mediaPublicUrl(p.origin, `/v1/media/${downTok.token}`);
+}
+
+async function rehostImage(
+  env: Env,
+  p: PlaneLongRunParams,
+  sourceUrl: string,
+): Promise<string | null> {
+  const secret = mediaSigningSecret(env);
+  if (!env.MEDIA || !secret) return null;
+  try {
+    const res = await fetch(sourceUrl, {
+      method: "GET",
+      headers: { accept: "image/*,application/octet-stream,*/*" },
+      redirect: "follow",
+    });
+    if (!res.ok || !res.body) return null;
+    const contentType = res.headers.get("content-type") ?? "image/png";
+    const len = Number(res.headers.get("content-length") ?? "0");
+    if (len > MEDIA_MAX_BYTES) return null;
+    const objectKey = newImageObjectKey(p.accountId, p.requestId);
+    await env.MEDIA.put(objectKey, res.body, {
+      httpMetadata: { contentType: contentType.split(";")[0]?.trim() || "image/png" },
+    });
+    const downTok = await mintDownloadToken(secret, objectKey);
+    return mediaPublicUrl(p.origin, `/v1/media/${downTok.token}`);
+  } catch {
+    return null;
+  }
 }
 
 async function rehostMusic(

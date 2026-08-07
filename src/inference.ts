@@ -172,13 +172,29 @@ export function extractText(body: unknown): string | null {
   }
 
   // Gemini-native: candidates[0].content.parts[].text
+  // Gemini 3.x may interleave thought parts ({ thought: true, text }) with answer parts;
+  // join every string `text` field (including thought text as last-resort if no answer).
   const candidates = asRecord.candidates;
   if (Array.isArray(candidates) && candidates[0] && typeof candidates[0] === "object") {
-    const parts = (candidates[0] as { content?: { parts?: Array<{ text?: string }> } }).content
-      ?.parts;
+    const cand0 = candidates[0] as {
+      content?: { parts?: Array<{ text?: string; thought?: boolean }> };
+      finishReason?: string;
+    };
+    const parts = cand0.content?.parts;
     if (Array.isArray(parts)) {
-      const text = parts.map((p) => p.text ?? "").join("");
-      if (text) return text;
+      const answer = parts
+        .filter((p) => typeof p.text === "string" && p.thought !== true)
+        .map((p) => p.text as string)
+        .join("");
+      if (answer) return answer;
+      const anyText = parts
+        .filter((p) => typeof p.text === "string")
+        .map((p) => p.text as string)
+        .join("");
+      if (anyText) return anyText;
+      // Structure present but empty text (e.g. SAFETY / MAX_TOKENS spent on thought only).
+      // Prefer "" over null so chat does not 502 "unreadable" on a successful binding call.
+      if (parts.length === 0 || cand0.finishReason) return "";
     }
   }
 

@@ -56,7 +56,24 @@ export type MeterOutcome =
  */
 export function extractUsage(body: unknown): TokenUsage | null {
   if (typeof body !== "object" || body === null) return null;
-  const usage = (body as { usage?: unknown }).usage;
+  const asRec = body as Record<string, unknown>;
+
+  // Gemini-native: usageMetadata.promptTokenCount / candidatesTokenCount
+  const um = asRec.usageMetadata;
+  if (typeof um === "object" && um !== null) {
+    const g = um as Record<string, unknown>;
+    const input = g.promptTokenCount ?? g.prompt_token_count;
+    const output = g.candidatesTokenCount ?? g.candidates_token_count;
+    if (Number.isInteger(input) && Number.isInteger(output)) {
+      const inputTokens = input as number;
+      const outputTokens = output as number;
+      if (inputTokens >= 0 && outputTokens >= 0) {
+        return { inputTokens, outputTokens };
+      }
+    }
+  }
+
+  const usage = asRec.usage;
   if (typeof usage !== "object" || usage === null) return null;
   const raw = usage as Record<string, unknown>;
   const input = raw.prompt_tokens ?? raw.input_tokens;

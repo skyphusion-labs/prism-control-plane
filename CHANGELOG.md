@@ -2,6 +2,60 @@
 
 ## [Unreleased]
 
+## [0.4.36] - 2026-08-06
+
+### Fixed
+
+- **Store redeem Production JWS (1.0):** leaf ES256 verify extracts SPKI from the
+  X.509 cert in `x5c[0]` (was incorrectly importing the raw cert as SPKI). Production
+  environment requires successful crypto verify + x5c chain length >= 2. Sandbox no
+  longer trusts decode-only by default; optional `STORE_REDEEM_ALLOW_SANDBOX_TRUST=true`
+  for lab only. `STORE_REDEEM_TRUST_DECODE` never applies to Production claims.
+
+## [0.4.35] - 2026-08-06
+
+### Fixed
+
+- **FLUX-2 image gen 5006 multipart:** FLUX-2 (dev / klein-4b / klein-9b) requires
+  `{ multipart: { body, contentType } }` on `env.AI.run`. Plane was POSTing JSON via
+  REST → AiError "required properties at '/' are 'multipart'". Now binding path with
+  FormData (same as prism playground), gateway bypassed (stream in unsupported).
+- **Phoenix / Dreamshaper / SDXL empty image:** these return PNG `ReadableStream`;
+  AI Gateway cannot proxy stream out. Binding bypass + drain stream into `{ image: b64 }`.
+- **Imagen-4 7003 User Input Error:** schema is `prompt` + `aspect_ratio` (not nano-banana
+  `output_format`). Additional properties rejected.
+- **Aura-2 Spanish default voice:** default was `luna` (EN-only enum); ES defaults to
+  `sirio`. Explicit client voice still wins.
+- **Nova empty transcript → 502:** silent clips now return `200` + `text: ""` when the
+  provider envelope is present but empty (not upstream_error).
+- **Gemini 3.x thought budget:** floor `maxOutputTokens` at 256 in the binding body so
+  short client `max_tokens` (16–32) do not finish with empty answer (MAX_TOKENS).
+- **Gemini chat 502:** binding sent OpenAI `messages`/`max_completion_tokens`; Gemini needs
+  native `contents` / `systemInstruction` / `generationConfig` (assistant→model). Stream path
+  buffers non-stream like Anthropic and emits OpenAI SSE. Meter reads `usageMetadata`.
+- **gpt-image-2 mobile timeout:** auto-async Workflow (`kind: image`) for gpt-image-2
+  (and any image request with Prefer: respond-async); poll `GET /v1/jobs/{id}` for
+  `result.data[].url`.
+
+## [0.4.34] - 2026-08-06
+
+### Added
+
+- **Video duration control:** `POST /v1/videos/generations` accepts optional `duration`
+  (seconds or Veo-style `"8s"`). Clamped per CF model limits (Grok 1–15, Seedance 4–12,
+  Veo 4|6|8, etc.). Async Workflow + sync path both honor it.
+
+## [0.4.33] - 2026-08-06
+
+### Fixed
+
+- **STT classic Whisper / tiny-en 5006 Bad input:** CF schema requires `audio` as a uint8
+  array (0-255), not a base64 string. Plane was sending base64 for all Whisper models;
+  only `whisper-large-v3-turbo` accepts base64. Live symptom: AIError oneOf type mismatch
+  on `/audio` (iOS Transcribe).
+- **Deepgram Nova-3 batch:** REST JSON cannot carry ReadableStream; call `env.AI.run` with
+  `{ audio: { body, contentType } }` (same as prism playground; gateway rejects streams).
+
 ## [0.4.32] - 2026-08-06
 
 ### Added

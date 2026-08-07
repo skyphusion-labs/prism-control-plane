@@ -105,3 +105,8 @@ AI_GATEWAY_ID = "prism-proxy"
 #
 #   ADMIN_TOKEN        Operator bearer for /admin/*. UNSET means there is no operator surface at all
 #                      (every /admin route answers 503), by construction rather than by discipline.
+
+# Lab only. Never set on production play-proxy.
+# STORE_REDEEM_TRUST_DECODE = "true"
+# STORE_REDEEM_ALLOW_SANDBOX_TRUST = "true"
+

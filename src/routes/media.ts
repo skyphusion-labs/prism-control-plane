@@ -169,11 +169,15 @@ export async function handleMediaDownload(
 
   const size = head.size;
   const isMusic = parsed.objectKey.startsWith("music/");
+  const isImage = parsed.objectKey.startsWith("image/");
   const contentType =
-    head.httpMetadata?.contentType ?? (isMusic ? "audio/mpeg" : "video/mp4");
+    head.httpMetadata?.contentType ??
+    (isMusic ? "audio/mpeg" : isImage ? "image/png" : "video/mp4");
   const disposition = isMusic
     ? 'inline; filename="prism-music.mp3"'
-    : 'inline; filename="video.mp4"';
+    : isImage
+      ? 'inline; filename="prism-image.png"'
+      : 'inline; filename="video.mp4"';
 
   const baseHeaders = new Headers();
   baseHeaders.set("content-type", contentType);

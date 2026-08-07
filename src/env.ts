@@ -130,6 +130,12 @@ export interface Env {
    * Leave unset in production (Xcode environment claims still redeem without this flag).
    */
   STORE_REDEEM_TRUST_DECODE?: string;
+  /**
+   * When "true", Sandbox (TestFlight) JWS may redeem after decode if leaf ES256
+   * verify cannot run. Default unset = Sandbox must verify like Production.
+   * Never used for environment=Production.
+   */
+  STORE_REDEEM_ALLOW_SANDBOX_TRUST?: string;
 
   /**
    * Optional Google Play service account JSON for verifying Play Billing tokens on
