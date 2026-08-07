@@ -497,11 +497,15 @@ These are named rather than defaulted, because each one is a product or money de
 does not get to invent. Status updated 2026-08-05.
 
 1. **Enrollment source of truth.** Enrollment remains **operator-minted one-time tokens** only.
-   **App Store + Google Play credit top-up is UNPARKED (2026-08-06):** `POST /v1/store/redeem`
+   **App Store + Google Play credit top-up is LIVE (plane 0.4.36 / iOS 1.0):** `POST /v1/store/redeem`
    with StoreKit 2 `signed_transaction` or Play `platform=google_play` + `purchase_token` +
-   `product_id` grants prepaid credit (product map in `src/store-products.ts`). Play verification
-   uses `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON` when set. This does **not** create accounts; it tops up
-   an already-enrolled device. First-party signup remains future work.
+   `product_id` grants prepaid credit (product map in `src/store-products.ts`). **Production**
+   Apple JWS must pass leaf ES256 verify (SPKI from `x5c[0]`) and include a multi-cert chain;
+   `STORE_REDEEM_TRUST_DECODE` never applies to `environment=Production`. Sandbox may use
+   `STORE_REDEEM_ALLOW_SANDBOX_TRUST=true` only on lab workers. Xcode Configuration.storekit
+   (`environment=Xcode`) is decode-only. Play verification uses `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON`
+   when set. This does **not** create accounts; it tops up an already-enrolled device.
+   First-party signup remains future work.
 2. **Plan pricing and credit prices.** **DEFERRED** (ruling 2026-08-05). The seeded `dev` plan
    stays provisional. Operators can still upsert via `POST /admin/plans`. Commercial plan numbers,
    credit prices, and margin over Cloudflare rates are unset until un-parked.
