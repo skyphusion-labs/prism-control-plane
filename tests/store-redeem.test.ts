@@ -4,10 +4,9 @@ import {
   isProductionStoreEnvironment,
   isSandboxStoreEnvironment,
   isXcodeStoreEnvironment,
-  jwsHasCertChain,
-  spkiFromX509Der,
-  tryVerifyJwsEs256,
+  verifyAppleTransactionJws,
 } from "../src/apple-jws";
+import { parseCertificate } from "../src/x509";
 import {
   creditMicroUsdForProduct,
   isKnownStoreProduct,
@@ -73,27 +72,29 @@ describe("apple JWS decode", () => {
     expect(isProductionStoreEnvironment("Sandbox")).toBe(false);
   });
 
-  it("requires x5c chain shape for jwsHasCertChain", () => {
-    const noChain = fakeJws({ transactionId: "1", productId: "p", bundleId: "b" });
-    expect(jwsHasCertChain(noChain)).toBe(false);
-    const withChain = fakeJws(
-      { transactionId: "1", productId: "p", bundleId: "b" },
-      { x5c: ["YQ==", "Yg=="] },
-    );
-    expect(jwsHasCertChain(withChain)).toBe(true);
-  });
-
-  it("tryVerifyJwsEs256 returns null without x5c", async () => {
+  it("refuses a JWS with no certificate chain", async () => {
     const jws = fakeJws({
       transactionId: "1",
       productId: "org.skyphusion.prism.credit.5",
       bundleId: "org.skyphusion.prism",
     });
-    expect(await tryVerifyJwsEs256(jws)).toBeNull();
+    expect(await verifyAppleTransactionJws(jws)).toEqual({ ok: false, reason: "missing_x5c" });
   });
 
-  it("spkiFromX509Der rejects garbage", () => {
-    expect(spkiFromX509Der(new Uint8Array([1, 2, 3]))).toBeNull();
+  it("refuses an x5c whose entries are not certificates", async () => {
+    // A pair of one-byte blobs satisfies any length-only check, which is the point.
+    const jws = fakeJws(
+      { transactionId: "1", productId: "p", bundleId: "b" },
+      { x5c: ["YQ==", "Yg=="] },
+    );
+    expect(await verifyAppleTransactionJws(jws)).toEqual({
+      ok: false,
+      reason: "leaf_parse_failed",
+    });
+  });
+
+  it("parseCertificate rejects garbage", () => {
+    expect(parseCertificate(new Uint8Array([1, 2, 3]))).toBeNull();
   });
 });
 
