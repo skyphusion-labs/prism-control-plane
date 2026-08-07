@@ -224,7 +224,7 @@ answers `503` when it cannot serve, so a monitor watching status codes can see i
 - Comments explain the DECISION and what breaks without it, not what the next line does. Several
   modules carry long headers for exactly that reason; do not sand them down.
 - Handle / username default: `skyphusion`.
-- Conventional Commits. License: AGPL-3.0-only. Pre-1.0 SemVer: PATCH for fixes, MINOR for features.
+- Conventional Commits. License: AGPL-3.0-only. Post-1.0 SemVer: MINOR for features, PATCH for fixes.
 - Keep status honest. Do not describe a deploy, a binding, or a plan tier that is not in the tree.
 
 ## Crew + identity

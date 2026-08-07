@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-08-07
+
+### Added
+
+- **Stable 1.0 cut** aligned with Prism for iOS / Android 1.0.0 clients.
+- Full multimodal metering plane: chat, image, video, music, TTS, STT (file + live),
+  async Workflow jobs, dual-pool usage, Google Play / App Store redeem.
+
+### Included (from 0.4.x train)
+
+- Video per-model duration clamp (`video-duration.ts`); client-selectable clip length.
+- Async Prefer + `GET /v1/jobs` for video, music, speech, gpt-image-2.
+- Production StoreKit JWS leaf verify (0.4.36); Play Billing redeem path.
+- Gemini native binding; FLUX-2 multipart; STT empty-transcript honesty.
+- Catalog + architecture docs for the 1.0 client estate.
+
+### Notes
+
+- SemVer: post-1.0, MINOR for features, PATCH for fixes.
+- Deploy remains tag-gated on `main` (`v*`).
+
 ## [0.4.36] - 2026-08-06
 
 ### Fixed
