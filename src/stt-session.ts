@@ -36,6 +36,8 @@ interface SessionMeta {
   request_id: string;
   model_id: string;
   started_ms: number;
+  /** AI Gateway log id, when the binding surfaced one at open. Null is honest, not a placeholder. */
+  gateway_log_id: string | null;
 }
 
 export class SttSession extends DurableObject<Env> {
@@ -135,9 +137,30 @@ export class SttSession extends DurableObject<Env> {
     let upstream: WebSocket | null;
     try {
       const gatewayId = (this.env.AI_GATEWAY_ID ?? "").trim();
-      type RunOpts = { websocket: boolean; gateway?: { id: string } };
+      type RunOpts = {
+        websocket: boolean;
+        gateway?: { id: string; metadata?: Record<string, string> };
+      };
       const opts: RunOpts = { websocket: true };
-      if (gatewayId) opts.gateway = { id: gatewayId };
+      // ATTRIBUTE THE OPEN, or this door is invisible to reconciliation.
+      //
+      // decideAdjustment joins a gateway row to a ledger row on cf-aig-metadata.request_id. Without
+      // it every live-voice row lands in `skipped: no_request_id`, a bucket whose detail string says
+      // the traffic "was sent by something else on the same gateway" -- false for every session, and
+      // the reason nobody would investigate it. The same fields the other doors send, minus
+      // cf_token_id, which does not exist here: the upstream is the AI binding, not a minted token.
+      // Cloudflare keeps the first five metadata entries and silently drops the rest; this is four.
+      if (gatewayId) {
+        opts.gateway = {
+          id: gatewayId,
+          metadata: {
+            account_id: accountId,
+            client_id: clientId,
+            plan_id: planId,
+            request_id: requestId,
+          },
+        };
+      }
 
       const resp = (await (
         this.env.AI as unknown as {
@@ -149,6 +172,17 @@ export class SttSession extends DurableObject<Env> {
         opts,
       ));
       upstream = resp?.webSocket ?? null;
+      // Recorded opportunistically: the binding exposes the gateway log id after a run, but a
+      // websocket open may not populate it. Stored when present, absent otherwise -- never
+      // fabricated, because a wrong id joins the ledger row to somebody else's gateway row.
+      const gatewayLogId = (this.env.AI as unknown as { aiGatewayLogId?: string | null })
+        .aiGatewayLogId;
+      if (typeof gatewayLogId === "string" && gatewayLogId.length > 0) {
+        this.ctx.storage.sql.exec(
+          `INSERT OR REPLACE INTO meta (k, v) VALUES ('gateway_log_id', ?)`,
+          gatewayLogId,
+        );
+      }
     } catch (err) {
       return Response.json(
         {
@@ -277,6 +311,7 @@ export class SttSession extends DurableObject<Env> {
     const request_id = map.get("request_id");
     const model_id = map.get("model_id") ?? FLUX_STT_MODEL;
     const started_ms = Number(map.get("started_ms") ?? Date.now());
+    const gateway_log_id = map.get("gateway_log_id") ?? null;
     if (!account_id || !client_id || !plan_id || !request_id) return null;
     return {
       account_id,
@@ -285,6 +320,7 @@ export class SttSession extends DurableObject<Env> {
       request_id,
       model_id,
       started_ms: Number.isFinite(started_ms) ? started_ms : Date.now(),
+      gateway_log_id,
     };
   }
 
@@ -307,54 +343,129 @@ export class SttSession extends DurableObject<Env> {
       return;
     }
 
-    const entry = findModel(meta.model_id);
-    const unitPrice = entry ? resolveUnitPrice(entry, null) : null;
-    const unitMicro =
-      unitPrice && unitPrice.unit === "audio_minute"
-        ? unitPrice.microUsdPerUnit
-        : FLUX_DEFAULT_UNIT_MICRO;
-
     const rawSec = Math.max(0, (Date.now() - meta.started_ms) / 1000);
     const durationSec = Math.min(rawSec, FLUX_MAX_SESSION_MS / 1000);
     const units = billableAudioMinutes(durationSec);
-    const microUsd = units * unitMicro;
 
     try {
       const store = d1Store(this.env.DB);
+
+      // THE OPERATOR RATE IS THE RATE, and it is read from the same place the pre-flight gate read
+      // it. Resolving with a hardcoded null override made an operator who set unit_micro_usd via
+      // POST /admin/model-prices get gated at their rate and metered at the catalog's, with no
+      // error -- and the gate's own `model_unpriced` refusal could never protect a meter that never
+      // asked the store. The rate is still not taken from request headers, which are a tamper
+      // surface; the store is not a header.
+      const entry = findModel(meta.model_id);
+      const priceRow = entry ? await store.getModelPrice(entry.id) : null;
+      const unitPrice = entry ? resolveUnitPrice(entry, priceRow) : null;
+      const unitMicro =
+        unitPrice && unitPrice.unit === "audio_minute"
+          ? unitPrice.microUsdPerUnit
+          : FLUX_DEFAULT_UNIT_MICRO;
+      const microUsd = units * unitMicro;
+
       // Re-validate ownership at finalize (not only at handoff): client must still exist,
       // belong to the account, not be revoked; account not suspended; plan still entitles the model.
       const client = await store.getClient(meta.client_id);
       const account = await store.getAccount(meta.account_id);
       const planRow = await store.getPlan(meta.plan_id);
-      if (!client || !account || !planRow) {
-        console.error("stt finalize missing client/account/plan", meta);
-        return;
-      }
-      if (client.account_id !== account.id || client.account_id !== meta.account_id) {
-        console.error("stt finalize client/account mismatch", meta.client_id, meta.account_id);
-        return;
-      }
-      if (client.revoked_at) {
-        console.error("stt finalize client revoked", meta.client_id);
-        return;
-      }
-      if (account.suspended_at) {
-        console.error("stt finalize account suspended", meta.account_id);
-        return;
-      }
-      const plan = planFromRow(planRow);
-      if (!plan.ok) {
-        console.error("stt finalize plan unusable", plan.reason);
-        return;
-      }
-      const modelEntry = findModel(meta.model_id);
-      if (!modelEntry || !entitlesTier(plan.plan, modelEntry.tier)) {
-        console.error("stt finalize model not entitled", meta.model_id, plan.plan.id);
+
+      // usage_events.account_id AND usage_events.client_id are both declared foreign keys, so with
+      // either row absent there is nothing writable. This is the only branch that may discard the
+      // session, and it is a schema constraint rather than a policy choice.
+      if (!client || !account) {
+        console.error("stt finalize missing client/account, cannot write a ledger row", meta);
         return;
       }
 
       const now = new Date();
       const pkey = periodKey(now);
+
+      /**
+       * Record the session WITHOUT charging for it.
+       *
+       * Every refusal below reaches this rather than returning. The session really happened and
+       * really cost us upstream, so discarding it would make it indistinguishable from a session
+       * that never opened -- the same reasoning chat.ts gives for writing an unmetered row when an
+       * upstream times out. It is the posture the revoke case most needs: the user whose key an
+       * operator just revoked is exactly the user you want a record of.
+       */
+      const recordUnmetered = async (reason: string, accountId: string): Promise<void> => {
+        await store.recordUsage({
+          id: newId("use"),
+          request_id: meta.request_id,
+          account_id: accountId,
+          client_id: client.id,
+          model_id: meta.model_id,
+          period_key: pkey,
+          input_tokens: null,
+          output_tokens: null,
+          micro_usd: 0,
+          from_allowance_micro_usd: 0,
+          from_credit_micro_usd: 0,
+          metered: false,
+          unmetered_reason: reason,
+          upstream_status: 101,
+          gateway_log_id: meta.gateway_log_id,
+        });
+      };
+
+      if (client.account_id !== account.id || client.account_id !== meta.account_id) {
+        console.error("stt finalize client/account mismatch", meta.client_id, meta.account_id);
+        // Attributed to the CLIENT's own account, which is the pair the foreign keys agree on.
+        // Nothing is charged, so this records the discrepancy without billing anybody for it.
+        await recordUnmetered(
+          `client/account mismatch at finalize: session meta claimed account ${meta.account_id}, ` +
+            `client ${client.id} belongs to ${client.account_id}. ${units} audio minute(s) served ` +
+            "and deliberately not charged",
+          client.account_id,
+        );
+        return;
+      }
+      if (client.revoked_at) {
+        await recordUnmetered(
+          `client ${client.id} was revoked before the session closed; ${units} audio minute(s) ` +
+            "served and not charged",
+          account.id,
+        );
+        return;
+      }
+      if (account.suspended_at) {
+        await recordUnmetered(
+          `account ${account.id} was suspended before the session closed; ${units} audio minute(s) ` +
+            "served and not charged",
+          account.id,
+        );
+        return;
+      }
+      if (!planRow) {
+        await recordUnmetered(
+          `plan ${meta.plan_id} no longer exists, so no allowance split can be computed; ` +
+            `${units} audio minute(s) served and not charged`,
+          account.id,
+        );
+        return;
+      }
+      const plan = planFromRow(planRow);
+      if (!plan.ok) {
+        await recordUnmetered(
+          `plan ${meta.plan_id} is unusable (${plan.reason}); ${units} audio minute(s) served and ` +
+            "not charged",
+          account.id,
+        );
+        return;
+      }
+      const modelEntry = findModel(meta.model_id);
+      if (!modelEntry || !entitlesTier(plan.plan, modelEntry.tier)) {
+        await recordUnmetered(
+          `model ${meta.model_id} is no longer entitled under plan ${plan.plan.id}; ${units} ` +
+            "audio minute(s) served and not charged",
+          account.id,
+        );
+        return;
+      }
+
       const period = await store.getPeriod(account.id, pkey);
       const split =
         microUsd > 0
@@ -379,7 +490,7 @@ export class SttSession extends DurableObject<Env> {
         metered: true,
         unmetered_reason: null,
         upstream_status: 101,
-        gateway_log_id: null,
+        gateway_log_id: meta.gateway_log_id,
       });
     } catch (err) {
       console.error("stt finalize meter failed", {
