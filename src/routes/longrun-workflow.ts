@@ -319,7 +319,20 @@ async function meterJob(
   });
   let fromAllowance = 0;
   let fromCredit = 0;
-  if (priced.microUsd > 0 && balance.outcome === "allow") {
+  // ALLOCATE WHENEVER THERE IS A PRICE, NOT ONLY WHEN THE BALANCE STILL READS "allow".
+  //
+  // recordUsage drives every money column from these two fields: allowance_spent advances by
+  // fromAllowance and accounts.spent_micro_usd advances only when fromCredit > 0. Leaving them at
+  // zero on a metered row therefore advances usage_periods.micro_usd by the full price while
+  // neither pool moves -- served, and not charged.
+  //
+  // It cannot be recovered downstream either: the row is written metered with the correct
+  // micro_usd, so reconcile computes a zero delta and reports in_agreement forever. Only the pool
+  // columns are wrong and reconcile does not read them.
+  //
+  // Overshooting by one request when the balance has just been exhausted is the accepted bound
+  // here, the same one chat.ts and the STT meter already take deliberately.
+  if (priced.microUsd > 0) {
     const split = allocateCharge(priced.microUsd, {
       monthlyIncludedMicroUsd: p.monthlyIncludedMicroUsd,
       allowanceSpentMicroUsd: periodBefore?.allowance_spent_micro_usd ?? 0,
