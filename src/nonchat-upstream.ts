@@ -422,13 +422,75 @@ export function buildTtsParams(
   };
 }
 
-export function buildSttParams(audioBase64: string): Record<string, unknown> {
-  // Only a base64 string; never forward nested objects from the client body.
+/**
+ * Build Workers AI STT params. Schema differs by model (verified 2026-08-06 CF schemas):
+ * - `@cf/openai/whisper` / `whisper-tiny-en`: `{ audio: number[] }` uint8 0-255 (file bytes)
+ * - `@cf/openai/whisper-large-v3-turbo`: `{ audio: base64 string }`
+ * - `@cf/deepgram/*`: not JSON over REST; use {@link buildDeepgramSttBindingParams} + AI binding
+ *
+ * Sending base64 to classic whisper yields AIError 5006:
+ * "Type mismatch of '/audio', 'array' not in 'string'".
+ */
+export function buildSttParams(modelId: string, audioBase64: string): Record<string, unknown> {
   const audio =
     audioBase64.length <= MAX_AUDIO_B64_CHARS
       ? audioBase64
       : audioBase64.slice(0, MAX_AUDIO_B64_CHARS);
+
+  if (isClassicWhisperUint8Model(modelId)) {
+    const bytes = base64ToBytes(audio);
+    // Cap array size so we do not OOM the Worker JSON-encoding multi-MB clips.
+    // 3 MiB raw is already above the plane body cap after base64 expansion.
+    return { audio: Array.from(bytes) };
+  }
+
+  // large-v3-turbo (+ any future base64-string Whisper variants)
   return { audio };
+}
+
+/** Classic whisper models whose schema requires `audio: number[]` (uint8), not base64. */
+export function isClassicWhisperUint8Model(modelId: string): boolean {
+  return (
+    modelId === "@cf/openai/whisper" ||
+    modelId === "@cf/openai/whisper-tiny-en" ||
+    modelId.endsWith("/whisper") ||
+    modelId.endsWith("/whisper-tiny-en")
+  );
+}
+
+export function isDeepgramBatchStt(modelId: string): boolean {
+  return modelId.startsWith("@cf/deepgram/") && !modelId.includes("flux");
+}
+
+/**
+ * Deepgram Nova (batch) over the AI binding: `{ audio: { body: ReadableStream, contentType } }`.
+ * Gateway does not accept ReadableStreams (5006); call `env.AI.run` directly (prism same).
+ */
+export function buildDeepgramSttBindingParams(
+  audioBase64: string,
+  mime: string,
+): { audio: { body: ReadableStream<Uint8Array>; contentType: string } } {
+  const audio =
+    audioBase64.length <= MAX_AUDIO_B64_CHARS
+      ? audioBase64
+      : audioBase64.slice(0, MAX_AUDIO_B64_CHARS);
+  const bytes = base64ToBytes(audio);
+  const contentType = mime && mime.startsWith("audio/") ? mime : "audio/mpeg";
+  return {
+    audio: {
+      body: new Response(bytes).body as ReadableStream<Uint8Array>,
+      contentType,
+    },
+  };
+}
+
+export function base64ToBytes(b64: string): Uint8Array {
+  // Strip whitespace that sometimes sneaks in from client encoding.
+  const clean = b64.replace(/\s/g, "");
+  const bin = atob(clean);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
 }
 
 export interface BuildVideoParamsOpts {
@@ -705,10 +767,33 @@ export function extractTranscript(body: unknown): string | null {
   const r = body as Record<string, unknown>;
   if (typeof r.text === "string" && r.text.length > 0) return r.text;
   if (typeof r.transcript === "string" && r.transcript.length > 0) return r.transcript;
+  // Deepgram Nova native envelope
+  const dg = extractDeepgramTranscript(body);
+  if (dg) return dg;
   if (typeof r.result === "object" && r.result !== null) {
     return extractTranscript(r.result);
   }
   return typeof r.response === "string" && r.response.length > 0 ? r.response : null;
+}
+
+/** Deepgram results.channels[0].alternatives[0].transcript (and flat fallbacks). */
+export function extractDeepgramTranscript(result: unknown): string | null {
+  if (typeof result !== "object" || result === null) return null;
+  const r = result as {
+    results?: {
+      channels?: Array<{ alternatives?: Array<{ transcript?: string }> }>;
+      alternatives?: Array<{ transcript?: string }>;
+    };
+    text?: string;
+    transcript?: string;
+  };
+  const viaChannels = r.results?.channels?.[0]?.alternatives?.[0]?.transcript;
+  if (typeof viaChannels === "string" && viaChannels.trim()) return viaChannels.trim();
+  const viaAlternatives = r.results?.alternatives?.[0]?.transcript;
+  if (typeof viaAlternatives === "string" && viaAlternatives.trim()) return viaAlternatives.trim();
+  if (typeof r.transcript === "string" && r.transcript.trim()) return r.transcript.trim();
+  if (typeof r.text === "string" && r.text.trim()) return r.text.trim();
+  return null;
 }
 
 /**

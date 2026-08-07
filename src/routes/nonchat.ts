@@ -15,6 +15,7 @@ import { newId } from "../crypto";
 import { errorResponse, jsonResponse, readJsonBody, MAX_BODY_BYTES } from "../http";
 import { priceUnits, resolvePrice, resolveUnitPrice } from "../meter";
 import {
+  buildDeepgramSttBindingParams,
   buildImageParams,
   buildMusicParams,
   buildSttParams,
@@ -25,6 +26,7 @@ import {
   extractMusicAsset,
   extractTranscript,
   extractVideoAsset,
+  isDeepgramBatchStt,
   providerStateFailed,
 } from "../nonchat-upstream";
 import { periodBounds } from "../period";
@@ -578,9 +580,20 @@ export async function handleAudioTranscriptions(ctx: Ctx, request: Request): Pro
       '"audio" is required (base64 or data:audio/...;base64,...).',
     );
   }
-  const dataUrl = /^data:audio\/[a-zA-Z0-9.+-]+;base64,(.+)$/.exec(audio);
-  if (dataUrl) audio = dataUrl[1];
-  const params = buildSttParams(audio);
+  let mime = "audio/mpeg";
+  const dataUrl = /^data:(audio\/[a-zA-Z0-9.+-]+);base64,(.+)$/.exec(audio);
+  if (dataUrl) {
+    mime = dataUrl[1];
+    audio = dataUrl[2];
+  }
+
+  // Deepgram Nova batch: ReadableStream body via AI binding only (prism same; gateway 5006).
+  if (isDeepgramBatchStt(gate.model.id)) {
+    return runDeepgramBatchStt(ctx, gate, audio, mime);
+  }
+
+  // Whisper family: classic models need uint8 array; large-v3-turbo needs base64 string.
+  const params = buildSttParams(gate.model.id, audio);
   const up = await runUpstream(ctx, gate, params);
   if (!up.ok) return up.response;
   const fail = providerStateFailed(up.body);
@@ -602,6 +615,46 @@ export async function handleAudioTranscriptions(ctx: Ctx, request: Request): Pro
     200,
     up.gatewayLogId,
   );
+}
+
+/**
+ * Deepgram batch STT via `env.AI.run` with stream body. No gateway log id (binding bypass).
+ */
+async function runDeepgramBatchStt(
+  ctx: Ctx,
+  gate: NonChatGateOk,
+  audioBase64: string,
+  mime: string,
+): Promise<Response> {
+  if (!ctx.env.AI) {
+    return errorResponse(
+      ctx.requestId,
+      "unavailable",
+      "Deepgram STT requires the Worker AI binding ([ai] binding = \"AI\").",
+    );
+  }
+  try {
+    const params = buildDeepgramSttBindingParams(audioBase64, mime);
+    const result = await (
+      ctx.env.AI as unknown as { run: (m: string, p: unknown) => Promise<unknown> }
+    ).run(gate.model.upstream, params);
+    const text = extractTranscript(result);
+    if (!text) {
+      await recordUnmetered(ctx, gate, "no_transcript", 200);
+      return errorResponse(ctx.requestId, "upstream_error", "STT returned no transcript.");
+    }
+    return meterAndRespond(ctx, gate, 1, { model: gate.model.id, text }, 200, null);
+  } catch (err) {
+    const m = err instanceof Error ? err.message : String(err);
+    await recordUnmetered(ctx, gate, "upstream_error", null);
+    return errorResponse(
+      ctx.requestId,
+      "upstream_error",
+      m.includes("5006") || m.toLowerCase().includes("bad input")
+        ? "STT provider rejected the audio format. Try Whisper Large v3 Turbo, or re-record a short clip."
+        : m.slice(0, 280),
+    );
+  }
 }
 
 export async function handleVideoGenerations(ctx: Ctx, request: Request): Promise<Response> {

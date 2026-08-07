@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.4.33] - 2026-08-06
+
+### Fixed
+
+- **STT classic Whisper / tiny-en 5006 Bad input:** CF schema requires `audio` as a uint8
+  array (0-255), not a base64 string. Plane was sending base64 for all Whisper models;
+  only `whisper-large-v3-turbo` accepts base64. Live symptom: AIError oneOf type mismatch
+  on `/audio` (iOS Transcribe).
+- **Deepgram Nova-3 batch:** REST JSON cannot carry ReadableStream; call `env.AI.run` with
+  `{ audio: { body, contentType } }` (same as prism playground; gateway rejects streams).
+
 ## [0.4.32] - 2026-08-06
 
 ### Added
