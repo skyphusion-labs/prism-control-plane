@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Workers-runtime Durable Object harness for live-voice STT.** The STT metering
+  path in `src/stt-session.ts` shipped with no test because this repo could not
+  construct a SQLite-backed Durable Object, so the node suite passed both
+  before and after the metering fixes. `tests-integration/stt-session.test.ts`
+  binds `STT_SESSION` the same way `wrangler.example.toml` does and drives
+  `finalize()` plus the gateway metadata call site red against the pre-fix
+  behaviour (a bare return left no usage row; a session without
+  `cf-aig-metadata.request_id` was invisible to reconcile). The fake
+  `env.AI.run` never opens a live Flux socket. Refs
+  https://github.com/skyphusion-labs/fleet-chezmoi/issues/1639
+
 ## [1.1.1] - 2026-08-08
 
 ### Added

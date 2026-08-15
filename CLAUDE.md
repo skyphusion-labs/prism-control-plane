@@ -109,10 +109,13 @@ before changing the spend path.
 | `src/token-minter.ts` | `UpstreamCredentialSource`: `SharedTokenSource` (default) and the opt-in `CfUserTokenProvider`. |
 | `src/stream.ts` | Byte-for-byte SSE relay plus trailing-usage capture. |
 | `src/routes/*.ts` | Handlers. `chat.ts` is the metered door and documents its gate order. |
+| `src/stt-session.ts` | Live-voice Durable Object. Tested in `tests-integration/` against a real SQLite DO. |
 
-Pure decision modules plus two injected seams (`ControlPlaneStore`, `InferenceRunner`) mean the entire
-request path runs in plain Node vitest: no workerd, no Miniflare, no network. Keep it that way. If a new
-behaviour needs a binding, put it behind an interface rather than reaching for the binding in a handler.
+Pure decision modules plus two injected seams (`ControlPlaneStore`, `InferenceRunner`) mean the HTTP
+request path runs in plain Node vitest: no workerd, no Miniflare, no network. Keep it that way for
+anything that can sit behind an interface. The STT session is a Durable Object and cannot: its
+harness is the workers project (`vitest.workers.config.ts`), with a stub `env.AI.run` so it never
+opens a live upstream.
 
 ## Related
 
@@ -128,7 +131,9 @@ behaviour needs a binding, put it behind an interface rather than reaching for t
 ```bash
 npm ci
 npm run typecheck   # tsc on src AND tests -- CI gate
-npm test            # vitest run
+npm test            # vitest run (node suite + workers DO harness)
+npm run test:node   # FakeStore suite only
+npm run test:workers  # STT Durable Object harness (local workerd, no live upstream)
 npm run test:coverage
 
 npm run bootstrap   # wrangler.example.toml -> wrangler.toml (gitignored)

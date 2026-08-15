@@ -16,12 +16,15 @@
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.tests.json --noEmit",
     "test": "vitest run",
+    "test:node": "vitest run --project node",
+    "test:workers": "vitest run --project workers",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage",
+    "test:coverage": "vitest run --coverage --project node",
     "db:migrate:local": "wrangler d1 migrations apply prism-control-plane --local",
     "db:migrate:remote": "wrangler d1 migrations apply prism-control-plane --remote"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.20.3",
     "@cloudflare/workers-types": "^5.20260808.1",
     "@types/node": "^26.2.0",
     "@vitest/coverage-v8": "^4.1.10",
