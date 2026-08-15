@@ -213,7 +213,9 @@ and [prism README](https://github.com/skyphusion-labs/prism#features) Features s
 ```bash
 npm ci
 npm run typecheck        # tsc on src and tests -- CI gate
-npm test                 # vitest run, no workerd and no network needed
+npm test                 # vitest run: node suite + workers DO harness
+npm run test:node        # FakeStore suite only (no workerd)
+npm run test:workers     # STT Durable Object harness (local workerd, no live upstream)
 
 npm run bootstrap        # wrangler.example.toml -> wrangler.toml (gitignored)
 npx wrangler d1 create prism-control-plane   # paste the id into wrangler.toml
