@@ -24,7 +24,7 @@
     "db:migrate:remote": "wrangler d1 migrations apply prism-control-plane --remote"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.20.3",
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
     "@cloudflare/workers-types": "^5.20260808.1",
     "@types/node": "^26.2.0",
     "@vitest/coverage-v8": "^4.1.10",
