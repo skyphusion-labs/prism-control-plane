@@ -211,7 +211,10 @@ answers `503` when it cannot serve, so a monitor watching status codes can see i
   (the only live CI plane; public, fork-safe)
 - `.github/workflows/deploy.yml` -- tag `v*` only, gated on typecheck + tests and on the tag being an
   ancestor of `origin/main`
-- Coverage workflow present (CodeQL dropped after the Free-plan downgrade; not restored)
+- Coverage workflow present. CodeQL runs via GitHub **default setup**, not a workflow file:
+  the `codeql.yml` workflow was dropped in `528dae5` and never restored, but code scanning is
+  `configured` at the repo level (extended suite, weekly), so CodeQL still reports as a PR check.
+  `ls .github/workflows/` cannot see it; `gh api repos/:owner/:repo/code-scanning/default-setup` can.
 
 ## Hands off
 
