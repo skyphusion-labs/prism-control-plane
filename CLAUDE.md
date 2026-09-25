@@ -208,10 +208,10 @@ answers `503` when it cannot serve, so a monitor watching status codes can see i
 ## CI
 
 - `.github/workflows/ci.yml` -- push/PR to `main`: typecheck + tests on GitHub-hosted `ubuntu-latest`
-  (public, fork-safe; never fleet self-hosted)
+  (the only live CI plane; public, fork-safe)
 - `.github/workflows/deploy.yml` -- tag `v*` only, gated on typecheck + tests and on the tag being an
   ancestor of `origin/main`
-- Coverage + CodeQL workflows present
+- Coverage workflow present (CodeQL dropped after the Free-plan downgrade; not restored)
 
 ## Hands off
 
