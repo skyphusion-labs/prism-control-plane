@@ -12,6 +12,8 @@ export default defineConfig({
     alias: {
       // Durable Object base class is only available in workerd; node tests use a stub.
       "cloudflare:workers": resolve(import.meta.dirname, "tests/mocks/cloudflare-workers.ts"),
+      // NonRetryableError is only available in workerd; node tests use a stub.
+      "cloudflare:workflows": resolve(import.meta.dirname, "tests/mocks/cloudflare-workflows.ts"),
     },
   },
   test: {

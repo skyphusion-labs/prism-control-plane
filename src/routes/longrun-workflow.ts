@@ -10,6 +10,7 @@
 // Most image gens stay sync; gpt-image-2 (and Prefer: respond-async) use this path.
 
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
+import { NonRetryableError } from "cloudflare:workflows";
 import { allocateCharge, decideBalance } from "../balance";
 import { findModel, type MeterUnit } from "../catalog";
 import { newId } from "../crypto";
@@ -187,43 +188,50 @@ export class PlaneLongRunWorkflow extends WorkflowEntrypoint<Env, PlaneLongRunPa
           const fail = providerStateFailed(result.body);
           if (fail) throw new Error(fail);
 
-          // Speech: base64 → put MEDIA, return signed URL (keeps result_json small).
-          if (p.kind === "speech") {
-            const b64 = extractAudioBase64(result.body);
-            if (!b64) throw new Error("TTS returned no audio payload.");
-            const url = await putSpeechAudio(this.env, p, b64);
-            return { url, gatewayLogId: result.gatewayLogId };
-          }
-
-          // Image: b64 or URL → MEDIA when possible, else pass provider URL.
-          if (p.kind === "image") {
-            const img = extractImageAsset(result.body);
-            if (!img || (!img.b64_json && !img.url)) {
-              throw new Error("Image generation returned no image payload.");
-            }
-            if (img.b64_json) {
-              const url = await putImageBytes(this.env, p, img.b64_json);
+          // The provider call has returned and is billed upstream. The Workflows runtime retries any
+          // thrown error, so a failure past this point (storing the result, a missing asset) must be
+          // fatal or the retry would run the provider call a second time.
+          try {
+            // Speech: base64 → put MEDIA, return signed URL (keeps result_json small).
+            if (p.kind === "speech") {
+              const b64 = extractAudioBase64(result.body);
+              if (!b64) throw new Error("TTS returned no audio payload.");
+              const url = await putSpeechAudio(this.env, p, b64);
               return { url, gatewayLogId: result.gatewayLogId };
             }
-            return { url: img.url!, gatewayLogId: result.gatewayLogId };
-          }
 
-          let url: string | null =
-            p.kind === "music" ? extractMusicAsset(result.body) : extractVideoAsset(result.body);
+            // Image: b64 or URL → MEDIA when possible, else pass provider URL.
+            if (p.kind === "image") {
+              const img = extractImageAsset(result.body);
+              if (!img || (!img.b64_json && !img.url)) {
+                throw new Error("Image generation returned no image payload.");
+              }
+              if (img.b64_json) {
+                const url = await putImageBytes(this.env, p, img.b64_json);
+                return { url, gatewayLogId: result.gatewayLogId };
+              }
+              return { url: img.url!, gatewayLogId: result.gatewayLogId };
+            }
 
-          // Grok ZDR: wait for xAI PUT into our R2.
-          if (p.kind === "video" && downloadUrl && objectKey && this.env.MEDIA) {
-            const ready = await waitForObject(this.env.MEDIA, objectKey, 45_000);
-            // Object absent and no provider URL leaves url null, which fails the step below before any charge.
-            if (ready) url = downloadUrl;
-          }
+            let url: string | null =
+              p.kind === "music" ? extractMusicAsset(result.body) : extractVideoAsset(result.body);
 
-          if (!url) {
-            throw new Error(
-              `${p.kind} completed but no asset URL. Raw: ${JSON.stringify(result.body).slice(0, 400)}`,
-            );
+            // Grok ZDR: wait for xAI PUT into our R2.
+            if (p.kind === "video" && downloadUrl && objectKey && this.env.MEDIA) {
+              const ready = await waitForObject(this.env.MEDIA, objectKey, 45_000);
+              // Object absent and no provider URL leaves url null, which fails the step below before any charge.
+              if (ready) url = downloadUrl;
+            }
+
+            if (!url) {
+              throw new Error(
+                `${p.kind} completed but no asset URL. Raw: ${JSON.stringify(result.body).slice(0, 400)}`,
+              );
+            }
+            return { url, gatewayLogId: result.gatewayLogId };
+          } catch (err) {
+            throw new NonRetryableError(err instanceof Error ? err.message : String(err));
           }
-          return { url, gatewayLogId: result.gatewayLogId };
         },
       );
 
