@@ -219,8 +219,8 @@ export class PlaneLongRunWorkflow extends WorkflowEntrypoint<Env, PlaneLongRunPa
             // Grok ZDR: wait for xAI PUT into our R2.
             if (p.kind === "video" && downloadUrl && objectKey && this.env.MEDIA) {
               const ready = await waitForObject(this.env.MEDIA, objectKey, 45_000);
+              // Object absent and no provider URL leaves url null, which fails the step below before any charge.
               if (ready) url = downloadUrl;
-              else if (!url) url = downloadUrl;
             }
 
             if (!url) {
