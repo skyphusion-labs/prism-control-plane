@@ -810,16 +810,14 @@ async function produceVideo(
     const ready = await waitForMediaObject(ctx.env.MEDIA, objectKey, 45_000, 1_000);
     if (ready) {
       asset = downloadUrl;
-    } else if (!asset) {
-      // Prefer our signed URL even if head is slow; client can retry GET.
-      asset = downloadUrl;
-    } else {
+    } else if (asset) {
       // Prefer playable rehost over provider URL when object landed late mid-wait.
       const late = await ctx.env.MEDIA.head(objectKey);
       if (late) asset = downloadUrl;
     }
+    // Object absent and no provider URL: there is nothing fetchable to return, so fall through to
+    // the no_video_payload branch (recorded unmetered) instead of returning a URL that does not resolve.
   }
-  if (!asset && downloadUrl) asset = downloadUrl;
   if (!asset) {
     await recordUnmetered(ctx, gate, "no_video_payload", 200);
     return {
