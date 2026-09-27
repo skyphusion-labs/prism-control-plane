@@ -68,7 +68,11 @@ export class SseUsageScanner {
       return;
     }
     if (typeof parsed !== "object" || parsed === null) return;
-    const usage = (parsed as { usage?: unknown }).usage;
+    // Chat-completions frames carry usage at the top level; the Responses API reports it on the terminal
+    // response.completed event as response.usage. Reading only the first shape would leave a completed
+    // Responses stream unmetered.
+    const frame = parsed as { usage?: unknown; response?: { usage?: unknown } | null };
+    const usage = frame.usage ?? frame.response?.usage;
     // LAST ONE WINS. Some providers repeat a partial usage on intermediate frames and only the final frame
     // is complete, so overwriting is correct and taking the first would under-report.
     if (usage !== undefined && usage !== null) this.lastUsage = usage;
