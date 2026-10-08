@@ -116,6 +116,7 @@ All paths are relative to the deployment origin. All request and response bodies
 | POST | `/v1/audio/transcriptions` | client key | Metered speech-to-text (unit-priced). |
 | POST | `/v1/videos/generations` | client key | Metered video generation (unit-priced). Optional `duration` (seconds or `"8s"`; clamped per model). Optional `async: true` → 202 job (Workflow). |
 | POST | `/v1/music/generations` | client key | Metered music generation (unit-priced). Optional `async: true` → 202 job (Workflow). |
+| GET | `/v1/jobs` | client key | List the calling client's recent jobs, newest first (`?status=`, `?limit=` 1-100, default 20). An index only: no result payload, so a lost job id is recoverable without a second way to serve signed asset URLs. |
 | GET | `/v1/jobs/{job_id}` | client key | Poll async video/music job (`status`, `result.video` / `result.audio`). Workflow-backed. |
 | POST | `/v1/stt/sessions` | client key | Mint a single-use short-lived STT ticket (browser WS auth). |
 | GET/WS | `/v1/stt/stream` | client key or STT ticket | Live voice STT (Deepgram Flux). WebSocket upgrade. |

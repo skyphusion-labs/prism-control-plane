@@ -4,6 +4,20 @@
 
 ### Added
 
+- **`GET /v1/jobs`: a client can find its own jobs again.** `GET /v1/jobs/{id}` was the only job
+  route, so the id was the single handle on paid work: a poll that timed out, a crash, or a reinstall
+  destroyed it permanently, and `GET /v1/usage` returns aggregates only, so a user could see THAT
+  they were charged and never FOR WHAT. The new collection route is scoped to the calling client by
+  `client_id`, the same ownership predicate `handleGetJob` already applied, so it opens no
+  cross-account enumeration; the companion test asserts a second account's job is absent AND that
+  the second account can still see that job itself, so a blanket hide cannot pass for correct
+  scoping. Supports `?status=` and `?limit=` (1 to 100, default 20), and REFUSES an out-of-range
+  limit or unknown status rather than clamping, because a silently clamped list reads as a complete
+  one, which is the exact failure this route exists to prevent. Deliberately an index and not a
+  result feed: `result_json` stays on `GET /v1/jobs/{id}`, so exactly one route serves signed asset
+  URLs. No migration: it rides `async_jobs_client_created (client_id, created_at DESC)` from
+  migration 0009, which existed and was unused. Found while fixing prism-ios#65. (#92)
+
 - **Workers-runtime Durable Object harness for live-voice STT.** The STT metering
   path in `src/stt-session.ts` shipped with no test because this repo could not
   construct a SQLite-backed Durable Object, so the node suite passed both
