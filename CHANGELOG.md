@@ -22,6 +22,28 @@
   now pin its presence, plus five new tests including one that fails if ANY gateway-naming binding
   call omits it, which is the case that catches a binding site added later.
 
+### Changed
+
+- **A stream the client cancels is now charged from an estimate, not left unmetered (#99).** Conrad
+  ruled this on 2026-10-08 (Option C on the issue). Cancelling does not stop the upstream: it keeps
+  generating for a moment and bills us for what it sent, so the old behaviour (`metered = false`,
+  `micro_usd = 0`, no counter movement) made a cancelled stream free service. The plane now prices the
+  request from the prompt it sent plus the assistant text that actually arrived, and records the row as
+  an estimate.
+  **The rounding goes to the customer at every step**, which is the condition the ruling carried:
+  4 bytes per token (a stated choice, documented in `docs/CONTRACT.md`, not a magic number), floored on
+  each side, floored again on the money, with streamed reasoning text, tool-call arguments, the chat
+  template and image payloads not counted at all. The estimate is a lower bound on what the request
+  cost us, and reconcile replaces it with Cloudflare's own figure when the gateway log appears.
+  **New `usage_events.price_basis` (migration 0010) answers "measured or estimated" in one column
+  read**: `measured`, `estimated_output`, or `unpriced`. `metered = 1` no longer implies a measurement,
+  so inferring the basis from the other columns is no longer possible, which is why it is stored. The
+  field is REQUIRED on `UsageEvent` with no default, so a future settlement path cannot inherit the
+  word "measured" by omission; the column default is the conservative `unpriced`.
+  **An upstream error mid-stream is still unmetered.** `StreamSettlement.termination` now distinguishes
+  `cancelled` from `error`: a customer who cancelled chose to stop, a customer whose stream broke got a
+  failure, and charging a guess for a failure was not ruled on.
+
 ### Fixed
 
 - **README said AI Gateway request logging was off by default; it is on (#91).** `src/env.ts`
@@ -182,7 +204,7 @@
 - **Nova empty transcript → 502:** silent clips now return `200` + `text: ""` when the
   provider envelope is present but empty (not upstream_error).
 - **Gemini 3.x thought budget:** floor `maxOutputTokens` at 256 in the binding body so
-  short client `max_tokens` (16–32) do not finish with empty answer (MAX_TOKENS).
+  short client `max_tokens` (16-32) do not finish with empty answer (MAX_TOKENS).
 - **Gemini chat 502:** binding sent OpenAI `messages`/`max_completion_tokens`; Gemini needs
   native `contents` / `systemInstruction` / `generationConfig` (assistant→model). Stream path
   buffers non-stream like Anthropic and emits OpenAI SSE. Meter reads `usageMetadata`.
@@ -195,7 +217,7 @@
 ### Added
 
 - **Video duration control:** `POST /v1/videos/generations` accepts optional `duration`
-  (seconds or Veo-style `"8s"`). Clamped per CF model limits (Grok 1–15, Seedance 4–12,
+  (seconds or Veo-style `"8s"`). Clamped per CF model limits (Grok 1-15, Seedance 4-12,
   Veo 4|6|8, etc.). Async Workflow + sync path both honor it.
 
 ## [0.4.33] - 2026-08-06

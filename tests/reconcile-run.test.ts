@@ -54,6 +54,7 @@ async function storeWithLedger(
       from_allowance_micro_usd: 0,
       from_credit_micro_usd: 1000,
       metered: true,
+      price_basis: "measured",
       unmetered_reason: null,
       upstream_status: 200,
       gateway_log_id: null,

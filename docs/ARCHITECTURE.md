@@ -115,8 +115,9 @@ first. Nothing that costs money happens before step 11.
 For a buffered response step 12 is awaited: the plane does not hand back a completion it has not
 tried to record. A stream cannot work that way, because token counts arrive after the headers, so
 `src/stream.ts` relays the bytes untouched and scans for the trailing usage frame, recording through
-`waitUntil`. A stream that never sends one is recorded **unmetered**, which is a first-class ledger
-outcome and not a zero charge.
+`waitUntil`. A stream that ends cleanly without one is recorded **unmetered**, which is a first-class
+ledger outcome and not a zero charge. A stream the CLIENT CANCELS is charged from an estimate instead
+(#99); see "Unmetered is not free, and an estimate is not a measurement".
 
 ## Identity and the shared credential
 
@@ -191,12 +192,35 @@ Spend order: monthly allowance first, then prepaid credit, then `402`. The D1 le
 split (`from_allowance_micro_usd` / `from_credit_micro_usd`). Product plan numbers still need
 commercial decisions; the machinery is shipped.
 
-### Unmetered is not free
+### Unmetered is not free, and an estimate is not a measurement
 
 `src/meter.ts` treats "we could not price this" as an outcome distinct from "this cost zero". Do not
 collapse them. A timeout is recorded as an unmetered row rather than as nothing, because the upstream
 may have generated and billed tokens before the abort landed, and writing the gap down is the only
 way it is ever visible.
+
+**Issue #99 added a third basis, and it is stored, not inferred.** Conrad ruled on 2026-10-08 that a
+stream the client cancels before its usage frame is charged from an estimate rather than left
+unmetered, because cancelling does not stop the upstream and we are billed for what it sent. So
+`metered = 1` no longer implies "we measured this", and `usage_events.price_basis` (migration 0010)
+carries the distinction in one column:
+
+| `price_basis` | What it means |
+| --- | --- |
+| `measured` | The upstream reported token counts, or the units were observed. |
+| `estimated_output` | Input derived from the request text we hold in full; output estimated from the bytes received before the cut. Floored. |
+| `unpriced` | We could not price the request. Pairs with `metered = 0` and a reason. |
+
+**The rounding is inverted on purpose.** `priceUsage` rounds UP so a measured request that consumed
+tokens can never record as free. `priceEstimatedUsage` rounds DOWN, because that argument rests on
+knowing the request consumed something and an estimate does not know. Every approximation on the
+estimate path (4 bytes per token, floor on each side, floor on the money, reasoning text and chat
+template not counted) moves money toward the customer. An estimated row may therefore carry 0
+micro-USD, and `price_basis` is what keeps that from reading as a measured free ride.
+
+**An upstream error mid-stream is still unmetered.** `StreamSettlement.termination` distinguishes
+`cancelled` from `error` for exactly that reason: a customer who cancelled chose to stop, a customer
+whose stream broke got a failure, and only the first is charged a number nothing measured.
 
 ## Pricing, and why it needs reconciliation
 

@@ -21,16 +21,22 @@
 
 import { errorResponse, jsonResponse } from "../http";
 import { findModel } from "../catalog";
-import { parseChatRequest } from "../chat-request";
+import { parseChatRequest, promptTextBytes } from "../chat-request";
 import { extractFinishReason, extractText } from "../inference";
-import { meterResponse, meterUsageObject, resolvePrice } from "../meter";
+import {
+  estimateStreamUsage,
+  meterResponse,
+  meterUsageObject,
+  priceEstimatedUsage,
+  resolvePrice,
+} from "../meter";
 import { periodBounds } from "../period";
 import { effectiveMaxTokens, entitlesTier, planFromRow } from "../plans";
 import { allocateCharge, decideBalance, remainingAllowanceMicroUsd, remainingMicroUsd } from "../balance";
 import { checkRateLimit, inferenceBucket } from "../rate-limit";
 import { newId } from "../crypto";
 import { readJsonBody } from "../http";
-import { meteredRelay } from "../stream";
+import { meteredRelay, type StreamSettlement } from "../stream";
 import type { UsageEvent } from "../store";
 import { requireCaller, type Ctx } from "./shared";
 
@@ -320,6 +326,7 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
         output_tokens: null,
         micro_usd: 0,
         metered: false,
+        price_basis: "unpriced",
         unmetered_reason: `upstream did not answer within ${result.waitedMs}ms; tokens may have been generated and billed to us before the abort landed`,
         upstream_status: null,
         gateway_log_id: null,
@@ -385,11 +392,39 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
     // the stream settles.
     //
     // The relay does not touch the bytes further -- the runner already produced OpenAI-compatible
-    // frames (or transformed Anthropic binding SSE). If usage never arrives the request lands in the
-    // ledger UNMETERED with a reason, which is the honest outcome and not a zero charge.
+    // frames (or transformed Anthropic binding SSE).
+    //
+    // THREE SETTLEMENTS, NOT TWO (issue #99, Conrad's ruling 2026-10-08, Option C).
+    //
+    //   measured          a usage frame arrived and priced. The normal case.
+    //   estimated_output  the CLIENT CANCELLED before any usage frame. The upstream generated and
+    //                     billed us for what it sent, so the request is charged from an estimate of
+    //                     the bytes we received, rounded down, and the row says it was estimated.
+    //   unpriced          anything else that cannot be priced: a clean end with no usage frame, a
+    //                     frame shape we do not understand, a usage object that would not price, or
+    //                     an upstream error mid-stream. Still unmetered, still with a reason.
+    //
+    // THE ERROR CASE IS DELIBERATELY NOT ESTIMATED. A client that cancelled got what it asked for
+    // and stopped; a client whose stream broke got a failure. Charging a guess for a failure is the
+    // one direction of this change nobody ruled on, so it keeps the old behaviour.
     const stream = meteredRelay(result.stream, (settlement) => {
       const metered =
         settlement.usage === null ? null : meterUsageObject(settlement.usage, price);
+      // Only when NOTHING measurable arrived. A usage object that failed to price is a pricing
+      // problem, and re-pricing it as an estimate off the same broken rate would launder that.
+      const estimated =
+        metered === null && settlement.termination === "cancelled"
+          ? priceEstimatedUsage(
+              estimateStreamUsage({
+                // Sized HERE and not before the relay: the prompt can be 200k characters, and
+                // encoding it on every streamed request to serve the cancel case would make the
+                // common path pay for the rare one.
+                promptTextBytes: promptTextBytes(req.messages),
+                receivedOutputTextBytes: settlement.outputTextBytes,
+              }),
+              price,
+            )
+          : null;
       // waitUntil, because the response has already been streamed by the time this runs. This is the one
       // place in the plane where the ledger write is NOT awaited before answering, and it is not a choice:
       // the price does not exist until the last byte. The write is still awaited by the runtime, and a
@@ -404,20 +439,40 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
                   output_tokens: metered.usage.outputTokens,
                   micro_usd: metered.microUsd,
                   metered: true,
+                  price_basis: "measured",
                   unmetered_reason: null,
                   upstream_status: 200,
                   gateway_log_id: result.gatewayLogId,
                 }
-              : {
-                  id: newId("use"),
-                  input_tokens: null,
-                  output_tokens: null,
-                  micro_usd: 0,
-                  metered: false,
-                  unmetered_reason: streamUnmeteredReason(settlement, metered?.reason),
-                  upstream_status: 200,
-                  gateway_log_id: result.gatewayLogId,
-                },
+              : estimated && estimated.outcome === "estimated"
+                ? {
+                    id: newId("use"),
+                    input_tokens: estimated.usage.inputTokens,
+                    output_tokens: estimated.usage.outputTokens,
+                    micro_usd: estimated.microUsd,
+                    // METERED, BECAUSE IT CHARGES. `price_basis` is what stops that charge from
+                    // being read as a measurement, and `unmetered_reason` stays null because this
+                    // row is not a gap in the meter.
+                    metered: true,
+                    price_basis: "estimated_output",
+                    unmetered_reason: null,
+                    upstream_status: 200,
+                    gateway_log_id: result.gatewayLogId,
+                  }
+                : {
+                    id: newId("use"),
+                    input_tokens: null,
+                    output_tokens: null,
+                    micro_usd: 0,
+                    metered: false,
+                    price_basis: "unpriced",
+                    unmetered_reason: streamUnmeteredReason(
+                      settlement,
+                      metered?.reason ?? (estimated?.outcome === "unmetered" ? estimated.reason : undefined),
+                    ),
+                    upstream_status: 200,
+                    gateway_log_id: result.gatewayLogId,
+                  },
           );
           await recordQuietly(ctx, event);
         })(),
@@ -485,6 +540,7 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
           output_tokens: metered.usage.outputTokens,
           micro_usd: metered.microUsd,
           metered: true,
+          price_basis: "measured",
           unmetered_reason: null,
           upstream_status: 200,
           gateway_log_id: result.gatewayLogId,
@@ -495,6 +551,7 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
           output_tokens: null,
           micro_usd: 0,
           metered: false,
+          price_basis: "unpriced",
           unmetered_reason: metered.reason,
           upstream_status: 200,
           gateway_log_id: result.gatewayLogId,
@@ -558,17 +615,24 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
 /**
  * Why a streamed request could not be priced, in the words an operator needs.
  *
- * THREE DIFFERENT CAUSES, kept apart because they demand different actions: a client that hung up (nothing
- * to do), a provider that ignored `stream_options.include_usage` (a per-model finding worth chasing), and a
- * usage object that arrived but did not price (a shape or rate problem on our side).
+ * THREE DIFFERENT CAUSES, kept apart because they demand different actions: a provider that ignored
+ * `stream_options.include_usage` (a per-model finding worth chasing), a usage object that arrived but
+ * did not price (a shape or rate problem on our side), and a stream that broke (the upstream's
+ * problem, and the customer's).
+ *
+ * A CANCELLED STREAM NO LONGER REACHES HERE unless its rate card is broken: since issue #99 a cancel
+ * is charged from an estimate instead of being recorded unmetered.
  */
 function streamUnmeteredReason(
-  settlement: { usage: unknown; sawFrames: boolean; aborted: boolean },
+  settlement: Pick<StreamSettlement, "usage" | "sawFrames" | "termination">,
   meterReason: string | undefined,
 ): string {
   if (meterReason) return `streamed usage arrived but could not be priced: ${meterReason}`;
-  if (settlement.aborted) {
-    return "the stream ended early (client disconnect or upstream error) before a usage frame arrived; tokens generated up to that point are billed to us and cannot be priced here";
+  if (settlement.termination === "error") {
+    return "the stream failed (upstream or transport error) before a usage frame arrived; tokens generated up to that point are billed to us and cannot be priced here";
+  }
+  if (settlement.termination === "cancelled") {
+    return "the client cancelled the stream before a usage frame arrived, and the received bytes could not be priced either; see the rate for this model";
   }
   if (!settlement.sawFrames) {
     return "the streamed response carried no recognizable SSE data frames, so no usage could be read";

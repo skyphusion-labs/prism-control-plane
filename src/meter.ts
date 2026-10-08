@@ -6,6 +6,17 @@
 //   unmetered   the model answered but did NOT report usable token counts. Record the request with a
 //               reason, charge NOTHING, and do not advance the period counter.
 //
+// A THIRD CASE ARRIVED WITH ISSUE #99, AND IT IS KEPT SEPARATE FROM BOTH:
+//
+//   estimated   we could not measure the request, but we hold enough of it to bound what it cost.
+//               Price it DOWNWARD from what was received and mark the row as an estimate.
+//
+// The estimate is NOT a flavour of "metered" and NOT a flavour of "unmetered". It charges, so it
+// cannot be unmetered; nothing measured it, so calling it metered would let an invented number sum
+// into the same column as a measured one with no way to tell them apart afterwards. It gets its own
+// outcome here and its own stored `price_basis` on the ledger row. Conrad ruled the case on
+// 2026-10-08 (issue #99, Option C).
+//
 // "Nothing was owed" and "we could not tell what was owed" must not share a representation. A zero
 // charge is a complete, correct answer; an unpriceable request is a GAP. If both wrote the same row,
 // every hole in the meter would look exactly like a cheap request, the totals would be quietly low,
@@ -121,23 +132,35 @@ export function extractUsage(body: unknown): TokenUsage | null {
  * cost-recovery product solvent rather than the direction that silently subsidises it.
  */
 export function priceUsage(usage: TokenUsage, price: TokenPrice): MeterOutcome {
+  const problem = rateProblem(price);
+  if (problem) return { outcome: "unmetered", reason: problem };
+  return { outcome: "metered", microUsd: Math.ceil(exactMicroUsd(usage, price)), usage };
+}
+
+/**
+ * Why this rate card cannot price anything, or null when it can.
+ *
+ * Shared by the measured and the estimated path so the two can never disagree about what a usable
+ * rate is. An estimate priced against a rate the measured path would have refused would be an
+ * invented charge resting on an invalid number, which is the worst of both.
+ */
+function rateProblem(price: TokenPrice): string | null {
   if (!Number.isInteger(price.inputMicroUsdPerMTok) || price.inputMicroUsdPerMTok < 0) {
-    return {
-      outcome: "unmetered",
-      reason: `input rate ${String(price.inputMicroUsdPerMTok)} is not a non-negative integer micro-USD per Mtok`,
-    };
+    return `input rate ${String(price.inputMicroUsdPerMTok)} is not a non-negative integer micro-USD per Mtok`;
   }
   if (!Number.isInteger(price.outputMicroUsdPerMTok) || price.outputMicroUsdPerMTok < 0) {
-    return {
-      outcome: "unmetered",
-      reason: `output rate ${String(price.outputMicroUsdPerMTok)} is not a non-negative integer micro-USD per Mtok`,
-    };
+    return `output rate ${String(price.outputMicroUsdPerMTok)} is not a non-negative integer micro-USD per Mtok`;
   }
-  const exact =
+  return null;
+}
+
+/** Unrounded micro-USD for a usage at a rate. Rounding is the CALLER's decision, in both directions. */
+function exactMicroUsd(usage: TokenUsage, price: TokenPrice): number {
+  return (
     (usage.inputTokens * price.inputMicroUsdPerMTok +
       usage.outputTokens * price.outputMicroUsdPerMTok) /
-    1_000_000;
-  return { outcome: "metered", microUsd: Math.ceil(exact), usage };
+    1_000_000
+  );
 }
 
 /**
@@ -231,4 +254,90 @@ export function priceUnits(
  */
 export function meterUsageObject(usage: unknown, price: TokenPrice): MeterOutcome {
   return meterResponse({ usage }, price);
+}
+
+// ============================================================================================
+// THE ESTIMATE PATH (issue #99). Everything below prices a request nothing measured.
+// ============================================================================================
+
+/**
+ * Bytes of received text we count as one output token.
+ *
+ * FOUR IS A CHOICE, NOT A MEASUREMENT, and it is written here once so it is never a literal in the
+ * middle of a money expression. It is the long-standing rule of thumb for English text on
+ * byte-pair-encoded vocabularies: roughly four characters per token. We do not ship a tokenizer, and
+ * we will not: a tokenizer is per-model, it would have to be kept in step with vendors who change
+ * them without notice, and a wrong tokenizer produces a confidently exact number, which is worse
+ * than an honest approximation.
+ *
+ * THE DIRECTION OF THE ERROR IS WHAT MAKES THIS SAFE. Dividing by four UNDER-counts dense text
+ * (code, CJK, JSON), which lowers the charge. Combined with flooring everywhere, every rounding in
+ * this file's estimate path moves money toward the customer. That is deliberate: an estimated charge
+ * is the one line item we cannot defend with a measurement, so it must never overshoot.
+ */
+export const ESTIMATE_BYTES_PER_TOKEN = 4;
+
+/**
+ * Tokens from bytes, FLOORED.
+ *
+ * Floored rather than rounded or ceiled, for the reason above: on an estimate the rounding goes to
+ * the customer. Nine received bytes bill as two tokens, not three.
+ */
+export function estimateTokensFromBytes(bytes: number): number {
+  if (!Number.isFinite(bytes) || bytes <= 0) return 0;
+  return Math.floor(bytes / ESTIMATE_BYTES_PER_TOKEN);
+}
+
+/**
+ * The usage we attribute to a stream that was cut off before it reported any.
+ *
+ * THE TWO SIDES ARE NOT EQUALLY UNCERTAIN, and the row says which one is the guess.
+ *
+ * The INPUT side is derived from the request we sent, and we hold that text in full. Its only error
+ * is the bytes-per-token rule above; nothing about it is truncated.
+ *
+ * The OUTPUT side is derived from the bytes that actually reached the relay before the client hung
+ * up. Everything the model generated after that point is invisible to us, so the output figure is
+ * both approximate AND a lower bound. It is the reason the stored basis is `estimated_output`.
+ */
+export function estimateStreamUsage(args: {
+  promptTextBytes: number;
+  receivedOutputTextBytes: number;
+}): TokenUsage {
+  return {
+    inputTokens: estimateTokensFromBytes(args.promptTextBytes),
+    outputTokens: estimateTokensFromBytes(args.receivedOutputTextBytes),
+  };
+}
+
+export type EstimateOutcome =
+  | {
+      outcome: "estimated";
+      /** Integer micro-USD, FLOORED. May be 0; see priceEstimatedUsage. */
+      microUsd: number;
+      usage: TokenUsage;
+    }
+  | { outcome: "unmetered"; reason: string };
+
+/**
+ * Price an estimated usage.
+ *
+ * ROUNDING IS DOWN, WHICH IS THE OPPOSITE OF priceUsage, AND THE DIFFERENCE IS THE WHOLE POINT.
+ * `priceUsage` rounds UP so that a measured request which consumed tokens can never record as free.
+ * That argument does not transfer: it rests on knowing the request consumed something. Here we do
+ * not know, so the guarantee we want is the other one, that we never charge more than the evidence
+ * supports. Conrad accepted the risk of charging an estimate at all; the condition was that it
+ * cannot overshoot.
+ *
+ * SO AN ESTIMATED ROW CAN CARRY 0 MICRO-USD, and that is handled rather than prevented. A cancel that
+ * arrived before any output, with a short prompt, floors to zero at current rates. It is still
+ * recorded as a metered row with basis `estimated_output`, NOT as unmetered: we did price it, the
+ * price was simply below one micro-USD. Nothing is hidden by that, because `price_basis` already
+ * tells a reader not to read this number as a measurement, and reconcile replaces it with the
+ * biller's own cost when a gateway log for the request shows up.
+ */
+export function priceEstimatedUsage(usage: TokenUsage, price: TokenPrice): EstimateOutcome {
+  const problem = rateProblem(price);
+  if (problem) return { outcome: "unmetered", reason: problem };
+  return { outcome: "estimated", microUsd: Math.floor(exactMicroUsd(usage, price)), usage };
 }

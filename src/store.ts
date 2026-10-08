@@ -100,6 +100,21 @@ export interface PeriodRow {
 }
 
 /** One ledger write. Counts only; see the migration header for why there is no text field here. */
+/**
+ * How a ledger row's price was arrived at. Mirrors migration 0010.
+ *
+ * `metered` answers "did we charge for this". This answers "can we defend the number". They stopped
+ * being the same question when issue #99 added the estimate path: a cancelled stream is charged, so
+ * it is metered, but nothing measured it. A reader must not have to re-derive that from two other
+ * columns.
+ *
+ *   measured          the upstream reported token counts, or the units were observed.
+ *   estimated_output  the input came from the request text; the output was estimated from the bytes
+ *                     received before the stream was cut. Rounded DOWN. Reconcile trues it up.
+ *   unpriced          we could not price it at all. Pairs with `metered: false`.
+ */
+export type PriceBasis = "measured" | "estimated_output" | "unpriced";
+
 export interface UsageEvent {
   id: string;
   request_id: string;
@@ -115,6 +130,11 @@ export interface UsageEvent {
   /** Portion of micro_usd taken from prepaid credit (advances accounts.spent_micro_usd). */
   from_credit_micro_usd: number;
   metered: boolean;
+  /**
+   * REQUIRED, with no default, and that is the point. A money row must state its own basis at the
+   * site that builds it, so a new settlement path cannot inherit the word "measured" by omission.
+   */
+  price_basis: PriceBasis;
   unmetered_reason: string | null;
   upstream_status: number | null;
   gateway_log_id: string | null;

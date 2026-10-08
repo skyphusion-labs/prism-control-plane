@@ -346,8 +346,15 @@ this request. A client that needs the exact cost of a streamed request reads the
 `GET /v1/usage` afterwards.
 
 Metering still happens: the plane reads the trailing usage frame as it passes and writes the ledger row
-when the stream settles. If that frame never arrives, the request is recorded **unmetered** with a
-reason rather than as free.
+when the stream settles.
+
+**If you cancel a stream, you are charged an estimate.** The upstream keeps generating for a moment
+after you hang up, and it bills us for what it sent. So a cancelled stream is priced from the text that
+actually reached the plane, rounded down, and the ledger row is marked as an estimate. See "Cancelled
+streams are charged from an estimate".
+
+If the stream ends cleanly with no usage frame, or fails with an upstream error, the request is
+recorded **unmetered** with a reason rather than as free.
 
 ### `GET /v1/usage`
 
@@ -386,6 +393,9 @@ next period restores allowance or someone tops up credit.
 price. It should be zero; a non-zero value means the client got service that was not charged, and it is
 exposed rather than hidden so the gap is observable from both ends.
 
+A cancelled stream is **not** counted there any more. It is priced from an estimate, so it counts as an
+ordinary request and its micro-USD lands in `period_micro_usd`.
+
 ### The month is published twice, and the difference is the point
 
 `period_micro_usd` is what this plane's **own meter estimated** from token counts against its rate
@@ -415,7 +425,9 @@ Adjustments land in the period the **request** belongs to, not the period the re
 true-up for a request made on the 31st corrects that month, not the next one.
 
 Reconciliation is also how an **unmetered** call stops being a free ride: it was recorded with a reason
-and a zero charge, and the true-up gives it its real cost.
+and a zero charge, and the true-up gives it its real cost. It does the same job for an **estimated**
+row: the estimate is deliberately low, so the true-up is what replaces a guess with the biller's own
+figure.
 
 ## Errors
 
@@ -489,13 +501,57 @@ more. There is no state in which this plane is owed money by a user.
 
 If a model answers but reports no usable token counts, the plane records the request as
 **unmetered**: a ledger row with `metered = false`, a reason, zero micro-USD, and **no increment to
-the spend counter**. The response still carries `prism-metered: false`. A stream that ends without its
-usage frame lands here too.
+the spend counter**. The response still carries `prism-metered: false`. A stream that ends cleanly
+without its usage frame lands here too, as does a stream that fails with an upstream error.
 
 This is a deliberate third outcome, not an error and not a zero. "Nothing was owed" and "we could
 not tell what was owed" are different facts, and collapsing them would turn every gap in the meter
 into a silent free ride that nobody ever finds. Clients surface nothing to the user for this; it
 exists so the operator can see it in `/v1/usage`.
+
+### Cancelled streams are charged from an estimate
+
+**The rule.** You cancel a streamed request before its usage frame arrives. The plane charges you for
+the prompt you sent and for the answer text that reached it before you hung up. It does not charge you
+for anything generated after that point, even though the upstream may have billed us for it.
+
+**Why there is a charge at all.** Cancelling does not stop the upstream instantly. It generates for a
+short while longer and we are billed for all of it. Before this rule the request was recorded unmetered
+and nothing was charged, which made a cancelled stream free service.
+
+**How the number is built.** No tokenizer ships in this plane, so tokens are approximated from bytes:
+
+| Step | Rule |
+| --- | --- |
+| Input tokens | UTF-8 bytes of your message `content`, divided by **4**, floored. |
+| Output tokens | UTF-8 bytes of assistant text actually received, divided by **4**, floored. |
+| Price | Input tokens at the model input rate plus output tokens at the output rate, floored to whole micro-USD. |
+
+**4 bytes per token is a stated choice, not a measurement.** It is the common rule of thumb for English
+text on byte-pair vocabularies. We do not ship a tokenizer because a tokenizer is per-model, vendors
+change them without notice, and a stale one would produce a confidently exact wrong number.
+
+**Every rounding in that table goes in your favour, and that is the point.** Dividing by 4 under-counts
+dense text such as code or CJK. Flooring then removes the remainder. Streamed reasoning text,
+tool-call arguments, the chat template around your messages, and image payloads are not counted at
+all. The estimate is therefore a lower bound on what the request really cost us.
+
+**Edge cases, decided rather than left to fall through:**
+
+- **Zero output received.** You cancel before any answer text arrives. Output is 0 tokens and only the
+  input is priced. On a short prompt that can floor to **0 micro-USD**, which is the correct answer:
+  there is no evidence for a larger one.
+- **A broken rate card.** If the model has no usable rate, the request stays unmetered. An estimate is
+  not allowed to rest on an invalid rate.
+- **A stream that broke.** An upstream or transport error is not a cancel. You got a failure, so the
+  request stays unmetered and nothing is charged.
+
+**The row says it is an estimate.** The ledger stores `price_basis` on every usage row, with one of
+three values: `measured` (the upstream reported counts, or units were observed), `estimated_output`
+(this rule: input from the request, output estimated from received bytes), or `unpriced` (we could not
+price it). The estimate is **metered**, because it charges, but it is never recorded as measured.
+Reconciliation replaces it with Cloudflare's own cost for the request when the gateway log appears, so
+an estimate is a temporary number wherever reconciliation can reach.
 
 ## Limits
 

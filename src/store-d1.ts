@@ -25,8 +25,8 @@ const ACCOUNT_COLUMNS =
 
 const USAGE_EVENT_COLUMNS =
   "id, request_id, account_id, client_id, model_id, period_key, input_tokens, output_tokens, " +
-  "micro_usd, from_allowance_micro_usd, from_credit_micro_usd, metered, unmetered_reason, " +
-  "upstream_status, gateway_log_id";
+  "micro_usd, from_allowance_micro_usd, from_credit_micro_usd, metered, price_basis, " +
+  "unmetered_reason, upstream_status, gateway_log_id";
 
 export function d1Store(db: D1Database): ControlPlaneStore {
   return {
@@ -280,8 +280,8 @@ export function d1Store(db: D1Database): ControlPlaneStore {
           `INSERT OR IGNORE INTO usage_events
              (id, request_id, account_id, client_id, model_id, period_key, input_tokens,
               output_tokens, micro_usd, from_allowance_micro_usd, from_credit_micro_usd,
-              metered, unmetered_reason, upstream_status, gateway_log_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              metered, price_basis, unmetered_reason, upstream_status, gateway_log_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           event.id,
@@ -296,6 +296,7 @@ export function d1Store(db: D1Database): ControlPlaneStore {
           fromAllowance,
           fromCredit,
           event.metered ? 1 : 0,
+          event.price_basis,
           event.unmetered_reason,
           event.upstream_status,
           event.gateway_log_id,

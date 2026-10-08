@@ -73,6 +73,29 @@ function sseStream(frames: string[]): ReadableStream<Uint8Array> {
   });
 }
 
+/**
+ * A stream that hands over `frames` and then NEVER ENDS.
+ *
+ * This is what a cancel actually looks like, and `sseStream` cannot model it. A stream that closes
+ * settles as "complete" the moment the relay pulls past the last frame, so a test built on it would
+ * exercise the no-usage-frame path and only look like a cancel. Here the upstream is still generating
+ * when the client hangs up, which is the case issue #99 is about.
+ */
+function openSseStream(frames: string[]): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  let next = 0;
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (next < frames.length) {
+        controller.enqueue(encoder.encode(frames[next++]));
+        return undefined;
+      }
+      // Never resolves: the upstream has more to say and the test is about not waiting for it.
+      return new Promise<void>(() => {});
+    },
+  });
+}
+
 const STREAM_FRAMES = [
   'data: {"choices":[{"delta":{"content":"Neurons "}}]}\n\n',
   'data: {"choices":[{"delta":{"content":"measure compute."}}]}\n\n',
@@ -514,6 +537,122 @@ describe("POST /v1/chat/completions", () => {
       output_tokens: 1_000_000,
       gateway_log_id: "log_stream",
     });
+    // THE CONTROL FOR THE ESTIMATE TESTS BELOW (issue #99). A change that estimated too eagerly would
+    // make every stream look settled and still pass the three assertions above, because an estimate
+    // also writes a metered row. The basis is what separates them, so it is asserted here: an
+    // uncancelled stream with a usage frame must stay MEASURED.
+    expect(h.store.events[0].price_basis).toBe("measured");
+  });
+
+  it("estimates a cancelled stream, rounding down, and marks the row as an estimate", async () => {
+    // ISSUE #99, Conrad's ruling 2026-10-08 (Option C). The client hangs up before the usage frame, so
+    // nothing measured this request. It is still charged, from the bytes that arrived, and the row says
+    // the charge is an estimate.
+    //
+    // THE ARITHMETIC IS SPELLED OUT so a rate change cannot quietly turn this into a tautology:
+    //   prompt   "What is a neuron?"                 = 17 bytes -> floor(17/4) = 4 input tokens
+    //   received "Neurons " + "measure compute."     = 24 bytes -> floor(24/4) = 6 output tokens
+    //   money    4 * 50_900 + 6 * 335_000 = 2_213_600 micro-USD per Mtok -> 2.2136 -> floor = 2
+    const h = await harness({
+      result: {
+        outcome: "stream",
+        stream: openSseStream([
+          'data: {"choices":[{"delta":{"content":"Neurons "}}]}\n\n',
+          'data: {"choices":[{"delta":{"content":"measure compute."}}]}\n\n',
+        ]),
+        gatewayLogId: "log_cancel",
+      },
+    });
+    const response = await handleRequest(h.ctx, chat(h.key, { ...ASK, stream: true }));
+    expect(response.status).toBe(200);
+
+    // Read both content frames, then hang up WITHOUT reading a usage frame, because there is not one.
+    const reader = response.body?.getReader();
+    expect(reader).toBeDefined();
+    const decoder = new TextDecoder();
+    let received = "";
+    received += decoder.decode((await reader!.read()).value);
+    received += decoder.decode((await reader!.read()).value);
+    await reader!.cancel();
+    expect(received).toContain("measure compute.");
+
+    await Promise.all(h.deferred);
+    expect(h.store.events).toHaveLength(1);
+    expect(h.store.events[0]).toMatchObject({
+      // METERED, because it charges. UNPRICED would be the old behaviour and a free ride.
+      metered: true,
+      price_basis: "estimated_output",
+      input_tokens: 4,
+      output_tokens: 6,
+      micro_usd: 2,
+      // Not a gap in the meter, so no reason. The basis column carries the caveat instead.
+      unmetered_reason: null,
+      gateway_log_id: "log_cancel",
+    });
+    // The charge must never exceed what a measured run of the same received bytes would have cost.
+    // Flooring is the whole concession that made charging an estimate acceptable.
+    expect(h.store.events[0].micro_usd).toBeLessThan(
+      Math.ceil((4 * 50_900 + 6 * 335_000) / 1_000_000) + 1,
+    );
+  });
+
+  it("charges a cancelled stream with zero received output as input only", async () => {
+    // THE DISCRIMINATOR. A cancel can land before a single byte of answer. The estimate is then
+    // floor(0 / 4) = 0 output tokens, and the input side is still priced, which at this model's rate
+    // floors to 0 micro-USD for a 17 byte prompt.
+    //
+    // ZERO MICRO-USD ON A METERED ROW IS THE DELIBERATE ANSWER HERE, not a fall-through. The row still
+    // records 4 input tokens and the basis, so a reader can see the plane priced the request and got
+    // a sub-micro-USD answer. Reconcile replaces it with the biller's own cost if the gateway logged
+    // one. The alternative, rounding up to 1, would be inventing a charge for an answer the customer
+    // never saw.
+    const h = await harness({
+      result: { outcome: "stream", stream: openSseStream([]), gatewayLogId: null },
+    });
+    const response = await handleRequest(h.ctx, chat(h.key, { ...ASK, stream: true }));
+    expect(response.status).toBe(200);
+    await response.body?.cancel();
+
+    await Promise.all(h.deferred);
+    expect(h.store.events).toHaveLength(1);
+    expect(h.store.events[0]).toMatchObject({
+      metered: true,
+      price_basis: "estimated_output",
+      input_tokens: 4,
+      output_tokens: 0,
+      micro_usd: 0,
+    });
+  });
+
+  it("leaves a stream that BROKE unmetered rather than charging a guess for a failure", async () => {
+    // The other half of the #99 ruling, and the line it draws. A cancel is the customer choosing to
+    // stop, so it is charged. An upstream error is a failed request, so it is not. Both used to look
+    // identical in the ledger because the relay only knew "aborted".
+    const h = await harness({
+      result: {
+        outcome: "stream",
+        stream: new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"Neu"}}]}\n\n'));
+          },
+          pull() {
+            throw new Error("upstream died mid-stream");
+          },
+        }),
+        gatewayLogId: null,
+      },
+    });
+    const response = await handleRequest(h.ctx, chat(h.key, { ...ASK, stream: true }));
+    await expect(response.text()).rejects.toThrow();
+
+    await Promise.all(h.deferred);
+    expect(h.store.events).toHaveLength(1);
+    expect(h.store.events[0]).toMatchObject({
+      metered: false,
+      price_basis: "unpriced",
+      micro_usd: 0,
+    });
+    expect(h.store.events[0].unmetered_reason).toContain("stream failed");
   });
 
   it("records a stream with no usage frame as unmetered rather than as free", async () => {
@@ -531,7 +670,11 @@ describe("POST /v1/chat/completions", () => {
     await response.text();
     await Promise.all(h.deferred);
     expect(h.store.events).toHaveLength(1);
-    expect(h.store.events[0]).toMatchObject({ metered: false, micro_usd: 0 });
+    expect(h.store.events[0]).toMatchObject({
+      metered: false,
+      price_basis: "unpriced",
+      micro_usd: 0,
+    });
     expect(h.store.events[0].unmetered_reason).toBeTruthy();
   });
 
@@ -1142,6 +1285,7 @@ describe("POST /admin/reconcile", () => {
       from_allowance_micro_usd: 0,
       from_credit_micro_usd: 1000,
       metered: true,
+      price_basis: "measured",
       unmetered_reason: null,
       upstream_status: 200,
       gateway_log_id: null,
