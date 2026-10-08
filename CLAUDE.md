@@ -97,7 +97,7 @@ before changing the spend path.
 | `src/catalog.ts` | Model allowlist and rate table, in one table on purpose. |
 | `src/plans.ts` | Plan validation, tier entitlement, output-token clamping. Pure. |
 | `src/balance.ts` | The pre-flight prepaid decision. Pure. |
-| `src/meter.ts` | Pricing one request, or declining to. Pure. |
+| `src/meter.ts` | Pricing one request, estimating it when a cancel left nothing to measure (#99), or declining to. Pure. |
 | `src/period.ts` | UTC calendar-month period keys and bounds. Pure. Counts usage; grants nothing. |
 | `src/auth.ts` | Client-key format, minting, and the one identity resolution path. |
 | `src/store.ts` / `src/store-d1.ts` | Persistence interface and its only D1 implementation. |

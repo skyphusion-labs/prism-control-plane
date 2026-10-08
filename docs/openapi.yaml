@@ -523,8 +523,11 @@ paths:
             text/event-stream:
               description: >-
                 Returned when `stream` is true. Cloudflare's own SSE frames, relayed unmodified, ending
-                with a usage frame and then `data: [DONE]`. Metering reads that usage frame in passing;
-                a stream that omits it is recorded unmetered rather than free.
+                with a usage frame and then `data: [DONE]`. Metering reads that usage frame in passing.
+                A stream that ends cleanly without one, or that fails, is recorded unmetered rather than
+                free. A stream the CLIENT CANCELS before the usage frame is charged from an estimate of
+                the text received, rounded down, and the ledger row records that the price was estimated.
+                See "Cancelled streams are charged from an estimate" in docs/CONTRACT.md.
               schema: { type: string }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthenticated" }

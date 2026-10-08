@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { extractUsage, meterResponse, priceUsage } from "../src/meter";
+import {
+  ESTIMATE_BYTES_PER_TOKEN,
+  estimateStreamUsage,
+  estimateTokensFromBytes,
+  extractUsage,
+  meterResponse,
+  priceEstimatedUsage,
+  priceUsage,
+} from "../src/meter";
 import type { TokenPrice } from "../src/catalog";
 
 const PRICE: TokenPrice = {
@@ -139,5 +147,66 @@ describe("extractUsage Gemini usageMetadata", () => {
         usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 2 },
       }),
     ).toEqual({ inputTokens: 3, outputTokens: 2 });
+  });
+});
+
+// ISSUE #99: the estimate path. Conrad ruled on 2026-10-08 that a cancelled stream is charged from an
+// estimate. The tests that matter here are the ones about DIRECTION, because the direction is the whole
+// condition that made charging an estimate acceptable.
+describe("the cancelled-stream estimate rounds toward the customer", () => {
+  it("floors bytes into tokens instead of rounding", () => {
+    expect(ESTIMATE_BYTES_PER_TOKEN).toBe(4);
+    // 11 bytes is 2.75 tokens. Rounding would bill 3 and overshoot.
+    expect(estimateTokensFromBytes(11)).toBe(2);
+    expect(estimateTokensFromBytes(3)).toBe(0);
+    expect(estimateTokensFromBytes(0)).toBe(0);
+  });
+
+  it("treats a negative or non-finite byte count as zero rather than throwing", () => {
+    expect(estimateTokensFromBytes(-40)).toBe(0);
+    expect(estimateTokensFromBytes(Number.NaN)).toBe(0);
+  });
+
+  it("floors the money, which is the OPPOSITE of the measured path", () => {
+    // Same usage, two paths, two roundings. priceUsage ceils so a measured request is never free;
+    // priceEstimatedUsage floors so an unmeasured one is never inflated. Both are asserted together
+    // because a later refactor that shared one rounding helper would break exactly one of them.
+    const usage = { inputTokens: 1, outputTokens: 1 };
+    const measured = priceUsage(usage, PRICE);
+    const estimated = priceEstimatedUsage(usage, PRICE);
+    expect(measured).toMatchObject({ outcome: "metered", microUsd: 1 });
+    expect(estimated).toMatchObject({ outcome: "estimated", microUsd: 0 });
+  });
+
+  it("is a THIRD outcome, not metered and not unmetered", () => {
+    const result = priceEstimatedUsage({ inputTokens: 100, outputTokens: 100 }, PRICE);
+    expect(result.outcome).toBe("estimated");
+    if (result.outcome === "estimated") {
+      // 100 * 100_000 + 100 * 300_000 = 40_000_000 micro-USD per Mtok, so 40 micro-USD.
+      expect(result.microUsd).toBe(40);
+      expect(result.usage).toEqual({ inputTokens: 100, outputTokens: 100 });
+    }
+  });
+
+  it("refuses a broken rate card instead of estimating against it", () => {
+    // An estimate rests on nothing but the rate. If the rate is unusable, the honest answer is still
+    // unmetered: a guessed quantity priced at an invalid rate would be an invented charge.
+    const result = priceEstimatedUsage(
+      { inputTokens: 10, outputTokens: 10 },
+      { ...PRICE, outputMicroUsdPerMTok: -1 },
+    );
+    expect(result.outcome).toBe("unmetered");
+  });
+
+  it("estimates input from the whole prompt and output only from what arrived", () => {
+    expect(estimateStreamUsage({ promptTextBytes: 17, receivedOutputTextBytes: 24 })).toEqual({
+      inputTokens: 4,
+      outputTokens: 6,
+    });
+    // The zero-output cancel. The input side still prices; the output side is honestly nothing.
+    expect(estimateStreamUsage({ promptTextBytes: 17, receivedOutputTextBytes: 0 })).toEqual({
+      inputTokens: 4,
+      outputTokens: 0,
+    });
   });
 });

@@ -37,6 +37,22 @@ export interface ChatTurnInput {
   images?: string[];
 }
 
+/**
+ * UTF-8 bytes of the prompt text, for the cancelled-stream estimate (issue #99).
+ *
+ * WHAT IT COUNTS AND WHY THAT IS THE HONEST SET. Message CONTENT only. It leaves out the chat
+ * template the provider wraps around the turns (role markers, begin and end tokens) and it leaves
+ * out image payloads, whose bytes are not text tokens and would inflate a vision prompt enormously.
+ * Both omissions push the estimate DOWN, which is the direction an estimated charge is allowed to be
+ * wrong in. Nothing here is persisted: the number is a length, and the text never leaves memory.
+ */
+export function promptTextBytes(messages: ChatTurnInput[]): number {
+  const sizer = new TextEncoder();
+  let bytes = 0;
+  for (const message of messages) bytes += sizer.encode(message.content).byteLength;
+  return bytes;
+}
+
 export interface ValidChatRequest {
   model: string;
   messages: ChatTurnInput[];

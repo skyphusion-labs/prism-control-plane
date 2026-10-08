@@ -361,6 +361,7 @@ async function meterJob(
     from_allowance_micro_usd: fromAllowance,
     from_credit_micro_usd: fromCredit,
     metered: true,
+    price_basis: "measured",
     unmetered_reason: null,
     upstream_status: 200,
     gateway_log_id: gatewayLogId,
