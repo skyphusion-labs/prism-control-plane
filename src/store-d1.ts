@@ -5,6 +5,7 @@
 
 import type {
   AccountRow,
+  AsyncJobRow,
   ClientRow,
   ControlPlaneStore,
   ModelPriceRow,
@@ -758,6 +759,27 @@ export function d1Store(db: D1Database): ControlPlaneStore {
         )
         .bind(id)
         .first();
+    },
+
+    async listAsyncJobsByClient({ clientId, limit, status }) {
+      // Column list is explicit and the ORDER BY matches
+      // async_jobs_client_created (client_id, created_at DESC) so this is an
+      // index scan, not a sort. LIMIT is validated by the route before it
+      // reaches here; it is still bound rather than interpolated.
+      const sql = status
+        ? `SELECT id, account_id, client_id, kind, model_id, status,
+                  result_json, error_code, error_detail, request_id, created_at, updated_at
+             FROM async_jobs WHERE client_id = ? AND status = ?
+            ORDER BY created_at DESC LIMIT ?`
+        : `SELECT id, account_id, client_id, kind, model_id, status,
+                  result_json, error_code, error_detail, request_id, created_at, updated_at
+             FROM async_jobs WHERE client_id = ?
+            ORDER BY created_at DESC LIMIT ?`;
+      const stmt = status
+        ? db.prepare(sql).bind(clientId, status, limit)
+        : db.prepare(sql).bind(clientId, limit);
+      const rows = await stmt.all<AsyncJobRow>();
+      return rows.results ?? [];
     },
 
     async updateAsyncJob(args) {

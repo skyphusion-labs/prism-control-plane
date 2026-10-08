@@ -372,6 +372,22 @@ export interface ControlPlaneStore {
   createAsyncJob(row: AsyncJobRow): Promise<void>;
   getAsyncJob(id: string): Promise<AsyncJobRow | null>;
   /**
+   * Recent jobs for ONE caller, newest first, for GET /v1/jobs (#92).
+   *
+   * Why this exists: getAsyncJob is keyed by id alone, so a client that lost a
+   * job id had no way back to paid work (a poll timeout, a crash, a reinstall).
+   * Scoped by client_id, which is the same ownership predicate handleGetJob
+   * already applies, so this opens no cross-account enumeration.
+   *
+   * Rides async_jobs_client_created (client_id, created_at DESC) from migration
+   * 0009, which existed and was unused.
+   */
+  listAsyncJobsByClient(args: {
+    clientId: string;
+    limit: number;
+    status?: AsyncJobStatus;
+  }): Promise<AsyncJobRow[]>;
+  /**
    * Update status / result / error. `result_json` is asset URLs only (no prompts).
    */
   updateAsyncJob(args: {
@@ -391,7 +407,7 @@ export type AsyncJobKind = "video" | "music" | "speech" | "image";
 
 /**
  * One long-run job. `result_json` is JSON like `{ "video": "https://..." }`,
- * `{ "audio": "https://..." }`, or image `{ "data": [{ "url": "..." }] }` —
+ * `{ "audio": "https://..." }`, or image `{ "data": [{ "url": "..." }] }`,
  * never prompts or lyrics (privacy).
  */
 export interface AsyncJobRow {

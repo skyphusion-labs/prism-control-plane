@@ -21,6 +21,7 @@
 import type {
   AccountRow,
   AsyncJobRow,
+  AsyncJobStatus,
   ClientRow,
   ControlPlaneStore,
   ModelPriceRow,
@@ -440,6 +441,22 @@ export class FakeStore implements ControlPlaneStore {
   async getAsyncJob(id: string) {
     const row = this.asyncJobs.get(id);
     return row ? { ...row } : null;
+  }
+
+  async listAsyncJobsByClient({
+    clientId,
+    limit,
+    status,
+  }: {
+    clientId: string;
+    limit: number;
+    status?: AsyncJobStatus;
+  }) {
+    return [...this.asyncJobs.values()]
+      .filter((j) => j.client_id === clientId && (status === undefined || j.status === status))
+      .sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0))
+      .slice(0, limit)
+      .map((j) => ({ ...j }));
   }
 
   async updateAsyncJob(args: {

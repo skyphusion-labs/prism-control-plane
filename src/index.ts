@@ -44,7 +44,7 @@ import {
   handleMusicGenerations,
   handleVideoGenerations,
 } from "./routes/nonchat";
-import { handleGetJob, matchJobPath } from "./routes/jobs";
+import { handleGetJob, handleListJobs, matchJobPath } from "./routes/jobs";
 import { handleStoreRedeem } from "./routes/store";
 import {
   handleMediaDownload,
@@ -154,6 +154,8 @@ export async function handleRequest(ctx: Ctx, request: Request): Promise<Respons
   if (method === "GET" && path === "/v1/me") return await handleMe(ctx, request);
   if (method === "GET" && path === "/v1/models") return await handleModels(ctx, request);
   if (method === "GET" && path === "/v1/usage") return await handleUsage(ctx, request);
+  // #92: the collection route. Exact-path, so it cannot shadow /v1/jobs/:id below.
+  if (method === "GET" && path === "/v1/jobs") return await handleListJobs(ctx, request);
   if (method === "POST" && path === "/v1/chat/completions") {
     return await handleChatCompletions(ctx, request);
   }

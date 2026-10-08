@@ -1260,3 +1260,161 @@ describe("POST /admin/reconcile", () => {
     expect(response.status).toBe(404);
   });
 });
+
+// prism-control-plane#92: GET /v1/jobs/{id} was the ONLY job route, so a client
+// that lost a job id lost paid work permanently (a poll timeout, a crash, a
+// reinstall). The ownership predicate and the (client_id, created_at DESC)
+// index both already existed; nothing read them.
+describe("GET /v1/jobs (prism-control-plane#92)", () => {
+  async function seedJob(
+    h: Awaited<ReturnType<typeof harness>>,
+    id: string,
+    clientId: string,
+    status: "queued" | "running" | "succeeded" | "failed",
+    createdAt: string,
+  ): Promise<void> {
+    await h.store.createAsyncJob({
+      id,
+      account_id: "acct_1",
+      client_id: clientId,
+      kind: "video",
+      model_id: MODEL,
+      status,
+      result_json: status === "succeeded" ? JSON.stringify({ video: "https://cdn.invalid/v.mp4" }) : null,
+      error_code: null,
+      error_detail: null,
+      request_id: "req_seed00000000000000000",
+      created_at: createdAt,
+      updated_at: createdAt,
+    });
+  }
+
+  it("lists only the calling client's jobs, newest first", async () => {
+    const h = await harness();
+
+    // A second client in a DIFFERENT account, whose job must never appear.
+    await h.store.createAccount({
+      id: "acct_2",
+      plan_id: "test",
+      label: null,
+      credit_micro_usd: 1_000_000,
+      grant_id: "grant_seed_2",
+      grant_idempotency_key: "signup:acct_2",
+    });
+    const other = await mintClientKey();
+    await h.store.createClient({
+      id: other.clientId,
+      account_id: "acct_2",
+      key_id: other.keyId,
+      secret_hash: other.secretHash,
+      label: "other-device",
+      platform: "ios",
+    });
+
+    await seedJob(h, "job_old", h.clientId, "succeeded", "2026-08-01T00:00:00.000Z");
+    await seedJob(h, "job_new", h.clientId, "running", "2026-08-03T00:00:00.000Z");
+    await seedJob(h, "job_other", other.clientId, "succeeded", "2026-08-02T00:00:00.000Z");
+
+    const response = await handleRequest(h.ctx, get("/v1/jobs", h.key));
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { jobs: { id: string }[]; count: number };
+
+    // Newest first, and the other account's job is absent. Asserting the exact
+    // list rather than just "does not contain job_other": a scoping bug that
+    // returned everything would satisfy a contains-check on our own ids.
+    expect(body.jobs.map((j) => j.id)).toEqual(["job_new", "job_old"]);
+    expect(body.count).toBe(2);
+  });
+
+  it("positive control: the other client CAN see its own job, so the filter is scoping and not a blanket hide", async () => {
+    const h = await harness();
+    await h.store.createAccount({
+      id: "acct_2",
+      plan_id: "test",
+      label: null,
+      credit_micro_usd: 1_000_000,
+      grant_id: "grant_seed_2",
+      grant_idempotency_key: "signup:acct_2",
+    });
+    const other = await mintClientKey();
+    await h.store.createClient({
+      id: other.clientId,
+      account_id: "acct_2",
+      key_id: other.keyId,
+      secret_hash: other.secretHash,
+      label: "other-device",
+      platform: "ios",
+    });
+    await seedJob(h, "job_other", other.clientId, "succeeded", "2026-08-02T00:00:00.000Z");
+
+    const response = await handleRequest(h.ctx, get("/v1/jobs", other.key));
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { jobs: { id: string }[] };
+    expect(body.jobs.map((j) => j.id)).toEqual(["job_other"]);
+  });
+
+  it("refuses an unauthenticated caller", async () => {
+    const h = await harness();
+    await seedJob(h, "job_a", h.clientId, "running", "2026-08-03T00:00:00.000Z");
+    const response = await handleRequest(h.ctx, get("/v1/jobs"));
+    expect(response.status).toBe(401);
+  });
+
+  it("filters by status when asked", async () => {
+    const h = await harness();
+    await seedJob(h, "job_run", h.clientId, "running", "2026-08-03T00:00:00.000Z");
+    await seedJob(h, "job_done", h.clientId, "succeeded", "2026-08-02T00:00:00.000Z");
+
+    const running = await handleRequest(h.ctx, get("/v1/jobs?status=running", h.key));
+    expect(running.status).toBe(200);
+    expect(((await running.json()) as { jobs: { id: string }[] }).jobs.map((j) => j.id)).toEqual([
+      "job_run",
+    ]);
+
+    // Control: the unfiltered call still sees both, so the filter narrowed the
+    // result rather than the seed being wrong.
+    const all = await handleRequest(h.ctx, get("/v1/jobs", h.key));
+    expect(((await all.json()) as { jobs: unknown[] }).jobs).toHaveLength(2);
+  });
+
+  it("rejects a bad status and a bad limit instead of silently ignoring them", async () => {
+    const h = await harness();
+    for (const q of ["?status=nonsense", "?limit=0", "?limit=abc", "?limit=1000"]) {
+      const response = await handleRequest(h.ctx, get(`/v1/jobs${q}`, h.key));
+      expect(response.status, q).toBe(400);
+      const body = (await response.json()) as { error: { code: string } };
+      expect(body.error.code, q).toBe("invalid_request");
+    }
+  });
+
+  it("honours limit", async () => {
+    const h = await harness();
+    await seedJob(h, "job_1", h.clientId, "running", "2026-08-01T00:00:00.000Z");
+    await seedJob(h, "job_2", h.clientId, "running", "2026-08-02T00:00:00.000Z");
+    await seedJob(h, "job_3", h.clientId, "running", "2026-08-03T00:00:00.000Z");
+    const response = await handleRequest(h.ctx, get("/v1/jobs?limit=2", h.key));
+    const body = (await response.json()) as { jobs: { id: string }[] };
+    expect(body.jobs.map((j) => j.id)).toEqual(["job_3", "job_2"]);
+  });
+
+  it("is an index, not a result feed: no result payload in the list", async () => {
+    const h = await harness();
+    await seedJob(h, "job_done", h.clientId, "succeeded", "2026-08-02T00:00:00.000Z");
+    const response = await handleRequest(h.ctx, get("/v1/jobs", h.key));
+    const body = (await response.json()) as { jobs: Record<string, unknown>[] };
+    expect(Object.keys(body.jobs[0]).sort()).toEqual([
+      "created_at",
+      "id",
+      "kind",
+      "model",
+      "status",
+      "updated_at",
+    ]);
+    // Control: the single-job route still serves the result, so the client can
+    // recover the asset after finding the id here.
+    const one = await handleRequest(h.ctx, get("/v1/jobs/job_done", h.key));
+    expect(((await one.json()) as { result: unknown }).result).toEqual({
+      video: "https://cdn.invalid/v.mp4",
+    });
+  });
+});

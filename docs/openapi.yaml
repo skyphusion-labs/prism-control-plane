@@ -378,6 +378,36 @@ paths:
         "402": { $ref: "#/components/responses/QuotaExhausted" }
         "409": { $ref: "#/components/responses/ModelUnpriced" }
 
+  /v1/jobs:
+    get:
+      tags: [inference]
+      summary: List the calling client's recent jobs
+      description: >-
+        Client-key auth. Newest first, scoped to the calling client, so a client that lost a job
+        id can recover it after a poll timeout, a crash or a reinstall. An INDEX, not a result
+        feed: each entry carries id, kind, model, status, created_at and updated_at, and the
+        result payload stays on GET /v1/jobs/{job_id}. An out-of-range limit or an unknown status
+        is refused rather than clamped, because a silently clamped list reads as a complete one.
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: Filter to one status.
+          schema:
+            type: string
+            enum: [queued, running, succeeded, failed]
+        - name: limit
+          in: query
+          required: false
+          description: Integer 1 to 100. Defaults to 20.
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        "200":
+          description: The caller's jobs, newest first
+        "400":
+          description: Unknown status, or limit outside 1 to 100
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
   /v1/jobs/{job_id}:
     get:
       tags: [inference]
