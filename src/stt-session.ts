@@ -10,6 +10,7 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./env";
 import { billableAudioMinutes, sanitizeCloseCode } from "./stt-util";
+import { COLLECT_LOG_PAYLOAD_HEADER } from "./upstream";
 import { d1Store } from "./store-d1";
 import { newId } from "./crypto";
 import { periodKey } from "./period";
@@ -140,6 +141,7 @@ export class SttSession extends DurableObject<Env> {
       type RunOpts = {
         websocket: boolean;
         gateway?: { id: string; metadata?: Record<string, string> };
+        extraHeaders?: Record<string, string>;
       };
       const opts: RunOpts = { websocket: true };
       // ATTRIBUTE THE OPEN, or this door is invisible to reconciliation.
@@ -160,6 +162,14 @@ export class SttSession extends DurableObject<Env> {
             request_id: requestId,
           },
         };
+        // #91: this door transits the gateway, so it carries the payload opt-out like every other
+        // one. It is the live-voice AUDIO path, so a retained payload here is a recording.
+        //
+        // UNVERIFIED AGAINST THE REAL UPSTREAM, deliberately flagged rather than assumed: this is a
+        // websocket upgrade, and the test harness fakes env.AI.run, so a suite can prove only that
+        // the option is PASSED, never that Flux still opens the socket with it present. Needs one
+        // live voice smoke test before the release tag. See the PR for #91.
+        opts.extraHeaders = { [COLLECT_LOG_PAYLOAD_HEADER]: "false" };
       }
 
       const resp = (await (

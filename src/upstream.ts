@@ -395,7 +395,7 @@ async function runViaBinding(
   type RunFn = (
     model: string,
     params: unknown,
-    opts?: { gateway?: { id: string } },
+    opts?: { gateway?: { id: string }; extraHeaders?: Record<string, string> },
   ) => Promise<unknown>;
 
   // INTENTIONAL: not HTTP + cf-aig-authorization. Cloudflare injects Unified Billing only via
@@ -428,9 +428,7 @@ async function runViaBinding(
       keepaliveMs: 10_000,
       run: async () => {
         const result = await Promise.race([
-          (ai as unknown as { run: RunFn }).run(bindingModel, bindingChatBody(nonStreamReq), {
-            gateway: { id: deps.gatewayId },
-          }),
+          (ai as unknown as { run: RunFn }).run(bindingModel, bindingChatBody(nonStreamReq), bindingGatewayOptions(deps.gatewayId)),
           new Promise<never>((_, reject) => {
             setTimeout(
               () => reject(Object.assign(new Error("timeout"), { name: "TimeoutError" })),
@@ -458,9 +456,7 @@ async function runViaBinding(
 
   try {
     const result = await Promise.race([
-      (ai as unknown as { run: RunFn }).run(bindingModel, bindingChatBody(request), {
-        gateway: { id: deps.gatewayId },
-      }),
+      (ai as unknown as { run: RunFn }).run(bindingModel, bindingChatBody(request), bindingGatewayOptions(deps.gatewayId)),
       new Promise<never>((_, reject) => {
         setTimeout(
           () => reject(Object.assign(new Error("timeout"), { name: "TimeoutError" })),
@@ -584,6 +580,40 @@ function isModelAgreementError(status: number, detail: string): boolean {
   return d.includes("model agreement") || d.includes("submit the prompt 'agree'") || d.includes('submit the prompt "agree"');
 }
 
+/**
+ * The payload opt-out, named once so the HTTP transport and the AI binding cannot drift apart.
+ *
+ * docs/CONTRACT.md states this is sent on every upstream call and is not driven by any environment
+ * variable. Before #91 that was true only of the HTTP transport: the `env.AI.run` binding dispatch
+ * passed `{ gateway: { id } }` and nothing else, so for the models that ride the binding (the
+ * Anthropic / Gemini / Grok chat ids, Unified Billing non-chat, and the live-voice socket) whether
+ * the gateway kept payloads was decided by the dashboard, which is exactly what the contract says it
+ * must not be.
+ */
+export const COLLECT_LOG_PAYLOAD_HEADER = "cf-aig-collect-log-payload";
+
+/**
+ * Options for a gateway-TRANSITING AI binding call.
+ *
+ * ONE seam on purpose: every binding dispatch that reaches the gateway goes through this, so a new
+ * model or transport cannot acquire a way around the opt-out just by being added. `extraHeaders` is
+ * the only field on the binding's options that can carry it; `GatewayOptions.collectLog` is the
+ * METADATA switch (the analogue of `cf-aig-collect-log`) and has no payload equivalent, verified
+ * against the pinned @cloudflare/workers-types.
+ *
+ * NOT used by the bypass paths, which pass no gateway option at all and therefore create no gateway
+ * log to opt out of. See the `bypassGateway` note in nonchat-upstream.ts.
+ */
+export function bindingGatewayOptions(gatewayId: string): {
+  gateway: { id: string };
+  extraHeaders: Record<string, string>;
+} {
+  return {
+    gateway: { id: gatewayId },
+    extraHeaders: { [COLLECT_LOG_PAYLOAD_HEADER]: "false" },
+  };
+}
+
 /** The headers for one call. Split out so a test can assert the privacy posture without a network. */
 export function upstreamHeaders(
   request: InferenceRequest,
@@ -594,7 +624,7 @@ export function upstreamHeaders(
     // is deliberately no plain `authorization` here.
     "cf-aig-authorization": `Bearer ${request.auth.value}`,
     // Not derived from any env var, deliberately. See the header: this one is an invariant.
-    "cf-aig-collect-log-payload": "false",
+    [COLLECT_LOG_PAYLOAD_HEADER]: "false",
     "cf-aig-collect-log": deps.collectLog ? "true" : "false",
     "cf-aig-metadata": JSON.stringify(request.metadata),
     "content-type": "application/json",

@@ -37,12 +37,41 @@ content, and a test enforces that against the migration.
 
 At the gateway, the two logging switches are set separately and only one of them is configurable:
 
-- `cf-aig-collect-log-payload: false` is sent on **every** upstream call and is **not** driven by any
-  environment variable. This is what drops prompt and completion bodies. It is an invariant, not a
-  default: a privacy line that can be switched off in config is not a line.
+- `cf-aig-collect-log-payload: false` is sent on **every call that reaches the gateway** and is
+  **not** driven by any environment variable. This is what drops prompt and completion bodies. It is
+  an invariant, not a default: a privacy line that can be switched off in config is not a line. It
+  rides the request headers on the HTTP transport and `extraHeaders` on the `env.AI.run` binding
+  (`bindingGatewayOptions`, the single seam both go through), so adding a model or a transport cannot
+  acquire a way around it.
+  **Two paths deliberately do not send it, because they never reach the gateway at all:** the
+  stream-incompatible Workers AI image models dispatched with `bypassGateway` (FLUX-2, Phoenix,
+  Dreamshaper, SDXL) and batch Deepgram STT. They pass no gateway option, so no gateway log exists
+  for them to opt out of; sending the header there would imply a guarantee about a path the gateway
+  never sees. Their prompt or audio still goes to Cloudflare Workers AI under our account.
+  (Before #91 this sentence said "every upstream call" while the binding dispatch sent no opt-out at
+  all, which left the question to the gateway's dashboard setting. `docs/ARCHITECTURE.md` records
+  that gateway's own config as `collect_logs: true`.)
 - `cf-aig-collect-log` decides whether the metadata row exists at all, and defaults to on. That row
   holds token counts, model, provider, status, cost and duration, which is what lets Cloudflare's own
   per-request cost be reconciled against our ledger. It carries no content.
+
+### What this plane DOES retain, and for how long
+
+Stated because the invariant above is about prompt and completion TEXT, and silence about everything
+else has read as a promise that nothing else is kept.
+
+- **Generated and uploaded media.** Audio, video and images, including user-supplied reference
+  images, are written to the MEDIA R2 bucket. **There is no published retention window and nothing in
+  this repository deletes them:** zero `MEDIA.delete` call sites, zero `MEDIA.list`, no R2 lifecycle
+  rule, no cron, queue, alarm, TTL column or cleanup migration. What IS time-bounded is ACCESS, not
+  storage: the signed download URL expires (`DOWNLOAD_TTL_SEC`, 24h), the object behind it does not.
+  Treat media as retained indefinitely until a lifecycle rule and a stated window exist (#91).
+- **The usage ledger (`usage_events`).** Counts only, never content, and it has **no published
+  deletion window** either. Indefinite retention of a billing record is the defensible part; not
+  saying so was not.
+- **Long-run job rows (`async_jobs`).** Asset URLs and status, never prompt or lyric text. Prompt,
+  lyrics and TTS input DO ride the Workflow event payload, which Cloudflare persists for that
+  workflow instance's own retention, outliving the job.
 
 Any future change that would persist text is a contract change, not an implementation detail.
 

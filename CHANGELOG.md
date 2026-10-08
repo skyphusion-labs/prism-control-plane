@@ -4,6 +4,42 @@
 
 ### Added
 
+- **Payload opt-out now covers the `env.AI.run` binding path, not just HTTP (#91).**
+  `docs/CONTRACT.md` claimed `cf-aig-collect-log-payload: false` was sent on every upstream call as
+  an invariant. It was sent on the two HTTP sites only; the binding dispatch passed
+  `{ gateway: { id } }` and nothing else, so for the models that ride the binding (the Anthropic,
+  Gemini and Grok chat ids, Unified Billing non-chat, and the live-voice socket) whether the gateway
+  kept prompt and completion bodies was decided by the dashboard, which the contract says it must
+  not be. `GatewayOptions.collectLog` could not fix it: that is the METADATA switch and the binding's
+  options have no payload field, verified against the pinned `@cloudflare/workers-types`, so the
+  opt-out rides `AiOptions.extraHeaders`. New `bindingGatewayOptions()` in `src/upstream.ts` is the
+  single seam all gateway-transiting binding calls go through, and it shares one constant with the
+  HTTP header builder so the two cannot drift. Scope was wider than the issue: it also covers the
+  Deepgram live-voice socket (`src/stt-session.ts`), which the issue did not mention and which
+  carries AUDIO.
+  **The suite previously pinned the opt-out's ABSENCE** (two `toHaveBeenCalledWith` assertions
+  compared the third argument by exact equality without it), so it could not have caught this. Those
+  now pin its presence, plus five new tests including one that fails if ANY gateway-naming binding
+  call omits it, which is the case that catches a binding site added later.
+
+### Fixed
+
+- **README said AI Gateway request logging was off by default; it is on (#91).** `src/env.ts`
+  defaults `collectLog` to true and only an explicit `"false"` disables it, as the repo's own
+  `docs/CONTRACT.md` and `docs/ARCHITECTURE.md` already said. The metadata row (counts, model, cost,
+  duration, no content) is what makes Cloudflare's per-request cost reconcilable against our ledger,
+  so the row is defensible and the sentence was not. README now matches the contract.
+- **Published what this plane DOES retain, which was previously silence (#91).**
+  `docs/ARCHITECTURE.md` carried an unqualified "NO payload retention" in a diagram box beside the
+  MEDIA R2 box, reading as covering both, while `docs/CONTRACT.md` said nothing about media at all.
+  In fact generated and uploaded media (including user-supplied reference images) are written to R2
+  and **nothing in this repository deletes them**: zero `MEDIA.delete` sites, zero `MEDIA.list`, no
+  lifecycle rule, no cron, queue, alarm, TTL column or cleanup migration. What is time-bounded is
+  ACCESS (`DOWNLOAD_TTL_SEC`, 24h on the signed URL), not storage. `usage_events` likewise has no
+  published deletion window. Both are now stated, narrowly and truthfully, rather than implied away.
+  **The lifecycle rule itself is NOT in this change:** R2 lifecycle is a bucket-level setting not
+  expressible in `wrangler.toml`, so it needs a Cloudflare-credentialed vantage and stays open on #91.
+
 - **`GET /v1/jobs`: a client can find its own jobs again.** `GET /v1/jobs/{id}` was the only job
   route, so the id was the single handle on paid work: a poll that timed out, a crash, or a reinstall
   destroyed it permanently, and `GET /v1/usage` returns aggregates only, so a user could see THAT
