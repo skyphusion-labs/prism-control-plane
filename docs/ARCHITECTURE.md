@@ -69,10 +69,10 @@ flowchart TB
     admin["Operator<br/>/admin/* (ADMIN_TOKEN)"]
 
     subgraph cf["Cloudflare"]
-        gw["AI Gateway: prism-proxy<br/>authenticated, metadata logs,<br/>NO payload retention"]
+        gw["AI Gateway: prism-proxy<br/>authenticated, metadata logs,<br/>NO payload retention<br/>(gateway only, not R2)"]
         wai["Workers AI<br/>@cf/… models"]
         prov["Third-party providers<br/>via Unified Billing<br/>openai/, anthropic/, xai/, …"]
-        r2["MEDIA R2<br/>signed media URLs"]
+        r2["MEDIA R2<br/>signed media URLs<br/>objects retained; no lifecycle rule"]
     end
 
     ios -->|"Bearer client key<br/>HTTPS"| auth

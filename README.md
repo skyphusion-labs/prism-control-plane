@@ -143,8 +143,13 @@ not here. This plane never stores prompts or completions.
 
 **Prompt and completion text is never persisted by this plane.** The ledger stores counts (tokens,
 micro-USD, model id, status); there is no column that can hold message content, and
-`tests/schema-privacy.test.ts` enforces that against `migrations/`. AI Gateway request logging is off
-by default, so the gateway retains nothing either. Any change to that is a contract change.
+`tests/schema-privacy.test.ts` enforces that against `migrations/`. At the gateway the two logging
+switches are separate: the **payload** switch is hard-wired off on every call that reaches the
+gateway, so prompt and completion bodies are dropped, while the **metadata** row defaults ON
+(`AI_GATEWAY_COLLECT_LOG`, `src/env.ts`) and holds token counts, model, provider, status, cost and
+duration. That row is what lets Cloudflare's own per-request cost be reconciled against our ledger;
+it carries no content. Any change to that is a contract change. See `docs/CONTRACT.md` for the full
+posture, including what this plane does retain and for how long.
 
 The consequence, stated plainly: this plane cannot replay or audit a conversation. Clients hold the
 only copy of what they sent.

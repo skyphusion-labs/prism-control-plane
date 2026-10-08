@@ -11,8 +11,10 @@
 
 import { describe, expect, it, vi } from "vitest";
 import {
+  COLLECT_LOG_PAYLOAD_HEADER,
   GATEWAY_HOST,
   bindingChatBody,
+  bindingGatewayOptions,
   endpointFor,
   isAllowedBindingChatModel,
   responsesBody,
@@ -340,7 +342,12 @@ describe("runnerFor binding path", () => {
     expect(run).toHaveBeenCalledWith(
       "xai/grok-4.5",
       expect.objectContaining({ max_completion_tokens: 16 }),
-      { gateway: { id: "prism-proxy" } },
+      {
+        gateway: { id: "prism-proxy" },
+        // #91: exact equality kept on purpose. This argument is the whole privacy posture of the
+        // binding path, so the assertion should red if anything is added OR removed here.
+        extraHeaders: { "cf-aig-collect-log-payload": "false" },
+      },
     );
   });
 
@@ -409,7 +416,12 @@ describe("runnerFor binding path", () => {
     expect(run).toHaveBeenCalledWith(
       "anthropic/claude-fable-5",
       expect.not.objectContaining({ stream: true }),
-      { gateway: { id: "prism-proxy" } },
+      {
+        gateway: { id: "prism-proxy" },
+        // #91: exact equality kept on purpose. This argument is the whole privacy posture of the
+        // binding path, so the assertion should red if anything is added OR removed here.
+        extraHeaders: { "cf-aig-collect-log-payload": "false" },
+      },
     );
 
     resolveRun({
@@ -650,5 +662,85 @@ describe("runnerFor", () => {
     );
     const result = await runnerFor({ ...DEPS, fetchImpl: impl }).run(request());
     expect(result).toMatchObject({ outcome: "upstream_error", status: 200 });
+  });
+});
+
+// prism-control-plane#91: docs/CONTRACT.md says the payload opt-out is sent on EVERY upstream call
+// and is "an invariant, not a default". It was sent only on the HTTP transport. The env.AI.run
+// binding dispatch passed { gateway: { id } } and nothing else, so for every model that rides the
+// binding, whether the gateway kept prompt and completion bodies was decided by the dashboard.
+//
+// These tests exist to make the invariant FALSIFIABLE on the binding path, which the suite could not
+// do before: the two assertions above pinned the third argument by exact equality WITHOUT the
+// opt-out, so they actively locked in its absence.
+describe("payload opt-out is an invariant on the binding path too (#91)", () => {
+  it("bindingGatewayOptions carries the opt-out, and names the gateway", () => {
+    expect(bindingGatewayOptions("prism-proxy")).toEqual({
+      gateway: { id: "prism-proxy" },
+      extraHeaders: { "cf-aig-collect-log-payload": "false" },
+    });
+  });
+
+  it("is the SAME header name the HTTP transport uses, so the two cannot drift", () => {
+    // If someone renames the constant on one side only, this is what catches it.
+    const http = upstreamHeaders(request(), DEPS);
+    const binding = bindingGatewayOptions("prism-proxy").extraHeaders;
+    expect(Object.keys(binding)).toEqual([COLLECT_LOG_PAYLOAD_HEADER]);
+    expect(http[COLLECT_LOG_PAYLOAD_HEADER]).toBe("false");
+    expect(binding[COLLECT_LOG_PAYLOAD_HEADER]).toBe("false");
+  });
+
+  it("cannot be turned back on by collectLog, on either switch position", () => {
+    // collectLog decides whether the METADATA row exists. The binding's own GatewayOptions.collectLog
+    // is that same metadata switch and has no payload equivalent, which is why the opt-out has to
+    // ride extraHeaders. Neither position may reach the payload.
+    for (const collectLog of [true, false]) {
+      const opts = bindingGatewayOptions("prism-proxy");
+      expect(opts.extraHeaders[COLLECT_LOG_PAYLOAD_HEADER]).toBe("false");
+      expect(upstreamHeaders(request(), { ...DEPS, collectLog })[COLLECT_LOG_PAYLOAD_HEADER]).toBe(
+        "false",
+      );
+    }
+  });
+
+  it("a real binding dispatch sends it: non-stream chat", async () => {
+    const run = vi.fn(async (_model: string, _params: unknown, _opts?: unknown) => ({
+      choices: [{ message: { content: "bound" } }],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    }));
+    await runnerFor({
+      ...DEPS,
+      fetchImpl: fakeFetch(new Response("should-not-fetch")).impl,
+      ai: { run } as unknown as Ai,
+    }).run(request({ bindingModel: "xai/grok-4.5", upstreamModel: "grok/grok-4.5", billing: "unified-billing" }));
+
+    expect(run).toHaveBeenCalledTimes(1);
+    const opts = run.mock.calls[0][2] as unknown as { extraHeaders?: Record<string, string> };
+    expect(opts?.extraHeaders?.[COLLECT_LOG_PAYLOAD_HEADER]).toBe("false");
+  });
+
+  it("every gateway-transiting binding call in a run sends it, not just the first", async () => {
+    // The generic assertion: whatever the dispatch did, no call that named a gateway may lack the
+    // opt-out. This is the one that catches a NEW binding site added later, which is the failure
+    // mode the issue actually asked for.
+    const run = vi.fn(async (_model: string, _params: unknown, _opts?: unknown) => ({
+      choices: [{ message: { content: "bound" } }],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    }));
+    await runnerFor({
+      ...DEPS,
+      fetchImpl: fakeFetch(new Response("should-not-fetch")).impl,
+      ai: { run } as unknown as Ai,
+    }).run(request({ bindingModel: "anthropic/claude-fable-5" }));
+
+    const gatewayCalls = run.mock.calls.filter(
+      (c) => (c[2] as unknown as { gateway?: unknown } | undefined)?.gateway !== undefined,
+    );
+    // Control: if this is 0 the test proves nothing, so assert the instrument saw a gateway call.
+    expect(gatewayCalls.length).toBeGreaterThan(0);
+    for (const call of gatewayCalls) {
+      const opts = call[2] as unknown as { extraHeaders?: Record<string, string> };
+      expect(opts.extraHeaders?.[COLLECT_LOG_PAYLOAD_HEADER]).toBe("false");
+    }
   });
 });

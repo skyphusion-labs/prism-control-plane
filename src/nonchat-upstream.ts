@@ -10,7 +10,7 @@
 
 import { findModel, type Billing, type Modality } from "./catalog";
 import type { UpstreamAuth } from "./inference";
-import { CF_API_HOST, GATEWAY_HOST } from "./upstream";
+import { bindingGatewayOptions, CF_API_HOST, GATEWAY_HOST } from "./upstream";
 import { resolveVideoDuration, type VideoDurationWire } from "./video-duration";
 
 export interface NonChatRunRequest {
@@ -307,9 +307,16 @@ async function runViaBinding(
     type RunFn = (
       model: string,
       params: unknown,
-      opts?: { gateway?: { id: string }; returnRawResponse?: boolean },
+      opts?: {
+        gateway?: { id: string };
+        returnRawResponse?: boolean;
+        extraHeaders?: Record<string, string>;
+      },
     ) => Promise<unknown>;
-    const runOpts = opts?.bypassGateway ? undefined : { gateway: { id: deps.gatewayId } };
+    // #91: a gateway-transiting call carries the payload opt-out. A bypass call passes no gateway
+    // option at all, so there is no gateway log for it to opt out of, and adding the header there
+    // would imply a guarantee about a path the gateway never sees.
+    const runOpts = opts?.bypassGateway ? undefined : bindingGatewayOptions(deps.gatewayId);
     const result = await Promise.race([
       (ai as unknown as { run: RunFn }).run(request.upstreamModel, request.params, runOpts),
       new Promise<never>((_, reject) => {
