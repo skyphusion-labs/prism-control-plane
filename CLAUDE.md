@@ -12,8 +12,8 @@ machinery on their own Cloudflare account.
 This plane owns **who may call what and how much**. Inference routing, catalog breadth, and the
 multimodal surface stay in **[prism](https://github.com/skyphusion-labs/prism)**.
 
-**Status: v1.0.0 live at `play-proxy.skyphusion.org`** (tag `v1.0.0` on `main`, 2026-08-07; see
-CHANGELOG). First-party clients: **prism-ios 1.0.0**, **prism-android 1.0.0**, playground **prism 1.0.0**.
+**Status: v1.1.1 live at `play-proxy.skyphusion.org`** (root `package.json`; the 2026-08-07
+`v1.0.0` tag is not the current cut). First-party clients: **prism-ios 1.0.0**, **prism-android 1.0.0**, playground **prism 1.1.1**.
 Built: client contract, Worker + route table, D1, client-key auth + enrollment, dual-pool spend, priced
 catalog (**~93 models**: 44 chat, 21 image, 19 video, 3 TTS, 4 STT, 1 music, 1 live voice; re-count from
 `src/catalog.ts`), per-model **video duration** clamp (`src/video-duration.ts`), Prefer-async +
@@ -54,8 +54,7 @@ the money is gone.
 ## The contract is the authority
 
 `docs/CONTRACT.md` (normative prose) and `docs/openapi.yaml` (machine-readable) define the client
-surface. They were written **before** any client existed, and `prism-ios` / `prism-android` will be
-built against them.
+surface. `prism-ios` and `prism-android` are the clients built against them. The kits are in those repos.
 
 - A change to a route, an error code, a status mapping, or a published header is a **contract change**.
   Update both files in the same commit as the code.
