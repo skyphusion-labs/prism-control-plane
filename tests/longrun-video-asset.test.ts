@@ -7,6 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../src/env";
 import { PlaneLongRunWorkflow, type PlaneLongRunParams } from "../src/routes/longrun-workflow";
+import { driveFakeTimers } from "./fake-timer-drive";
 
 const params: PlaneLongRunParams = {
   jobId: "job_1",
@@ -68,26 +69,14 @@ function makeWorkflow(opts: { providerBody: unknown; objectLands: boolean }) {
 }
 
 async function drive(promise: Promise<unknown>): Promise<{ error: unknown }> {
-  let done = false;
-  let error: unknown = null;
-  const settled = promise.then(
-    () => {
-      done = true;
-    },
-    (e) => {
-      error = e;
-      done = true;
-    },
-  );
-  // The R2 wait polls for up to 45s; fake timers let the test cross it instantly.
-  // Yield on the REAL event loop between steps: webcrypto resolves off-thread, so microtask flushing alone
-  // can run the whole loop before the workflow has reached the wait.
-  for (let i = 0; i < 500 && !done; i++) {
-    await vi.advanceTimersByTimeAsync(1_000);
-    await new Promise<void>((r) => setImmediate(r));
+  try {
+    await driveFakeTimers(promise);
+    return { error: null };
+  } catch (error) {
+    // A budget overrun is a harness failure, not the error the test asserts on.
+    if (error instanceof Error && error.message.startsWith("driveFakeTimers:")) throw error;
+    return { error };
   }
-  await settled;
-  return { error };
 }
 
 describe("async Grok video: charge only when there is a video to hand back", () => {
