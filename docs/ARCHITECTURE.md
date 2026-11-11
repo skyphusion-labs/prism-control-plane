@@ -26,7 +26,7 @@ door only.
 | `workers.dev` | **off.** A second un-DNS'd door to the same metered routes is a hole, not a convenience |
 | AI Gateway | `prism-proxy` (authenticated, `collect_logs=true`, `cache_ttl=0`) |
 | D1 | `prism-control-plane` |
-| R2 | **`MEDIA`** (`prism-control-plane-media`) for Grok video ZDR ingress (`output.upload_url`). Optional: absent closes only Grok video. |
+| R2 | **`MEDIA`** (`prism-control-plane-media`) for Grok video ZDR ingress (`output.upload_url`). Optional: absent closes only Grok video. Every object is deleted 30 days after it is written (R2 lifecycle rule, fleet-chezmoi#2530; see `docs/CONTRACT.md`). |
 | KV / Queues | **none.** |
 | Durable Objects | **`STT_SESSION`** (Flux live STT). |
 | Cloudflare account | `fabcb25d9c7eb087110ec474a03e50d2` (prod, `@skyphusion.org`) |
@@ -72,7 +72,7 @@ flowchart TB
         gw["AI Gateway: prism-proxy<br/>authenticated, metadata logs,<br/>NO payload retention<br/>(gateway only, not R2)"]
         wai["Workers AI<br/>@cf/… models"]
         prov["Third-party providers<br/>via Unified Billing<br/>openai/, anthropic/, xai/, …"]
-        r2["MEDIA R2<br/>signed media URLs<br/>objects retained; no lifecycle rule"]
+        r2["MEDIA R2<br/>signed media URLs<br/>objects deleted after 30 days<br/>(R2 lifecycle rule)"]
     end
 
     ios -->|"Bearer client key<br/>HTTPS"| auth

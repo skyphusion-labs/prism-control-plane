@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Media is kept 30 days (#91).** `docs/CONTRACT.md`, `docs/ARCHITECTURE.md` and `README.md` now
+  state the retention window Conrad set on 2026-11-11. Each object in `prism-control-plane-media`
+  is deleted 30 days after it is written, by an R2 lifecycle rule applied through IaC under
+  fleet-chezmoi#2530. Before this, nothing deleted media and the contract said so. No code changes:
+  R2 lifecycle cannot be set in `wrangler.toml`.
+
 ### Added
 
 - **Payload opt-out now covers the `env.AI.run` binding path, not just HTTP (#91).**

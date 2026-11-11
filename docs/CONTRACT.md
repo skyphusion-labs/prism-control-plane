@@ -60,12 +60,14 @@ At the gateway, the two logging switches are set separately and only one of them
 Stated because the invariant above is about prompt and completion TEXT, and silence about everything
 else has read as a promise that nothing else is kept.
 
-- **Generated and uploaded media.** Audio, video and images, including user-supplied reference
-  images, are written to the MEDIA R2 bucket. **There is no published retention window and nothing in
-  this repository deletes them:** zero `MEDIA.delete` call sites, zero `MEDIA.list`, no R2 lifecycle
-  rule, no cron, queue, alarm, TTL column or cleanup migration. What IS time-bounded is ACCESS, not
-  storage: the signed download URL expires (`DOWNLOAD_TTL_SEC`, 24h), the object behind it does not.
-  Treat media as retained indefinitely until a lifecycle rule and a stated window exist (#91).
+- **Generated and uploaded media: kept 30 days.** Audio, video and images, including user-supplied
+  reference images, are written to the MEDIA R2 bucket (`prism-control-plane-media`). An R2
+  lifecycle rule on that bucket deletes each object **30 days after it is written** (window set by
+  Conrad, 2026-11-11; #91). Cloudflare typically removes an expired object within 24 hours of that
+  age. The rule is account infrastructure, not code in this repository, because R2 lifecycle cannot
+  be declared in `wrangler.toml`. It is applied through IaC under fleet-chezmoi#2530. Nothing in the
+  Worker deletes media sooner: there are zero `MEDIA.delete` call sites. Access is bounded on its own,
+  and sooner: a signed download URL expires after 24h (`DOWNLOAD_TTL_SEC`).
 - **The usage ledger (`usage_events`).** Counts only, never content, and it has **no published
   deletion window** either. Indefinite retention of a billing record is the defensible part; not
   saying so was not.
