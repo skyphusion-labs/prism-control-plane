@@ -12,6 +12,7 @@ import type { NonChatRunner, NonChatRunRequest, NonChatRunResult } from "../src/
 import type { CredentialOutcome, UpstreamCredentialSource } from "../src/token-minter";
 import type { Ctx } from "../src/routes/shared";
 import { FakeStore, testPlan } from "./fake-store";
+import { driveFakeTimers } from "./fake-timer-drive";
 
 const NOW = new Date("2026-08-04T12:00:00.000Z");
 const GROK_VIDEO = "xai/grok-imagine-video";
@@ -31,24 +32,6 @@ class FakeCredentials implements UpstreamCredentialSource {
   async revokeForAccount(): Promise<boolean> {
     return true;
   }
-}
-
-/**
- * Await `promise` while stepping fake timers. The rehost wait polls R2 for up to 45s, and the handler
- * reaches it only after several async gate reads, so time has to advance while the promise is pending.
- */
-async function untilSettled<T>(promise: Promise<T>): Promise<T> {
-  let done = false;
-  const tracked = promise.finally(() => {
-    done = true;
-  });
-  // Yield on the REAL event loop between steps: webcrypto resolves off-thread, so microtask flushing alone
-  // can run the whole loop before the handler has reached the wait.
-  for (let i = 0; i < 500 && !done; i++) {
-    await vi.advanceTimersByTimeAsync(1_000);
-    await new Promise<void>((r) => setImmediate(r));
-  }
-  return tracked;
 }
 
 async function harness(opts: { body: unknown; objectLands: boolean }) {
@@ -99,8 +82,8 @@ async function harness(opts: { body: unknown; objectLands: boolean }) {
   return {
     store,
     run: async () => {
-      const response = await untilSettled(handleRequest(ctx, request));
-      await untilSettled(Promise.allSettled(deferred));
+      const response = await driveFakeTimers(handleRequest(ctx, request));
+      await driveFakeTimers(Promise.allSettled(deferred));
       return response;
     },
   };
