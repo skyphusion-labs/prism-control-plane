@@ -137,7 +137,8 @@ against a contract defined here, not against whatever the Worker happens to retu
 `tests/contract.test.ts` fails the build if the router and the contract drift apart.
 
 Conversation history and compact live on the **playground** Worker ([prism](https://github.com/skyphusion-labs/prism)),
-not here. This plane never stores prompts or completions.
+not here. This plane never stores prompts or completions. Media it generates, and reference images
+you upload, are kept 30 days in R2 and then deleted.
 
 ## Privacy invariant
 
