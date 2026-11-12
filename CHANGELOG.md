@@ -24,7 +24,9 @@
   stream releases it after its ledger row is written, and a voice session in the session DO's
   finalize. A slot that is never released expires (30 minutes, 20 for voice; a stale running job
   stops counting after two hours). A claim that cannot be written answers `503`, never an unbounded
-  admit. `docs/CONTRACT.md` and `src/balance.ts` now state the bound as the cap times one request.
+  admit. `docs/CONTRACT.md` and `src/balance.ts` now state the bound as the cap times one request,
+  and say it holds only inside those windows: a request still unpaid past its window stops counting
+  and adds one more request to the bound.
   Migration 0011 must be applied before this Worker is deployed (deploy.yml applies it first); until
   it is, every spend door answers 503 and `/health/deep` reports the missing table.
 

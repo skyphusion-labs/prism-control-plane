@@ -505,10 +505,17 @@ more. There is no state in which this plane is owed money by a user.
   times one request**, where one request is bounded by `max_output_tokens` against the most expensive
   entitled model, by the priced units of a non-chat request, or by the 15-minute maximum of a voice
   session.
-- A slot is freed when its charge is written. A slot whose request never settled (an isolate that
-  died) expires after 30 minutes (20 for a voice session), and a job still marked `running` stops
-  counting two hours after it was created. A leaked slot lowers the account's concurrency for that
-  time. It never moves money. If the counter cannot be written, the request is refused with
+- **That bound holds inside the counting windows, and only there.** A slot counts until its charge
+  is written or until it expires: **30 minutes** for a sync request or a chat stream, **20 minutes**
+  for a voice session. A job marked `running` counts for **two hours** from its creation. An expiry
+  cannot tell a dead request from a slow one. So a request still unpaid after its window stops
+  counting, and one more request can be admitted beside it. Each request that outlives its window
+  adds one more request to the bound. A voice session cannot outlive its window (it ends at 15
+  minutes). A chat stream or an async job that runs past 30 minutes or two hours is not expected, but
+  nothing in this plane stops it.
+- A slot is freed when its charge is written. A slot whose request truly died (an isolate that went
+  away) is freed by the same expiry. Until then it lowers the account's concurrency, which refuses
+  more and moves no money. If the counter cannot be written, the request is refused with
   `503 unavailable` rather than admitted without a bound.
 - **A negative credit balance is not a debt.** It is the recorded size of that overshoot.
   `remaining_micro_usd` and `allowance_remaining_micro_usd` clamp at 0.

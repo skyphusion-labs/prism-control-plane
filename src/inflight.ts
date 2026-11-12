@@ -22,8 +22,15 @@
 //
 // A LEAKED SLOT EXPIRES. A slot is released when its request settles. If a release never runs (an
 // isolate dies mid-request), the slot expires after its TTL, and a running job row stops counting after
-// ASYNC_JOB_COUNT_SEC. A leak lowers the account's concurrency for a while. It never moves money, and
-// it never raises the cap.
+// ASYNC_JOB_COUNT_SEC. A dead request's leak lowers the account's concurrency for a while and moves no
+// money. THE BOUND HOLDS ONLY INSIDE THESE WINDOWS: an expiry cannot tell a dead request from a slow
+// one, so a request that is still unpaid past its window stops counting, and each such request adds
+// one more request to the overshoot bound (docs/CONTRACT.md, Money semantics). Voice cannot outlive
+// its window; a stream past SYNC_HOLD_SEC or a job past ASYNC_JOB_COUNT_SEC can.
+//
+// AN ASYNC REQUEST BRIEFLY COUNTS TWICE: its job row counts as running from createAsyncJob, and its own
+// slot is still held until the router releases it on return. That window refuses one request early.
+// It errs toward refusing, never toward admitting.
 //
 // FAIL CLOSED. A claim that cannot be written answers 503. Admitting a request because the counter is
 // unreadable would remove the bound at exactly the moment nobody can see it.
