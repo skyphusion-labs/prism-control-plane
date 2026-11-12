@@ -33,6 +33,7 @@ import {
 import { periodBounds } from "../period";
 import { effectiveMaxTokens, entitlesTier, planFromRow } from "../plans";
 import { allocateCharge, decideBalance, remainingAllowanceMicroUsd, remainingMicroUsd } from "../balance";
+import { admitInFlight, releaseHold, SYNC_HOLD_SEC, takeInflight } from "../inflight";
 import { checkRateLimit, inferenceBucket } from "../rate-limit";
 import { newId } from "../crypto";
 import { readJsonBody } from "../http";
@@ -232,6 +233,12 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
     );
   }
 
+  // 11. The in-flight cap (#100, inflight.ts). Last, so a request refused above holds no slot. The
+  // router releases the slot when this handler returns; a stream takes it and releases it once its
+  // ledger row is written.
+  const busy = await admitInFlight(ctx, account.id, "chat", SYNC_HOLD_SEC);
+  if (busy) return busy;
+
   const maxTokens = effectiveMaxTokens(req.maxTokens, plan.maxOutputTokens, model.maxOutputTokens);
   const baseEvent = {
     account_id: account.id,
@@ -407,6 +414,9 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
     // THE ERROR CASE IS DELIBERATELY NOT ESTIMATED. A client that cancelled got what it asked for
     // and stopped; a client whose stream broke got a failure. Charging a guess for a failure is the
     // one direction of this change nobody ruled on, so it keeps the old behaviour.
+    // The response goes out before the charge exists, so this request stays in flight until the
+    // settle below has written its row (#100). The router must not release it on return.
+    const hold = takeInflight(ctx);
     const stream = meteredRelay(result.stream, (settlement) => {
       const metered =
         settlement.usage === null ? null : meterUsageObject(settlement.usage, price);
@@ -431,50 +441,54 @@ export async function handleChatCompletions(ctx: Ctx, request: Request): Promise
       // failure is logged at error level by recordQuietly.
       ctx.waitUntil(
         (async () => {
-          const event = await buildEvent(
-            metered && metered.outcome === "metered"
-              ? {
-                  id: newId("use"),
-                  input_tokens: metered.usage.inputTokens,
-                  output_tokens: metered.usage.outputTokens,
-                  micro_usd: metered.microUsd,
-                  metered: true,
-                  price_basis: "measured",
-                  unmetered_reason: null,
-                  upstream_status: 200,
-                  gateway_log_id: result.gatewayLogId,
-                }
-              : estimated && estimated.outcome === "estimated"
+          try {
+            const event = await buildEvent(
+              metered && metered.outcome === "metered"
                 ? {
                     id: newId("use"),
-                    input_tokens: estimated.usage.inputTokens,
-                    output_tokens: estimated.usage.outputTokens,
-                    micro_usd: estimated.microUsd,
-                    // METERED, BECAUSE IT CHARGES. `price_basis` is what stops that charge from
-                    // being read as a measurement, and `unmetered_reason` stays null because this
-                    // row is not a gap in the meter.
+                    input_tokens: metered.usage.inputTokens,
+                    output_tokens: metered.usage.outputTokens,
+                    micro_usd: metered.microUsd,
                     metered: true,
-                    price_basis: "estimated_output",
+                    price_basis: "measured",
                     unmetered_reason: null,
                     upstream_status: 200,
                     gateway_log_id: result.gatewayLogId,
                   }
-                : {
-                    id: newId("use"),
-                    input_tokens: null,
-                    output_tokens: null,
-                    micro_usd: 0,
-                    metered: false,
-                    price_basis: "unpriced",
-                    unmetered_reason: streamUnmeteredReason(
-                      settlement,
-                      metered?.reason ?? (estimated?.outcome === "unmetered" ? estimated.reason : undefined),
-                    ),
-                    upstream_status: 200,
-                    gateway_log_id: result.gatewayLogId,
-                  },
-          );
-          await recordQuietly(ctx, event);
+                : estimated && estimated.outcome === "estimated"
+                  ? {
+                      id: newId("use"),
+                      input_tokens: estimated.usage.inputTokens,
+                      output_tokens: estimated.usage.outputTokens,
+                      micro_usd: estimated.microUsd,
+                      // METERED, BECAUSE IT CHARGES. `price_basis` is what stops that charge from
+                      // being read as a measurement, and `unmetered_reason` stays null because this
+                      // row is not a gap in the meter.
+                      metered: true,
+                      price_basis: "estimated_output",
+                      unmetered_reason: null,
+                      upstream_status: 200,
+                      gateway_log_id: result.gatewayLogId,
+                    }
+                  : {
+                      id: newId("use"),
+                      input_tokens: null,
+                      output_tokens: null,
+                      micro_usd: 0,
+                      metered: false,
+                      price_basis: "unpriced",
+                      unmetered_reason: streamUnmeteredReason(
+                        settlement,
+                        metered?.reason ?? (estimated?.outcome === "unmetered" ? estimated.reason : undefined),
+                      ),
+                      upstream_status: 200,
+                      gateway_log_id: result.gatewayLogId,
+                    },
+            );
+            await recordQuietly(ctx, event);
+          } finally {
+            await releaseHold(ctx.store, hold, ctx.requestId);
+          }
         })(),
       );
     });

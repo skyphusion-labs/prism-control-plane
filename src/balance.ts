@@ -12,11 +12,14 @@
 //
 // Spend order on every metered request: allowance first, then credit. A request can split across both.
 //
-// THE PRE-FLIGHT LIMITATION is the same as before: cost is unknown until the model answers, so the
-// gate checks what is already recorded. An account can overshoot the combined remaining pool by at
-// most one request, bounded by max_output_tokens against the most expensive entitled model.
+// THE PRE-FLIGHT LIMITATION: cost is unknown until the model answers, so the gate checks what is
+// already recorded and reserves nothing. Each request IN FLIGHT at once can overshoot the combined
+// remaining pool by one request (bounded by max_output_tokens against the most expensive entitled
+// model, or by a non-chat request's priced units). An async job is in flight until its Workflow
+// prices it, and a voice session until it closes. The number in flight per account is capped by
+// inflight.ts (#100), so the account-level bound is the cap times one request.
 //
-// A NEGATIVE CREDIT BALANCE IS NOT A DEBT. It is the recorded size of that single overshoot. Nobody
+// A NEGATIVE CREDIT BALANCE IS NOT A DEBT. It is the recorded size of that overshoot. Nobody
 // is invoiced for it; the account simply cannot spend again until credit covers it (or a new period
 // restores allowance).
 
@@ -50,7 +53,8 @@ export interface ChargeAllocation {
 /**
  * Remaining monthly allowance for the current period. Clamped at zero.
  *
- * Overshoot (allowanceSpent > monthlyIncluded) is a normal single-request overshoot state, not corruption.
+ * Overshoot (allowanceSpent > monthlyIncluded) is a normal overshoot state (bounded by the in-flight cap,
+ * inflight.ts), not corruption.
  */
 export function remainingAllowanceMicroUsd(pools: Pick<SpendPools, "monthlyIncludedMicroUsd" | "allowanceSpentMicroUsd">): number {
   if (!Number.isInteger(pools.monthlyIncludedMicroUsd) || pools.monthlyIncludedMicroUsd < 0) return 0;

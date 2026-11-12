@@ -203,6 +203,17 @@ export interface NewClient {
   platform: string | null;
 }
 
+/** One in-flight claim (#100). Times are epoch seconds except `asyncSinceIso`, which matches async_jobs. */
+export interface InflightClaim {
+  id: string;
+  accountId: string;
+  kind: string;
+  nowSec: number;
+  expiresAtSec: number;
+  asyncSinceIso: string;
+  cap: number;
+}
+
 export interface ControlPlaneStore {
   getPlan(id: string): Promise<PlanRow | null>;
   getAccount(id: string): Promise<AccountRow | null>;
@@ -377,6 +388,17 @@ export interface ControlPlaneStore {
   ): Promise<RateBucket>;
   /** Epoch seconds from the STORE's clock, so the limiter and the stored windows agree. */
   nowEpochSeconds(): Promise<number>;
+
+  /**
+   * Claim one in-flight slot for an account (#100, inflight.ts). ATOMIC: count and insert in one
+   * write, so concurrent claims cannot all pass. Counts the account's unexpired slots plus its async
+   * jobs still `running` and created after `asyncSinceIso`. Inserts only when that count is below
+   * `cap`. Expired slots for the account are deleted in the same transaction. Returns whether the
+   * slot was inserted. An id that already exists is not a second claim: it returns false.
+   */
+  claimInflightSlot(args: InflightClaim): Promise<boolean>;
+  /** Release one slot. Scoped by account, so an id alone can never free another account's slot. */
+  releaseInflightSlot(id: string, accountId: string): Promise<void>;
 
   /**
    * Create or replace a plan row. Operator surface only; product numbers are not invented here.

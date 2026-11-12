@@ -457,7 +457,7 @@ Some codes add fields; a client MUST tolerate extra fields.
 | 404 | `model_not_found` | No | Model is not in the catalog at all. Refresh `/v1/models`. |
 | 409 | `model_unpriced` | No | The model is real and entitled, but has no rate on our side. Refresh `/v1/models` and respect `spendable`. It becomes usable the moment a price is set, so do NOT drop it from the picker permanently. |
 | 413 | `payload_too_large` | No | Request body over the cap. Trim history. |
-| 429 | `rate_limited` | Yes, after `retry-after` | Back off. `retry-after` is seconds. |
+| 429 | `rate_limited` | Yes, after `retry-after` | Back off. `retry-after` is seconds. Also sent when the account already has its cap of requests and jobs in flight; that refusal carries `in_flight_cap`. |
 | 500 | `internal` | Once, with jitter | Report `request_id`. |
 | 501 | `not_implemented` | No | Feature declared in v1 but not shipped on this deployment. |
 | 501 | `model_unsupported` | No | The model's modality has no metered door here (not chat). Respect `spendable`. |
@@ -491,10 +491,24 @@ more. There is no state in which this plane is owed money by a user.
   credit. Zero means pure prepaid.
 - **Prepaid credit** (`signup_credit_micro_usd` at open, then operator top-ups): cumulative, **never
   expires**. Spent only after allowance is gone for the period.
-- The gate is checked **before** the model runs against already-recorded spend. An account can
-  overshoot the combined remaining pool by at most **one request**, bounded by `max_output_tokens`
-  against the most expensive entitled model.
-- **A negative credit balance is not a debt.** It is the recorded size of that single overshoot.
+- The gate is checked **before** the model runs against already-recorded spend, and it reserves
+  nothing. The charge is written when the request settles. So each request that is **in flight** at
+  the same time can overshoot the combined remaining pool by one request. That includes an async
+  job (`Prefer: respond-async`, `async: true`), which is priced in the Workflow after it was admitted
+  and is in flight until it finishes, and a live voice session, which is charged when it closes.
+- **The bound is per in-flight request, and the number in flight is capped (#100).** An account may
+  have at most `MAX_IN_FLIGHT_PER_ACCOUNT` (default **4**, at most 32) requests, chat streams, live
+  voice sessions and running async jobs in flight at once. The next one is refused with
+  `429 rate_limited`, `retry-after: 5` and `in_flight_cap`. So the overshoot is at most **the cap
+  times one request**, where one request is bounded by `max_output_tokens` against the most expensive
+  entitled model, by the priced units of a non-chat request, or by the 15-minute maximum of a voice
+  session.
+- A slot is freed when its charge is written. A slot whose request never settled (an isolate that
+  died) expires after 30 minutes (20 for a voice session), and a job still marked `running` stops
+  counting two hours after it was created. A leaked slot lowers the account's concurrency for that
+  time. It never moves money. If the counter cannot be written, the request is refused with
+  `503 unavailable` rather than admitted without a bound.
+- **A negative credit balance is not a debt.** It is the recorded size of that overshoot.
   `remaining_micro_usd` and `allowance_remaining_micro_usd` clamp at 0.
 
 ### Unmetered requests
@@ -560,6 +574,7 @@ an estimate is a temporary number wherever reconciliation can reach.
 | Request body | 256 KiB | `413 payload_too_large` |
 | Messages per request | 200 | `400 invalid_request` |
 | Requests per minute | plan `requests_per_minute` | `429 rate_limited` |
+| Requests and jobs in flight per account | `MAX_IN_FLIGHT_PER_ACCOUNT`, default 4 | `429 rate_limited` with `in_flight_cap` |
 | Output tokens per request | plan `max_output_tokens` | clamped, not rejected |
 | Total spend | account prepaid credit | `402 quota_exhausted` |
 

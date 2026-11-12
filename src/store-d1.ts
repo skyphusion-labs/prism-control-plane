@@ -723,6 +723,32 @@ export function d1Store(db: D1Database): ControlPlaneStore {
       await db.prepare(`SELECT COUNT(*) AS n FROM model_prices`).first<{ n: number }>();
       // Migration 0009 async jobs (video/music poll).
       await db.prepare(`SELECT COUNT(*) AS n FROM async_jobs`).first<{ n: number }>();
+      // Migration 0011 in-flight slots (#100). Without it every spend door fails closed with 503.
+      await db.prepare(`SELECT COUNT(*) AS n FROM inflight_slots`).first<{ n: number }>();
+    },
+
+    async claimInflightSlot(c) {
+      // ONE transaction (batch): drop this account's expired slots, then insert only if the live
+      // count is below the cap. The INSERT ... SELECT ... WHERE is a single statement, so two
+      // concurrent claims cannot both read count = cap - 1 and both insert. OR IGNORE: a repeated id
+      // inserts nothing and reads as "not claimed", never as a second slot.
+      const [, insert] = await db.batch([
+        db.prepare(`DELETE FROM inflight_slots WHERE account_id = ? AND expires_at <= ?`).bind(c.accountId, c.nowSec),
+        db
+          .prepare(
+            `INSERT OR IGNORE INTO inflight_slots (id, account_id, kind, expires_at)
+             SELECT ?1, ?2, ?3, ?4
+             WHERE (SELECT COUNT(*) FROM inflight_slots WHERE account_id = ?2 AND expires_at > ?5)
+                 + (SELECT COUNT(*) FROM async_jobs
+                      WHERE account_id = ?2 AND status = 'running' AND created_at > ?6) < ?7`,
+          )
+          .bind(c.id, c.accountId, c.kind, c.expiresAtSec, c.nowSec, c.asyncSinceIso, c.cap),
+      ]);
+      return (insert?.meta?.changes ?? 0) === 1;
+    },
+
+    async releaseInflightSlot(id, accountId) {
+      await db.prepare(`DELETE FROM inflight_slots WHERE id = ? AND account_id = ?`).bind(id, accountId).run();
     },
 
     async createAsyncJob(row) {

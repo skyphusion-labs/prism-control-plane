@@ -60,6 +60,7 @@ import {
   isSttStreamUpgrade,
 } from "./routes/stt-stream";
 import type { Ctx } from "./routes/shared";
+import { releaseInflight } from "./inflight";
 import {
   initialLookbackMs,
   reconcileCronLive,
@@ -123,6 +124,17 @@ export function gatewayLogs(env: Env): GatewayLogSource | null {
  * 404. A metering plane with a passthrough is not a metering plane.
  */
 export async function handleRequest(ctx: Ctx, request: Request): Promise<Response> {
+  // #100: whatever in-flight slot the handler still holds is released when it returns, on EVERY exit
+  // (a refusal after admission, an upstream error, a throw). A stream or a voice session takes its
+  // hold off ctx first and releases it when its charge is written.
+  try {
+    return await routeRequest(ctx, request);
+  } finally {
+    await releaseInflight(ctx);
+  }
+}
+
+async function routeRequest(ctx: Ctx, request: Request): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, "") || "/";
   const method = request.method.toUpperCase();

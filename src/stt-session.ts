@@ -11,6 +11,7 @@ import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./env";
 import { billableAudioMinutes, sanitizeCloseCode } from "./stt-util";
 import { COLLECT_LOG_PAYLOAD_HEADER } from "./upstream";
+import { releaseHold } from "./inflight";
 import { d1Store } from "./store-d1";
 import { newId } from "./crypto";
 import { periodKey } from "./period";
@@ -509,6 +510,10 @@ export class SttSession extends DurableObject<Env> {
         requestId: meta.request_id,
         error: err instanceof Error ? err.message : String(err),
       });
+    } finally {
+      // #100: the session's in-flight slot (claimed at the upgrade under the request id). Released
+      // after the charge, on every path through finalize. A failed release expires on its TTL.
+      await releaseHold(d1Store(this.env.DB), { id: meta.request_id, accountId: meta.account_id }, meta.request_id);
     }
   }
 }

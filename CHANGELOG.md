@@ -4,6 +4,22 @@
 
 ### Added
 
+- **A per-account in-flight cap on the prepaid gate (#100, options B and D).** The gate reads the
+  recorded balance and reserves nothing, so the stated "at most one request" overshoot held only one
+  request at a time: with several in flight, or an async job priced minutes after it was admitted,
+  the overshoot was one request per in-flight request and the account had no bound. Now an account
+  may have at most `MAX_IN_FLIGHT_PER_ACCOUNT` (default 4, at most 32) requests, chat streams, live
+  voice sessions and running async jobs in flight at once. The next is refused with
+  `429 rate_limited`, `retry-after: 5` and `in_flight_cap`, the existing temporal code, so clients
+  need no change. The claim is one atomic D1 write (`inflight_slots`, migration 0011) that counts
+  live slots plus `running` rows in `async_jobs`. The router releases the slot on every exit; a chat
+  stream releases it after its ledger row is written, and a voice session in the session DO's
+  finalize. A slot that is never released expires (30 minutes, 20 for voice; a stale running job
+  stops counting after two hours). A claim that cannot be written answers `503`, never an unbounded
+  admit. `docs/CONTRACT.md` and `src/balance.ts` now state the bound as the cap times one request.
+  Migration 0011 must be applied before this Worker is deployed (deploy.yml applies it first); until
+  it is, every spend door answers 503 and `/health/deep` reports the missing table.
+
 - **Payload opt-out now covers the `env.AI.run` binding path, not just HTTP (#91).**
   `docs/CONTRACT.md` claimed `cf-aig-collect-log-payload: false` was sent on every upstream call as
   an invariant. It was sent on the two HTTP sites only; the binding dispatch passed

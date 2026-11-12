@@ -33,6 +33,7 @@ import {
 import { resolveVideoDuration } from "../video-duration";
 import { periodBounds } from "../period";
 import { entitlesTier, planFromRow, type Plan } from "../plans";
+import { admitInFlight, SYNC_HOLD_SEC } from "../inflight";
 import { checkRateLimit, inferenceBucket } from "../rate-limit";
 import type { AsyncJobRow, UsageEvent } from "../store";
 import {
@@ -268,6 +269,12 @@ async function gateNonChat(
       ),
     };
   }
+
+  // The in-flight cap (#100, inflight.ts). Last, so a request refused above holds no slot. The router
+  // releases it when the handler returns. An async request's job row is created before that, so the
+  // job counts from then on (async_jobs.status = 'running') and the request never counts as zero.
+  const busy = await admitInFlight(ctx, account.id, "nonchat", SYNC_HOLD_SEC);
+  if (busy) return { ok: false, response: busy };
 
   // Re-attach raw body for the modality handlers (they re-parse fields).
   (ctx as Ctx & { _nonchatBody?: unknown })._nonchatBody = body.value;

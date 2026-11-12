@@ -8,6 +8,7 @@ import type { InferenceRunner } from "../inference";
 import type { NonChatRunner } from "../nonchat-upstream";
 import type { Caller, ResolveFailure } from "../auth";
 import { resolveClient } from "../auth";
+import type { InflightHold } from "../inflight";
 import type { ControlPlaneStore } from "../store";
 import type { UpstreamCredentialSource } from "../token-minter";
 
@@ -47,6 +48,11 @@ export interface Ctx {
   requestId: string;
   now: Date;
   waitUntil: (promise: Promise<unknown>) => void;
+  /**
+   * The in-flight slot this request holds (#100, inflight.ts), set by admitInFlight. The router
+   * releases it when the handler returns, unless a handler took it (a stream, a voice session).
+   */
+  inflight?: InflightHold | null;
 }
 
 /**
