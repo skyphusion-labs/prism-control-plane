@@ -13,7 +13,9 @@ import type { Env } from "../src/env";
 import type { InferenceRequest, InferenceResult, InferenceRunner } from "../src/inference";
 import type { CredentialOutcome, UpstreamCredentialSource } from "../src/token-minter";
 import type { Ctx } from "../src/routes/shared";
+import type { AsyncJobRow } from "../src/store";
 import { VERSION } from "../src/version";
+import { DEFAULT_MAX_IN_FLIGHT, inFlightCap, MAX_MAX_IN_FLIGHT } from "../src/inflight";
 import { FakeLogSource, logRow } from "./fake-gateway-logs";
 import { FakeStore, testPlan } from "./fake-store";
 
@@ -1560,5 +1562,123 @@ describe("GET /v1/jobs (prism-control-plane#92)", () => {
     expect(((await one.json()) as { result: unknown }).result).toEqual({
       video: "https://cdn.invalid/v.mp4",
     });
+  });
+});
+
+describe("the per-account in-flight cap (#100)", () => {
+  // The router mints a fresh request id per request; this harness reuses one ctx, so each call here
+  // gets its own id, as a real request would.
+  let seq = 0;
+  function next(h: Harness): Ctx {
+    h.ctx.requestId = `req_inflight_${++seq}`;
+    return h.ctx;
+  }
+  function fill(h: Harness, n: number): void {
+    for (let i = 0; i < n; i++) {
+      h.store.inflight.set(`req_busy_${i}`, { account_id: "acct_1", kind: "chat", expires_at: 2_000_000_000 });
+    }
+  }
+
+  it("refuses at the cap with the existing temporal 429, before any upstream call", async () => {
+    const h = await harness({ env: { MAX_IN_FLIGHT_PER_ACCOUNT: "2" } });
+    fill(h, 2);
+    const response = await handleRequest(next(h), chat(h.key, ASK));
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("5");
+    expect(await response.json()).toMatchObject({ error: { code: "rate_limited", in_flight_cap: 2 } });
+    expect(h.runner?.calls).toHaveLength(0);
+    expect(h.store.events).toHaveLength(0);
+  });
+
+  it("admits under the cap and releases the slot when the request returns", async () => {
+    const h = await harness({ env: { MAX_IN_FLIGHT_PER_ACCOUNT: "2" } });
+    fill(h, 1);
+    const response = await handleRequest(next(h), chat(h.key, ASK));
+    expect(response.status).toBe(200);
+    expect(h.runner?.calls).toHaveLength(1);
+    // Only the pre-filled slot is left: this request's own slot was released.
+    expect([...h.store.inflight.keys()]).toEqual(["req_busy_0"]);
+    expect(h.ctx.inflight ?? null).toBeNull();
+  });
+
+  it("releases the slot on an upstream failure too", async () => {
+    const h = await harness({ result: { outcome: "timeout", waitedMs: 60_000 } });
+    const response = await handleRequest(next(h), chat(h.key, ASK));
+    expect(response.status).toBe(504);
+    expect(h.store.inflight.size).toBe(0);
+  });
+
+  it("holds no slot for a request refused before admission", async () => {
+    const h = await harness();
+    const account = h.store.accounts.get("acct_1");
+    if (account) account.spent_micro_usd = account.credit_micro_usd;
+    const claims: string[] = [];
+    const real = h.store.claimInflightSlot.bind(h.store);
+    h.store.claimInflightSlot = async (c) => {
+      claims.push(c.id);
+      return real(c);
+    };
+    const response = await handleRequest(next(h), chat(h.key, ASK));
+    expect(response.status).toBe(402);
+    expect(claims).toHaveLength(0);
+  });
+
+  it("keeps a stream in flight until its ledger row is written, then releases it", async () => {
+    const h = await harness({
+      result: { outcome: "stream", stream: sseStream(STREAM_FRAMES), gatewayLogId: "log_stream" },
+    });
+    const ctx = next(h);
+    const response = await handleRequest(ctx, chat(h.key, { ...ASK, stream: true }));
+    expect(response.status).toBe(200);
+    // The response is out, the charge is not: the slot is still held.
+    expect([...h.store.inflight.keys()]).toEqual([ctx.requestId]);
+    await response.text();
+    await Promise.all(h.deferred);
+    expect(h.store.events).toHaveLength(1);
+    expect(h.store.inflight.size).toBe(0);
+  });
+
+  it("counts a running async job against the cap, and stops counting a finished one", async () => {
+    const h = await harness({ env: { MAX_IN_FLIGHT_PER_ACCOUNT: "1" } });
+    const job: AsyncJobRow = {
+      id: "job_1",
+      account_id: "acct_1",
+      client_id: h.clientId,
+      kind: "video",
+      model_id: "m",
+      status: "running",
+      result_json: null,
+      error_code: null,
+      error_detail: null,
+      request_id: "req_job",
+      created_at: new Date(NOW.getTime() - 60_000).toISOString(),
+      updated_at: new Date(NOW.getTime() - 60_000).toISOString(),
+    };
+    await h.store.createAsyncJob(job);
+    expect((await handleRequest(next(h), chat(h.key, ASK))).status).toBe(429);
+    h.store.asyncJobs.set("job_1", { ...job, status: "succeeded" });
+    expect((await handleRequest(next(h), chat(h.key, ASK))).status).toBe(200);
+  });
+
+  it("fails closed with 503 when the slot cannot be written", async () => {
+    const h = await harness();
+    h.store.failNextInflightClaim = true;
+    const response = await handleRequest(next(h), chat(h.key, ASK));
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ error: { code: "unavailable" } });
+    expect(h.runner?.calls).toHaveLength(0);
+  });
+});
+
+describe("inFlightCap", () => {
+  it("reads 1..32, caps at 32, and defaults anything else", () => {
+    expect(inFlightCap(undefined)).toBe(DEFAULT_MAX_IN_FLIGHT);
+    expect(inFlightCap("")).toBe(DEFAULT_MAX_IN_FLIGHT);
+    expect(inFlightCap("0")).toBe(DEFAULT_MAX_IN_FLIGHT);
+    expect(inFlightCap("-3")).toBe(DEFAULT_MAX_IN_FLIGHT);
+    expect(inFlightCap("2.5")).toBe(DEFAULT_MAX_IN_FLIGHT);
+    expect(inFlightCap("abc")).toBe(DEFAULT_MAX_IN_FLIGHT);
+    expect(inFlightCap(" 7 ")).toBe(7);
+    expect(inFlightCap("1000")).toBe(MAX_MAX_IN_FLIGHT);
   });
 });

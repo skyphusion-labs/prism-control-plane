@@ -240,3 +240,24 @@ describe("the invariant travels by class, not by file", () => {
     expect(sample).toContain('balance.outcome === "allow"');
   });
 });
+
+describe("the per-account in-flight cap on the non-chat door (#100)", () => {
+  it("refuses an image at the cap before the upstream call, and releases its own slot after serving", async () => {
+    const h = await harness();
+    h.ctx.env = { ...h.ctx.env, MAX_IN_FLIGHT_PER_ACCOUNT: "1" } as Env;
+    h.store.inflight.set("req_busy", { account_id: "acct_1", kind: "chat", expires_at: 2_000_000_000 });
+    const runner = h.ctx.nonChatRunner as FakeNonChatRunner;
+    h.ctx.requestId = "req_nc_1";
+    const refused = await handleRequest(h.ctx, imageRequest(h.key));
+    expect(refused.status).toBe(429);
+    expect(await refused.json()).toMatchObject({ error: { code: "rate_limited", in_flight_cap: 1 } });
+    expect(runner.calls).toHaveLength(0);
+
+    h.store.inflight.clear();
+    h.ctx.requestId = "req_nc_2";
+    const served = await handleRequest(h.ctx, imageRequest(h.key));
+    expect(served.status).toBe(200);
+    expect(runner.calls).toHaveLength(1);
+    expect(h.store.inflight.size).toBe(0);
+  });
+});

@@ -23,6 +23,7 @@ import { errorResponse, jsonResponse } from "../http";
 import { resolveUnitPrice } from "../meter";
 import { periodBounds } from "../period";
 import { entitlesTier, planFromRow } from "../plans";
+import { admitInFlight, releaseHold, takeInflight, VOICE_HOLD_SEC } from "../inflight";
 import { checkRateLimit, inferenceBucket } from "../rate-limit";
 import { requireHandoffSecret, signSttHandoff, STT_HANDOFF_TTL_SEC } from "../stt-handoff";
 import { authFailureResponse, requireCaller, type Ctx } from "./shared";
@@ -393,11 +394,26 @@ export async function handleSttStreamUpgrade(ctx: Ctx, request: Request): Promis
     headers.set("x-prism-ws-protocol", acceptProtocol);
   }
 
+  // The in-flight cap (#100, inflight.ts). A voice session is charged when it closes, so it stays in
+  // flight for its whole life. The slot id is the request id, which the signed handoff carries, so the
+  // session DO releases it in finalize. If the DO never opens the socket, release it here.
+  const busy = await admitInFlight(ctx, account.id, "voice", VOICE_HOLD_SEC);
+  if (busy) return busy;
+  const hold = takeInflight(ctx);
+
   const stub = ctx.env.STT_SESSION.get(ctx.env.STT_SESSION.newUniqueId());
-  return stub.fetch(
-    new Request(request.url, {
-      method: request.method,
-      headers,
-    }),
-  );
+  let resp: Response;
+  try {
+    resp = await stub.fetch(
+      new Request(request.url, {
+        method: request.method,
+        headers,
+      }),
+    );
+  } catch (err) {
+    await releaseHold(ctx.store, hold, ctx.requestId);
+    throw err;
+  }
+  if (resp.status !== 101) await releaseHold(ctx.store, hold, ctx.requestId);
+  return resp;
 }

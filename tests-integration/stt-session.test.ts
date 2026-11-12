@@ -242,6 +242,20 @@ async function usageByRequest(requestId: string): Promise<Record<string, unknown
     .first<Record<string, unknown>>();
 }
 
+/** #100: the slot the upgrade door claims for a voice session, under the request id. */
+async function putVoiceSlot(seeded: Seed): Promise<void> {
+  await env.DB.prepare(`INSERT INTO inflight_slots (id, account_id, kind, expires_at) VALUES (?, ?, 'voice', ?)`)
+    .bind(seeded.requestId, seeded.accountId, Math.floor(Date.now() / 1000) + 1200)
+    .run();
+}
+
+async function voiceSlots(requestId: string): Promise<number> {
+  const r = await env.DB.prepare(`SELECT COUNT(*) AS n FROM inflight_slots WHERE id = ?`)
+    .bind(requestId)
+    .first<{ n: number }>();
+  return r?.n ?? -1;
+}
+
 beforeEach(async () => {
   // Isolated storage should start empty, but the suite still owns its
   // leftover rows if isolation is ever off. Wipe the tables this file writes.
@@ -474,6 +488,30 @@ describe("STT DO: finalize writes a usage row (red against a bare return)", () =
 
     const row = await usageByRequest(seeded.requestId);
     expect(row).toBeNull();
+  });
+
+  it("releases the session in-flight slot (#100) on finalize", async () => {
+    const seeded = await seed();
+    installFakeFlux({ logId: "aig_ok" });
+    await putVoiceSlot(seeded);
+    expect(await voiceSlots(seeded.requestId)).toBe(1);
+    const stub = requireSession().get(requireSession().newUniqueId());
+    await signedFetch(stub, seeded);
+    await callFinalize(stub);
+    expect(await voiceSlots(seeded.requestId)).toBe(0);
+    expect(await usageByRequest(seeded.requestId)).not.toBeNull();
+  });
+
+  it("releases the session in-flight slot (#100) on the discard path too", async () => {
+    const seeded = await seed();
+    installFakeFlux();
+    await putVoiceSlot(seeded);
+    const stub = requireSession().get(requireSession().newUniqueId());
+    await signedFetch(stub, seeded);
+    await env.DB.prepare(`DELETE FROM clients WHERE id = ?`).bind(seeded.clientId).run();
+    await callFinalize(stub);
+    expect(await usageByRequest(seeded.requestId)).toBeNull();
+    expect(await voiceSlots(seeded.requestId)).toBe(0);
   });
 
   it("is idempotent: a second finalize does not write a second row", async () => {

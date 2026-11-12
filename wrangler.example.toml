@@ -97,6 +97,11 @@ AI_GATEWAY_ID = "prism-proxy"
 # Milliseconds to wait for a model before answering 504. Default 60000, ceiling 120000.
 # UPSTREAM_TIMEOUT_MS = "60000"
 
+# Requests, chat streams, voice sessions and running async jobs one account may have in flight at once
+# (#100). Integer 1..32, default 4. The prepaid overshoot bound is this times one request
+# (docs/CONTRACT.md, Money semantics), so raising it raises what an account can overshoot.
+# MAX_IN_FLIGHT_PER_ACCOUNT = "4"
+
 # Worker secrets (npx wrangler secret put <NAME>):
 #
 #   CF_AIG_TOKEN       The ONE account-scoped token for all inference and gateway log reads.

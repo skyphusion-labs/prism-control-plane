@@ -628,7 +628,10 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorEnvelope" }
     RateLimited:
-      description: Too many requests. Code `rate_limited`. Honour `retry-after`.
+      description: >-
+        Too many requests. Code `rate_limited`. Honour `retry-after`. Sent for the plan request rate,
+        and when the account already has `in_flight_cap` requests, streams, voice sessions or async jobs
+        in flight (#100).
       headers:
         retry-after:
           description: Seconds to wait.
@@ -687,6 +690,11 @@ components:
             upstream_status:
               type: integer
               description: Present on upstream_error when the upstream status is known.
+            in_flight_cap:
+              type: integer
+              description: >-
+                Present on rate_limited when the refusal is the per-account in-flight cap (#100): the
+                number of requests and async jobs this account may have in flight at once.
 
     AccountSummary:
       type: object

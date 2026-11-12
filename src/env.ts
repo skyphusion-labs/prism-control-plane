@@ -107,6 +107,12 @@ export interface Env {
   UPSTREAM_TIMEOUT_MS?: string;
   /** Optional longer timeout for image/video/music/STT doors (default 300s, max 360s). */
   NONCHAT_UPSTREAM_TIMEOUT_MS?: string;
+  /**
+   * Requests and async jobs one account may have in flight at once (#100). Integer 1..32; blank or
+   * invalid is the default (inflight.ts DEFAULT_MAX_IN_FLIGHT). The overshoot bound is this times one
+   * request, so this number is part of the money contract (docs/CONTRACT.md, Money semantics).
+   */
+  MAX_IN_FLIGHT_PER_ACCOUNT?: string;
 
   /** Operator bearer. UNSET = no operator surface at all (every /admin/* route answers 503). */
   ADMIN_TOKEN?: string;

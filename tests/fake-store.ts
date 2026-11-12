@@ -24,6 +24,7 @@ import type {
   AsyncJobStatus,
   ClientRow,
   ControlPlaneStore,
+  InflightClaim,
   ModelPriceRow,
   NewClient,
   PeriodRow,
@@ -66,6 +67,10 @@ export class FakeStore implements ControlPlaneStore {
   adjustments: UsageAdjustmentRow[] = [];
   reconcileState = new Map<string, ReconcileStateRow>();
   asyncJobs = new Map<string, AsyncJobRow>();
+  /** In-flight slots (#100), keyed by id. */
+  inflight = new Map<string, { account_id: string; kind: string; expires_at: number }>();
+  /** Set to make the next claimInflightSlot throw, exercising the fail-closed path. */
+  failNextInflightClaim = false;
   /** Mirrors the D1 column that has no equivalent on `UsageEvent`, for the reverse check's window. */
   eventCreatedAt = new Map<string, string>();
   nowSeconds: number;
@@ -430,6 +435,32 @@ export class FakeStore implements ControlPlaneStore {
 
   async probeSchema() {
     if (this.probeFails) throw new Error("simulated schema probe failure");
+  }
+
+  async claimInflightSlot(c: InflightClaim) {
+    if (this.failNextInflightClaim) {
+      this.failNextInflightClaim = false;
+      throw new Error("simulated in-flight claim failure");
+    }
+    for (const [id, s] of this.inflight) {
+      if (s.account_id === c.accountId && s.expires_at <= c.nowSec) this.inflight.delete(id);
+    }
+    if (this.inflight.has(c.id)) return false;
+    let live = 0;
+    for (const s of this.inflight.values()) {
+      if (s.account_id === c.accountId && s.expires_at > c.nowSec) live++;
+    }
+    for (const j of this.asyncJobs.values()) {
+      if (j.account_id === c.accountId && j.status === "running" && j.created_at > c.asyncSinceIso) live++;
+    }
+    if (live >= c.cap) return false;
+    this.inflight.set(c.id, { account_id: c.accountId, kind: c.kind, expires_at: c.expiresAtSec });
+    return true;
+  }
+
+  async releaseInflightSlot(id: string, accountId: string) {
+    const s = this.inflight.get(id);
+    if (s && s.account_id === accountId) this.inflight.delete(id);
   }
 
   async createAsyncJob(row: AsyncJobRow) {
