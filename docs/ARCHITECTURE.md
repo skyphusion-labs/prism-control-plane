@@ -26,7 +26,7 @@ door only.
 | `workers.dev` | **off.** A second un-DNS'd door to the same metered routes is a hole, not a convenience |
 | AI Gateway | `prism-proxy` (authenticated, `collect_logs=true`, `cache_ttl=0`) |
 | D1 | `prism-control-plane` |
-| R2 | **`MEDIA`** (`prism-control-plane-media`) for Grok video ZDR ingress (`output.upload_url`). Optional: absent closes only Grok video. Every object is deleted 30 days after it is written (R2 lifecycle rule, fleet-chezmoi#2530; see `docs/CONTRACT.md`). |
+| R2 | **`MEDIA`** (`prism-control-plane-media`) for Grok video ZDR ingress (`output.upload_url`). Optional: absent closes only Grok video. Every object is deleted 30 days after it is written (R2 lifecycle rule; see `docs/CONTRACT.md`). |
 | KV / Queues | **none.** |
 | Durable Objects | **`STT_SESSION`** (Flux live STT). |
 | Cloudflare account | `fabcb25d9c7eb087110ec474a03e50d2` (prod, `@skyphusion.org`) |
@@ -468,7 +468,6 @@ behaviour that needs a binding goes behind an interface, not into a handler.
 
 ## Operating it
 
-Deploy, secret, and escrow procedure is in **`CLAUDE.md`**. In brief: the live config is a repo
-secret with its canonical copy escrowed in `crew-secrets`, Worker secrets are set once with
-`wrangler secret put` and persist across deploys, and prod ships from a tag that is already on
-`main`.
+Deploy and secret procedure is in **`AGENTS.md`**. In brief: the live config is a repo
+secret, Worker secrets are set once with `wrangler secret put` and persist across deploys,
+and prod ships from a tag that is already on `main`.
