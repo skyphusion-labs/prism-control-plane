@@ -65,7 +65,7 @@ else has read as a promise that nothing else is kept.
   lifecycle rule on that bucket deletes each object **30 days after it is written** (window set by
   Conrad, 2026-11-11; #91). Cloudflare typically removes an expired object within 24 hours of that
   age. The rule is account infrastructure, not code in this repository, because R2 lifecycle cannot
-  be declared in `wrangler.toml`. It is applied through IaC under fleet-chezmoi#2530. Nothing in the
+  be declared in `wrangler.toml`. Nothing in the
   Worker deletes media sooner: there are zero `MEDIA.delete` call sites. Access is bounded on its own,
   and sooner: a signed download URL expires after 24h (`DOWNLOAD_TTL_SEC`).
 - **The usage ledger (`usage_events`).** Counts only, never content, and it has **no published
